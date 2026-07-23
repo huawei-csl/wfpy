@@ -19,8 +19,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 .venv/bin/python -m pytest tests/test_cli.py -q
 .venv/bin/python -m pytest tests/test_rewrite.py -q
 
-# Type check (known issue: src/wfpy/runner.py:2796 assigns str|None under --strict)
-.venv/bin/python -m mypy src/wfpy --strict
+# Type check — clean; keep it that way. strict=true lives in pyproject, so the
+# bare command is already strict. `wfpy.acp_client` is exempted there (unannotated).
+.venv/bin/python -m mypy src/wfpy
 
 # Lint / format (configured in pyproject.toml, no CI/pre-commit enforcing it)
 .venv/bin/python -m ruff check src tests
