@@ -32,8 +32,7 @@ Expected output::
     3     join    1
     leftover tokens: none
 
-Tier A ends here. You now have actors, ports, tokens, queues, firing, guards,
-state, and a way to see it all happen.
+Next: 07_convergence_loop.py — looping until a condition is met.
 """
 
 import json

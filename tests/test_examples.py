@@ -44,6 +44,7 @@ EXPECTATIONS: dict[str, tuple[str, dict[str, Any], dict[str, Any]]] = {
     "04_guards": ("classifying", {"inputs": {"In": 12}}, {"Out": ["big:12"]}),
     "05_state": ("running_total", {}, {"Out": [100, 250, 400]}),
     "06_inspecting_a_run": ("traced", {"inputs": {"In": 1}}, {"Out": ["L|R"]}),
+    "07_convergence_loop": ("countdown", {"inputs": {"In": 4}}, {"Out": [10]}),
 }
 
 EXAMPLE_FILES = sorted(EXAMPLES_DIR.glob("[0-9][0-9]_*.py"))
