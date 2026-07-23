@@ -2570,6 +2570,11 @@ class TestAgentTransport:
         assert "retryAttempts" not in debug
 
     def test_invoke_agent_http_stream_retries_transient_empty_content(self, monkeypatch):
+        import pytest
+
+        # The HTTP transport ships in the optional `agent` extra.
+        pytest.importorskip("httpx")
+
         from wfpy.core import AgentSpec
         from wfpy.runner import _invoke_agent
 
