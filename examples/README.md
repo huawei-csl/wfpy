@@ -1,53 +1,46 @@
 # Examples
 
-Runnable, self-contained workflows, ordered so each one introduces a single
-idea. Read [`docs/dataflow-concepts.md`](../docs/dataflow-concepts.md) first if
-the words *actor*, *token* or *firing* are new — the examples use that
-vocabulary without re-explaining it.
+A tutorial-ordered introduction to wfpy's dataflow programming model. Each file
+introduces one idea, is runnable, and is executed by `tests/test_examples.py` on
+every test run — so an example that stops working fails CI rather than rotting.
+
+Read [`docs/dataflow-concepts.md`](../docs/dataflow-concepts.md) alongside these;
+the examples use its vocabulary (actor, token, firing, guard) without
+re-explaining it.
 
 Every example runs two ways:
 
 ```bash
-python examples/01_actor_and_ports.py     # runs it, prints the result
-wfpy run examples/01_actor_and_ports.py   # same graph, via the CLI
-wfpy plan examples/01_actor_and_ports.py --format graph   # the graph as JSON
+python examples/01_simple_task.py            # runs it, prints the result
+wfpy run examples/01_simple_task.py --input In=21   # same graph, via the CLI
+wfpy plan examples/01_simple_task.py --format graph # the graph as JSON
 ```
 
-Nothing here needs credentials, a network, or any optional dependency. Every
-file is executed by `tests/test_examples.py` on each run of the suite, so an
-example that stops working fails CI rather than rotting quietly.
+Nothing here needs credentials, a network, or an optional dependency — the one
+agent example (09) uses the offline `transport="mock"`.
 
-## Tier A — dataflow fundamentals
+## The dataflow model
 
-Plain `@task` actors, so the semantics stay in the foreground. Everything
-learned here applies unchanged to agents, because an `@agent` *is* an actor.
-
-| | Example | Introduces |
-|---|---|---|
-| 01 | [`01_actor_and_ports.py`](01_actor_and_ports.py) | Actors, typed ports, firing |
-| 02 | [`02_pipeline.py`](02_pipeline.py) | Edges are FIFO queues; tokens |
-| 03 | [`03_fan_out_and_join.py`](03_fan_out_and_join.py) | Fan-out, join, and concurrency by default |
-| 04 | [`04_guards.py`](04_guards.py) | Several actions per actor, selected by `@guard` |
-| 05 | [`05_state.py`](05_state.py) | State across firings; `loop()` as a token source |
-| 06 | [`06_inspecting_a_run.py`](06_inspecting_a_run.py) | Queue traces: what fired, and what was left over |
-| 07 | [`07_convergence_loop.py`](07_convergence_loop.py) | Feedback loops: two ports, two actions, loop until settled |
-
-## Tier B — graph shapes
-
-Structure that a plain chain of edges cannot express.
+Plain `@task` actors, so the semantics stay in the foreground. Everything here
+applies unchanged to agents, because an `@agent` *is* an actor (09).
 
 | | Example | Introduces |
 |---|---|---|
-| 08 | [`08_nested_workflows.py`](08_nested_workflows.py) | A `@workflow` used as an actor inside another |
-| 09 | [`09_loop.py`](09_loop.py) | `loop()` for bounded iteration over a collection |
-
-Routing on runtime data belongs here too, and it is done with **guards** — see
-04. (`if_()` exists for a statically-known branch; it does not route on a value
-computed at run time.)
+| 01 | [`01_simple_task.py`](01_simple_task.py) | Ports, `@action(consumes=, produces=)`, tokens, firings |
+| 02 | [`02_pipeline.py`](02_pipeline.py) | Chaining tasks; parameters (annotated field, no default) |
+| 03 | [`03_streams_and_nondeterminism.py`](03_streams_and_nondeterminism.py) | Several actions per task; `loop()` streams; nondeterminism |
+| 04 | [`04_guarded_actions.py`](04_guarded_actions.py) | `@guard` — firing conditions on values and state |
+| 05 | [`05_state.py`](05_state.py) | State fields (annotated field *with* a default) |
+| 06 | [`06_schedules.py`](06_schedules.py) | `class Schedule` — an FSM sequencing a task's actions |
+| 07 | [`07_priorities.py`](07_priorities.py) | `class Priority` — deterministic action ordering |
+| 08 | [`08_networks.py`](08_networks.py) | Sources, sinks, fan-out, and self-terminating feedback |
+| 09 | [`09_agents_are_actors.py`](09_agents_are_actors.py) | An `@agent` is a task; the offline `mock` transport |
 
 ## Reading order
 
-01 → 02 → 03 build the model. 04 and 05 add the two things that make an actor
-more than a function: choosing between behaviours, and remembering. 06 is the
-debugging tool you will want the first time a graph does nothing. 07 is the loop
-shape that an agent repair cycle is built from. 08 and 09 compose and iterate.
+01 → 02 establish tasks, ports, and wiring. 03 introduces multiple actions (and
+the nondeterminism that motivates 06 and 07). 04 adds guards, 05 adds state — the
+two things that make an actor more than a function. 06 (schedules) and 07
+(priorities) are the two ways to make action selection deterministic. 08 is the
+network-level view: sources, sinks, fan-out, feedback. 09 is the payoff — an LLM
+agent slotted into the same model.
