@@ -395,7 +395,7 @@ def main() -> None:
     """CLI entry point."""
     parser = argparse.ArgumentParser(
         prog="wfpy",
-        description="wfpy — Pythonic WorkflowLang runtime",
+        description="wfpy — Pythonic agentic workflows on actor-dataflow semantics",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 

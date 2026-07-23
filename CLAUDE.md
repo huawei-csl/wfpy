@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-`wfpy` is a Python embedding of WorkflowLang semantics: FIFO-queued dataflow scheduling with round-robin actor execution, multi-action tasks with guards, and external tool / LLM agent integration. Python 3.10+.
+`wfpy` is a Pythonic framework for agentic workflows built on actor-dataflow semantics: FIFO-queued dataflow scheduling with round-robin actor execution, multi-action tasks with guards, and external tool / LLM agent integration. Python 3.10+.
 
 ## Commands
 

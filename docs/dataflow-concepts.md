@@ -5,11 +5,9 @@ script. This page explains that model. It assumes no dataflow background, and
 every construct it describes is exercised by a runnable example under
 [`examples/`](../examples/).
 
-wfpy is a pure-Python embedding of the CAL actor model: you describe a system of
-**actors** that pass **tokens** to each other along FIFO channels, and the
-runtime decides when each actor runs. (If you know StreamBlocks/CalPy, the model
-is identical — see [Relationship to CalPy](#relationship-to-calpy) for what
-differs.)
+In wfpy you describe a system of **actors** that pass **tokens** to each other
+along FIFO channels, and the runtime decides when each actor runs. It is an
+actor-dataflow model, expressed entirely in Python decorators and run directly.
 
 ## Why a graph instead of a script
 
@@ -235,23 +233,12 @@ agent graph is runnable and testable in CI. Swapping to a real transport changes
 nothing else about the graph. See
 [`09_agents_are_actors.py`](../examples/09_agents_are_actors.py).
 
-## Relationship to CalPy
+## Beyond the core model
 
-wfpy and StreamBlocks/CalPy implement the **same** actor-dataflow model —
-actors, ports, tokens, firings, guarded actions, schedules, priorities. They
-differ in what they are *for*:
-
-- **CalPy is a compiler frontend.** It lowers the Python to the CAL dialect of
-  MLIR and on to native/GPU code, so it needs compilable, statically-typed
-  constructs: `State[Int(32)]` for state, `Int(32)` token types, explicit action
-  tags, and `capacity=`-bounded channels with backpressure.
-- **wfpy is a pure-Python runtime.** It *runs* the model directly, so state is an
-  ordinary Python field (default = state), tokens are ordinary Python values
-  (or `File`/`Resource`/`Map`), an action's tag is just its method name, and
-  channels are unbounded (no backpressure).
-
-wfpy also adds an orchestration layer CalPy has no need for: `@agent`, `@tool`,
-`@viewer`, `@context`, `@config`, and the `if_()`/`loop()` control nodes.
+The tasks, guards, schedules, and priorities above are the dataflow core. wfpy
+layers orchestration constructs on top of it: `@agent` (above), `@tool` for
+external processes, `@viewer` for inspecting a run, `@context` and `@config`,
+and the `if_()` / `loop()` control nodes. See the README for that surface.
 
 ## Sharp edges
 

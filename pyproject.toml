@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "wfpy"
 version = "1.0.0b1"
-description = "Pythonic embedding of WorkflowLang — FIFO dataflow scheduling with round-robin actor execution"
+description = "A Pythonic framework for agentic workflows, built on actor-dataflow semantics"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }

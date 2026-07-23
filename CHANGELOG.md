@@ -25,8 +25,7 @@ All notable changes to wfpy are documented here. The format follows
   `--no-interactive`, `--elicit-timeout-ms`, `--elicit-default`,
   `--elicit-require`. The `ask_user` tool is exempt from the `agent_tool_auth`
   gate and never exposes the `python`/MCP tools. Surfaced to the IDE via the
-  graph export (`askUser`) and run artifacts. See
-  `docs/superpowers/specs/2026-07-22-agent-user-elicitation-design.md`.
+  graph export (`askUser`) and run artifacts.
 
 ### Fixed
 - `@agent(prompt=...)` with no `skill=` raised `ValueError: Agent has

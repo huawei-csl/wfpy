@@ -297,7 +297,7 @@ def _build_agent_runtime_instruction(
     if extra_rules:
         extra = " " + " ".join(str(rule).strip() for rule in extra_rules if str(rule).strip())
     return (
-        "You are executing a WorkflowLang @agent task. "
+        "You are executing a wfpy @agent task. "
         "Use only the JSON payload provided by the user message as task input context. "
         "Do not use @tool placeholders like {in.port} or {param.name}; those are not expanded for @agent tasks. "
         "Read input tokens from inputs.<port> and task parameters from parameters.<name>. "
