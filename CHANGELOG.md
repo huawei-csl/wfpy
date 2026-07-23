@@ -29,6 +29,17 @@ All notable changes to wfpy are documented here. The format follows
   `docs/superpowers/specs/2026-07-22-agent-user-elicitation-design.md`.
 
 ### Fixed
+- A default `action` method (no `@action` decorator) emitted nothing unless it
+  carried a return type annotation: `def action(self, x): return x * 2` fired
+  but routed to no output port, so downstream ports silently received `None`.
+  `produces` is now inferred from the task's output ports regardless of the
+  annotation; whether output is emitted is decided at run time by the return
+  value, as before (a firing that returns `None` still enqueues nothing).
+- A multi-output action returning a dict (or list) without an explicit
+  `produces=` pushed the whole value onto every output port instead of routing
+  each value to its port. Such results are now distributed by port name (dict)
+  or position (list); single-output actions still receive the whole value, so
+  an action that legitimately returns a dict is unaffected.
 - `@agent(prompt=...)` with no `skill=` raised `ValueError: Agent has
   use_skill=true but no skill name configured` at run time, which made the
   simplest form of the decorator unusable — `use_skill` defaults to `True`, and

@@ -535,18 +535,20 @@ def _collect_actions(cls: type, ports: dict[str, PortDescriptor]) -> list[Action
                 port_name = input_ports_list[i].name or input_ports_list[i].attr_name
                 consumes[port_name] = 1
 
-        # Produces: if method returns non-None, one token to first output port
+        # Produces one token on each output port. This is independent of the
+        # return annotation: whether output is actually emitted is decided at
+        # run time by the return value (a firing that returns None enqueues
+        # nothing). Gating on the annotation here made an un-annotated
+        # `def action(self, x): return ...` emit silently to no port.
         output_ports_list = [
             pd
             for pd in ports.values()
             if pd.direction in ("out",)
             or (pd.name or pd.attr_name).lower() in ("out", "output", "result", "report", "summary")
         ]
-        produces: dict[str, int] = {}
-        return_annotation = sig.return_annotation
-        if return_annotation is not inspect.Parameter.empty and return_annotation is not None:
-            for op in output_ports_list:
-                produces[op.name or op.attr_name] = 1
+        produces: dict[str, int] = {
+            (op.name or op.attr_name): 1 for op in output_ports_list
+        }
 
         actions.append(
             ActionDef(

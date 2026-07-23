@@ -9,10 +9,6 @@ Here a two-stage ``normalize`` workflow (trim, then lowercase) is slotted into a
 larger ``greeting`` pipeline without repeating its internals. The nested
 workflow's ``In``/``Out`` are just ports on the ``stage`` actor.
 
-Every ``action`` has a return type annotation. That is not decoration: a default
-``action`` with no return annotation silently emits nothing (see
-docs/dataflow-concepts.md, "Sharp edges").
-
 This file defines two workflows (`normalize` and the top-level `greeting`), so
 the CLI needs ``--workflow`` to say which one to run.
 

@@ -242,12 +242,36 @@ def _try_fire_action(
     if result is not None:
         produces = adef.produces
         if produces is None:
-            # Auto: push to all output ports
-            for port_name, queues in actor.out_queues.items():
-                normalized = _normalize_internal_output(port_name, result)
-                for q in queues:
-                    q.enqueue(normalized)
-                    _record_edge_token(plan, q, normalized)
+            # Auto path (e.g. @action with no explicit produces=). For several
+            # output ports, a dict/list result is distributed across them by
+            # name/index — pushing the whole value to every port loses which
+            # value belongs to which port. A single output still receives the
+            # whole result, so an action that legitimately returns a dict value
+            # is unaffected.
+            out_port_names = list(effective_produces)
+            if isinstance(result, dict) and len(out_port_names) > 1:
+                for port_name in out_port_names:
+                    if port_name not in result:
+                        continue
+                    val = _normalize_internal_output(port_name, result.get(port_name))
+                    if val is not None:
+                        for q in actor.out_queues.get(port_name, []):
+                            q.enqueue(val)
+                            _record_edge_token(plan, q, val)
+            elif isinstance(result, (tuple, list)) and len(out_port_names) > 1:
+                for i, port_name in enumerate(out_port_names):
+                    if i >= len(result):
+                        continue
+                    val = _normalize_internal_output(port_name, result[i])
+                    for q in actor.out_queues.get(port_name, []):
+                        q.enqueue(val)
+                        _record_edge_token(plan, q, val)
+            else:
+                for port_name, queues in actor.out_queues.items():
+                    normalized = _normalize_internal_output(port_name, result)
+                    for q in queues:
+                        q.enqueue(normalized)
+                        _record_edge_token(plan, q, normalized)
         else:
             if isinstance(result, dict) and len(produces) > 1:
                 # Dict result → distribute by port name

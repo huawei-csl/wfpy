@@ -288,14 +288,6 @@ their declared type. See the README for details.
 Things that are easy to get wrong, all of them verified against the current
 version.
 
-**A default `action` needs a return type annotation to emit anything.** A task's
-plain `action` method (no `@action` decorator) produces output on its ports only
-if it has a `-> T` return annotation. Without one, `def action(self, x): return
-x * 2` fires, runs, and emits *nothing* — every downstream port receives `None`,
-with no error. `def action(self, x) -> int:` works. So does explicit
-`@action(produces={...})`, which does not consult the annotation. This is the
-single most confusing way to get a silently empty run.
-
 **Action parameters bind positionally.** Names are not matched to ports. If
 `Report` declares ports `Score` and `Summary` and its action is
 `def action(self, Summary, Score)`, the values arrive in *port* order, not the
@@ -309,18 +301,18 @@ runtime passes a shared-context object as the last argument. A signature that
 accidentally has one parameter too many will therefore be handed an object
 instead of failing loudly.
 
-**Multi-output tasks need `produces=`.** An action that returns a dict for
-several output ports must declare them:
+**Multi-output actions distribute a dict or list by port.** An action feeding
+several output ports returns a dict keyed by port name (or a list, positional):
 
 ```python
-@action(produces={"Doubled": 1, "Tripled": 1})
 def act(self, x: int):
     return {"Doubled": x * 2, "Tripled": x * 3}
 ```
 
-Without `produces=`, the return value is pushed to *every* output port, and a
-dict that does not match a port's type becomes `None` — silently, with no error.
-If a multi-output task is emitting `None`, this is why.
+Each port receives its own value. Declaring `@action(produces={...})` makes the
+mapping explicit and is good style for a multi-output action, but is no longer
+required for the values to route correctly. A key that names no output port, or
+a port with no matching key, is simply skipped.
 
 **`inputs=` seeds exactly one token per port.** `run(wf, inputs={"In": [1,2,3]})`
 puts a single token holding the list `[1,2,3]` on `In` — not three tokens. To
