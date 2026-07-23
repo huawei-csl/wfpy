@@ -5,9 +5,10 @@ agents and tasks are actors in a dataflow graph, connected by FIFO queues and
 fired when their inputs are ready. Independent work runs concurrently by
 default, feedback loops are ordinary edges, and the graph is exportable as data.
 
-**New to dataflow? Start with [Dataflow concepts](docs/dataflow-concepts.md)** —
-actors, ports, tokens, firing, guards, and the sharp edges worth knowing before
-you write a graph.
+**New to dataflow?** Read [Dataflow concepts](docs/dataflow-concepts.md) for the
+model — actors, ports, tokens, firings, guards, schedules, priorities — and work
+through the tutorial in [`examples/`](examples/), which builds it up one runnable
+step at a time.
 
 wfpy is fully typed and ships `py.typed` for IDE support.
 

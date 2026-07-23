@@ -1,69 +1,62 @@
-"""05 — State: actors that remember across firings.
+"""05 — Tasks with state.
 
-An actor is a long-lived object, not a function invocation. Annotated fields are
-classified by whether they have a default:
+A firing can leave information behind for later firings by writing to a **state
+field**. In wfpy — which is plain Python, not a compiled language — a state
+field is simply an annotated field **with a default** (its initial value):
 
-* ``rate: float``    — no default, so a **parameter**, fixed at construction
-* ``total: int = 0`` — has a default, so **state**, surviving every firing
-* ``_seen: int = 0`` — leading underscore, also state
+    total: int = 0      # has a default  -> state, persists across firings
 
-State is where an agent's conversation history or a running tally lives.
+Contrast with a parameter (annotated, *no* default; see 02). Fields whose name
+starts with ``_`` are also state. State is where a running total lives — or, for
+an agent task, its conversation history.
 
-To *see* state persist you need the actor to fire more than once, which means
-more than one token has to arrive. Note that ``run(inputs={"In": [1, 2, 3]})``
-would seed a single token holding the list — not three tokens. ``loop()`` over a
-collection is the way to feed a sequence: it emits one token per item, so the
-actor fires once per item and carries its state between them.
+``Sum`` accumulates every token it consumes. Because the action body is ordinary
+Python, *where* you read the field decides which value you get: reading
+``self.total`` after the update emits the running sum including the current
+token; reading it before would emit the sum of everything prior.
+
+``loop`` feeds one token per item, so ``Sum`` fires four times, carrying
+``total`` across firings.
 
 Run it::
 
     wfpy run examples/05_state.py
     python examples/05_state.py
 
-Expected output — a running total, not three independent results::
+Expected output — the running total after each token::
 
-    {'Out': [100, 250, 400]}
-    fired 3 times
+    {'Out': [1, 3, 6, 10]}
 
-Next: 06_inspecting_a_run.py — seeing which actor fired, and when.
+Next: 06_schedules.py — sequencing a task's actions with a state machine.
 """
 
-from wfpy import Port, connect, loop, run, task, workflow
-
-SALES = [100, 150, 150]
+from wfpy import Port, action, connect, loop, run, task, workflow
 
 
 @task
-class RunningTotal:
-    """Adds each amount to a total that survives between firings."""
+class Sum:
+    """Accumulate the sum of all tokens consumed so far."""
 
-    rate: float = 1.0  # has a default -> state, but used here as a fixed factor
-    total: int = 0  # state: the whole point of this example
-    _firings: int = 0  # state: leading underscore also marks state
+    total: int = 0  # default -> state
 
     class Ports:
         In = Port[int](direction="in")
         Out = Port[int](direction="out")
 
-    def action(self, amount: int) -> int:
-        self._firings += 1
-        self.total += int(amount * self.rate)
+    @action(consumes={"In": 1}, produces={"Out": 1})
+    def step(self, x: int) -> int:
+        self.total = self.total + x
         return self.total
-
-    def report(self) -> str:
-        return f"fired {self._firings} times"
 
 
 @workflow(inputs={}, outputs={"Out": int})
 def running_total() -> None:
-    """``loop()`` emits one token per item, so the actor fires once per item."""
-    sales = loop(SALES)
-    with sales:
-        accumulator = RunningTotal()
-        connect(sales.item, accumulator.In)
-        connect(accumulator.Out, "Out")
+    accumulator = Sum()
+    stream = loop([1, 2, 3, 4])
+    with stream:
+        connect(stream.item, accumulator.In)
+    connect(accumulator.Out, "Out")
 
 
 if __name__ == "__main__":
     print(run(running_total))
-    print(f"fired {len(SALES)} times")

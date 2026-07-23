@@ -28,29 +28,44 @@ from wfpy.runner import _build_workflow_graph, build_plan, export_plan_json, run
 
 EXAMPLES_DIR = Path(__file__).resolve().parent.parent / "examples"
 
-# path stem -> (workflow name, run kwargs, expected outputs)
-EXPECTATIONS: dict[str, tuple[str, dict[str, Any], dict[str, Any]]] = {
-    "01_actor_and_ports": ("doubling", {"inputs": {"In": 21}}, {"Out": [42]}),
+# path stem -> (workflow name, run kwargs, expected outputs, compare mode)
+# compare "eq" asserts equality; "sorted" compares each port's tokens as a
+# multiset (for the nondeterministic merge in 03, whose order is unspecified).
+EXPECTATIONS: dict[str, tuple[str, dict[str, Any], dict[str, Any], str]] = {
+    "01_simple_task": ("doubling", {"inputs": {"In": 21}}, {"Out": [42]}, "eq"),
     "02_pipeline": (
-        "shouting",
-        {"inputs": {"In": "  hello, dataflow  "}},
-        {"Out": ["HELLO, DATAFLOW!"]},
+        "scaled_sum",
+        {"inputs": {"A": 5, "B": 10}},
+        {"Out": [40]},
+        "eq",
     ),
-    "03_fan_out_and_join": (
-        "fan_out_join",
-        {"inputs": {"In": 1}},
-        {"Out": ["slow-a + slow-b"]},
+    "03_streams_and_nondeterminism": (
+        "merging",
+        {},
+        {"Out": [1, 2, 3, 10, 20, 30]},
+        "sorted",
     ),
-    "04_guards": ("classifying", {"inputs": {"In": 12}}, {"Out": ["big:12"]}),
-    "05_state": ("running_total", {}, {"Out": [100, 250, 400]}),
-    "06_inspecting_a_run": ("traced", {"inputs": {"In": 1}}, {"Out": ["L|R"]}),
-    "07_convergence_loop": ("countdown", {"inputs": {"In": 4}}, {"Out": [10]}),
-    "08_nested_workflows": (
-        "greeting",
-        {"inputs": {"In": "  Hello, WORLD  "}},
-        {"Out": ["greeting: hello, world!"]},
+    "04_guarded_actions": (
+        "splitting",
+        {},
+        {"P": [1, 0, 4], "N": [-2]},
+        "eq",
     ),
-    "09_loop": ("running_squares", {}, {"Out": [1, 5, 14, 30]}),
+    "05_state": ("running_total", {}, {"Out": [1, 3, 6, 10]}, "eq"),
+    "06_schedules": ("alternating", {}, {"Out": [1, 2, 3, 4, 5, 6]}, "eq"),
+    "07_priorities": (
+        "routing",
+        {},
+        {"X": [4, 6], "Y": [9], "Z": [5]},
+        "eq",
+    ),
+    "08_networks": ("running_sum", {}, {"Out": [1, 2, 3, 4, 5, 6]}, "eq"),
+    "09_agents_are_actors": (
+        "summarize",
+        {"inputs": {"In": "a long paragraph of text"}},
+        {"Out": ["[summary] a one-line summary"]},
+        "eq",
+    ),
 }
 
 EXAMPLE_FILES = sorted(EXAMPLES_DIR.glob("[0-9][0-9]_*.py"))
@@ -68,7 +83,7 @@ def test_every_example_file_is_covered():
 
 @pytest.mark.parametrize("path", EXAMPLE_FILES, ids=_stem)
 def test_example_runs_and_produces_documented_result(path: Path, tmp_path: Path):
-    workflow_name, run_kwargs, expected = EXPECTATIONS[path.stem]
+    workflow_name, run_kwargs, expected, compare = EXPECTATIONS[path.stem]
 
     module = _load_module(str(path))
     workflows = _find_workflows(module)
@@ -78,7 +93,11 @@ def test_example_runs_and_produces_documented_result(path: Path, tmp_path: Path)
     kwargs.setdefault("out_dir", str(tmp_path))
     outputs = run(workflows[workflow_name], verbose=False, **kwargs)
 
-    assert outputs == expected
+    if compare == "sorted":
+        norm = {k: sorted(v) for k, v in outputs.items()}
+        assert norm == {k: sorted(v) for k, v in expected.items()}
+    else:
+        assert outputs == expected
 
 
 @pytest.mark.parametrize("path", EXAMPLE_FILES, ids=_stem)
