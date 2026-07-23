@@ -1,5 +1,7 @@
 # wfpy — Pythonic agentic workflows on actor-dataflow semantics
 
+[![CI](https://github.com/huawei-csl/wfpy/actions/workflows/ci.yml/badge.svg)](https://github.com/huawei-csl/wfpy/actions/workflows/ci.yml)
+
 A Pythonic framework for agentic workflows, built on actor-dataflow semantics:
 agents and tasks are actors in a dataflow graph, connected by FIFO queues and
 fired when their inputs are ready. Independent work runs concurrently by
