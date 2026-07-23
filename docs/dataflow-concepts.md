@@ -19,9 +19,10 @@ not write threading code, and you do not write `asyncio.gather`.
 
 **Repetition is data-driven.** An actor fires once per token that arrives, so
 "do this for each item" is `loop()` emitting tokens rather than a `for` loop
-wrapped around a call — and the actor keeps its state across every firing. (Full
-convergence loops, where output is fed back until it settles, have a caveat:
-see [Sharp edges](#sharp-edges).)
+wrapped around a call, and the actor keeps its state across every firing. A
+convergence loop — feed output back until it settles, the shape of an agent
+repair loop — is a feedback edge into a dedicated port; see
+[Graph shapes](#graph-shapes).
 
 **Actors keep state between runs.** A node is a long-lived object, not a
 function invocation, so an agent that needs conversation memory keeps it in a
@@ -193,11 +194,53 @@ machinery. (Pointing two edges at one input port is not a merge; see
 [Sharp edges](#sharp-edges).)
 
 **Iteration over a collection.** `loop(items)` emits one token per item, so a
-downstream actor fires once per item and carries its state between firings. This
-is the supported way to drive an actor repeatedly.
+downstream actor fires once per item and carries its state between firings — the
+right tool when you know the items up front.
 
-**Conditional and iteration.** `if_()` and `loop()` for branching and repetition
-that the graph's shape cannot express on its own.
+**Convergence loop (feed output back until it settles).** Because an input port
+does not fan in, you cannot route feedback into the same port that carries the
+initial input. The pattern is **two input ports and two actions**: one port and
+action for the first arrival, a second port and action for each fed-back value,
+with the loop-back edge landing on the feedback port. Each action decides
+whether to emit again or to finish.
+
+```python
+@task
+class Countdown:
+    total: int = 0
+
+    class Ports:
+        Start = Port[int](direction="in")    # initial input — one source
+        Back = Port[int](direction="in")     # feedback — one source
+        Again = Port[int](direction="out")   # wired back into Back
+        Done = Port[int](direction="out")
+
+    @action(consumes={"Start": 1}, produces={"Again": 1, "Done": 1})
+    def begin(self, n: int):
+        self.total += n
+        return {"Again": n - 1} if n > 1 else {"Done": self.total}
+
+    @action(consumes={"Back": 1}, produces={"Again": 1, "Done": 1})
+    def step(self, n: int):
+        self.total += n
+        return {"Again": n - 1} if n > 1 else {"Done": self.total}
+
+@workflow(inputs={"In": int}, outputs={"Out": int})
+def countdown():
+    c = Countdown()
+    connect("In", c.Start)
+    connect(c.Again, c.Back)   # feedback lands on a separate port, not fan-in
+    connect(c.Done, "Out")
+```
+
+Two actions are needed because a single action consuming both ports would need a
+token on *each* to fire (a join), which is the wrong rule for a loop. Each action
+returns a dict naming just one output port, so it emits on `Again` *or* `Done`,
+never both. This is the shape of an agent repair loop: generate on `Start`,
+inspect, and on failure send the work back through `Again → Back`.
+
+**Conditional and iteration.** `if_()` and `loop()` for branching and bounded
+iteration that the graph's shape cannot express on its own.
 
 **Nesting.** A `@workflow` can be used as an actor inside another workflow, so a
 subgraph gets reused as a unit.
@@ -279,10 +322,9 @@ feed a sequence, have a source actor emit the items.
 takes from a single source, so pointing two producers at one input port is not a
 merge — the second edge is simply not read. To combine several sources, give the
 actor one input port per source and let it join them (above). The corollary for
-loops: a feedback edge into a port that also carries the initial input does not
-work, because that would be fan-in. Drive an actor repeatedly with `loop()`;
-a convergence loop that feeds output back until it settles is not expressible by
-routing an edge back into an occupied input port.
+loops: never route a feedback edge into the port that carries the initial input,
+because that would be fan-in. A convergence loop instead uses a *separate*
+feedback port with its own action — the two-port, two-action pattern above.
 
 **Leftover tokens are reported, not fatal.** A run that ends with tokens still
 sitting in a queue warns rather than fails. It usually means a join never got

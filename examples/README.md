@@ -30,9 +30,11 @@ learned here applies unchanged to agents, because an `@agent` *is* an actor.
 | 04 | [`04_guards.py`](04_guards.py) | Several actions per actor, selected by `@guard` |
 | 05 | [`05_state.py`](05_state.py) | State across firings; `loop()` as a token source |
 | 06 | [`06_inspecting_a_run.py`](06_inspecting_a_run.py) | Queue traces: what fired, and what was left over |
+| 07 | [`07_convergence_loop.py`](07_convergence_loop.py) | Feedback loops: two ports, two actions, loop until settled |
 
 ## Reading order
 
 01 → 02 → 03 build the model. 04 and 05 add the two things that make an actor
 more than a function: choosing between behaviours, and remembering. 06 is the
-debugging tool you will want the first time a graph does nothing.
+debugging tool you will want the first time a graph does nothing. 07 is the loop
+shape that an agent repair cycle is built from.
