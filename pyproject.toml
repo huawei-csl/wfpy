@@ -1,0 +1,73 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wfpy"
+version = "1.0.0b1"
+description = "Pythonic embedding of WorkflowLang — FIFO dataflow scheduling with round-robin actor execution"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "wf-lang contributors" }]
+
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "License :: OSI Approved :: Apache Software License",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+    "Typing :: Typed",
+]
+
+dependencies = ["libcst>=1.4"]
+
+[project.urls]
+Source = "https://github.com/huawei-csl/wfpy"
+Issues = "https://github.com/huawei-csl/wfpy/issues"
+
+[project.optional-dependencies]
+# `agent` covers the @agent decorator runtimes: the HTTP API transport (httpx),
+# MCP tool bridging (mcp), and the opencode-acp transport (agent-client-protocol,
+# imported as `acp` — required for transport="opencode-acp").
+agent = ["httpx>=0.27", "mcp>=1.9", "agent-client-protocol>=0.10"]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "mypy>=1.10",
+    "ruff>=0.15",
+]
+
+[project.scripts]
+wfpy = "wfpy.cli:main"
+wfpy-sidecar = "wfpy.sidecar:run_sidecar"
+wfpy-sidecar-op = "wfpy.sidecar_cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+warn_return_any = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"
