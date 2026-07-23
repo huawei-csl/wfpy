@@ -12,6 +12,7 @@ import hashlib
 import json
 import sys
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any
 
 import libcst as cst
@@ -33,7 +34,7 @@ _OP_ALIASES = {
 }
 
 # Query ops (read-only): bare op name → callable(engine, args) -> diagnostic dict.
-_QUERY_OPS = {
+_QUERY_OPS: dict[str, Callable[[RewriteEngine, dict[str, Any]], dict[str, Any]]] = {
     "listTaskTypes": lambda engine, args: {"types": engine.list_task_types(**args)},
     "listInstanceNames": lambda engine, args: {"names": engine.list_instance_names(**args)},
     "listWorkflowTypes": lambda engine, args: {"types": engine.list_workflow_types()},

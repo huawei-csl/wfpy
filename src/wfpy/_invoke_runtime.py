@@ -87,7 +87,7 @@ def _agent_retry_backoff_seconds(attempt: int) -> float:
     """Compute exponential backoff delay in seconds for *attempt*."""
 
     return min(
-        AGENT_RETRY_BASE_DELAY_MS * (2**attempt) / 1000,
+        AGENT_RETRY_BASE_DELAY_MS * (2.0**attempt) / 1000,
         AGENT_MAX_INTERACTIVE_BACKOFF_MS / 1000,
     )
 
@@ -424,8 +424,8 @@ def _invoke_agent(
 
     think_disabled = False
     tool_round = 0
-    firing_messages: list[ChatMessage] = [{"role": "user", "content": payload_text}]
-    response_debug: dict[str, Any] = {}
+    firing_messages = [{"role": "user", "content": payload_text}]
+    response_debug = {}
 
     # ── Usage / cost accumulation ────────────────────────────────────
     total_prompt_tokens = 0
@@ -439,7 +439,7 @@ def _invoke_agent(
     # ── Retry + tool-calling loop ────────────────────────────────────
     # `attempt` counts transient-error retries (separate from tool rounds).
     # Tool rounds are counted by `tool_round` and do NOT consume retry slots.
-    last_error: Exception | None = None
+    last_error = None
     attempt = 0
     while attempt < AGENT_MAX_RETRIES:
         try:

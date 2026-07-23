@@ -282,8 +282,8 @@ def _process_opencode_event(
             or container.get("sessionId")
             or container.get("session_id")
         )
-        if not session_value and isinstance(container.get("session"), dict):
-            session_obj = container.get("session")
+        session_obj = container.get("session")
+        if not session_value and isinstance(session_obj, dict):
             session_value = (
                 session_obj.get("id")
                 or session_obj.get("sessionID")
@@ -293,10 +293,10 @@ def _process_opencode_event(
             debug_meta["opencodeSessionID"] = session_value.strip()
 
         # tool name
-        tool_name = container.get("name") or container.get("tool") or container.get("toolName")
-        if isinstance(tool_name, str) and tool_name.strip():
+        evt_tool_name = container.get("name") or container.get("tool") or container.get("toolName")
+        if isinstance(evt_tool_name, str) and evt_tool_name.strip():
             tool_names: set[str] = debug_meta.setdefault("_tool_names", set())
-            tool_names.add(tool_name.strip())
+            tool_names.add(evt_tool_name.strip())
 
         # server name
         server_name = (
@@ -559,8 +559,8 @@ def _parse_opencode_json_events(raw_stdout: str) -> tuple[str, dict[str, Any]]:
                 or container.get("sessionId")
                 or container.get("session_id")
             )
-            if not session_value and isinstance(container.get("session"), dict):
-                session_obj = container.get("session")
+            session_obj = container.get("session")
+            if not session_value and isinstance(session_obj, dict):
                 session_value = (
                     session_obj.get("id")
                     or session_obj.get("sessionID")

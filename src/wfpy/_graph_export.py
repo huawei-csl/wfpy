@@ -492,7 +492,7 @@ def _build_agent_meta(meta: dict[str, Any], rec: Any) -> None:
 
         _ov_cfgs: list[dict[str, Any]] = []
         for _ov in rec.meta.agent_spec.output_validators:
-            _cfg: dict[str, Any] = {
+            _ov_cfg: dict[str, Any] = {
                 "kind": _ov.kind,
                 "cmd": _ov.cmd,
                 "args": _ov.args,
@@ -500,13 +500,13 @@ def _build_agent_meta(meta: dict[str, Any], rec: Any) -> None:
                 "severityThreshold": _ov.severity_threshold,
             }
             if _ov.ports:
-                _cfg["ports"] = _ov.ports
+                _ov_cfg["ports"] = _ov.ports
             if _ov.kind == "lsp":
                 if _ov.language_id:
-                    _cfg["languageId"] = _ov.language_id
+                    _ov_cfg["languageId"] = _ov.language_id
                 if _ov.extra_flags:
-                    _cfg["extraFlags"] = _ov.extra_flags
-            _ov_cfgs.append(_cfg)
+                    _ov_cfg["extraFlags"] = _ov.extra_flags
+            _ov_cfgs.append(_ov_cfg)
         agent_args.append(
             {
                 "name": "outputValidators",
