@@ -17,10 +17,11 @@ and they are the reason wfpy exists:
 on each other run at the same time because nothing says they must not. You do
 not write threading code, and you do not write `asyncio.gather`.
 
-**Cycles are ordinary.** An agent that emits a draft, a validator that rejects
-it, and an edge back to the agent is just an edge back to the agent. Retry,
-critique-and-revise, and repair loops are the graph's natural shape rather than
-a `while` loop wrapped around a call.
+**Repetition is data-driven.** An actor fires once per token that arrives, so
+"do this for each item" is `loop()` emitting tokens rather than a `for` loop
+wrapped around a call — and the actor keeps its state across every firing. (Full
+convergence loops, where output is fed back until it settles, have a caveat:
+see [Sharp edges](#sharp-edges).)
 
 **Actors keep state between runs.** A node is a long-lived object, not a
 function invocation, so an agent that needs conversation memory keeps it in a
@@ -187,9 +188,9 @@ its own token, and they run concurrently.
 have a token, which makes a join a synchronisation point without any extra
 machinery.
 
-**Feedback.** An edge from a later actor back to an earlier one. This is how
-repair loops are built: agent produces, validator inspects, and on failure sends
-work back. There is no special construct; it is an edge.
+**Iteration over a collection.** `loop(items)` emits one token per item, so a
+downstream actor fires once per item and carries its state between firings. This
+is the supported way to drive an actor repeatedly.
 
 **Conditional and iteration.** `if_()` and `loop()` for branching and repetition
 that the graph's shape cannot express on its own.
@@ -269,6 +270,14 @@ If a multi-output task is emitting `None`, this is why.
 **`inputs=` seeds exactly one token per port.** `run(wf, inputs={"In": [1,2,3]})`
 puts a single token holding the list `[1,2,3]` on `In` — not three tokens. To
 feed a sequence, have a source actor emit the items.
+
+**An input port consumes only from its first incoming edge.** Connecting two
+producers to one input port creates two queues, and firing reads `queues[0]`
+only — tokens on the second queue are never consumed, silently. The practical
+consequence is that a feedback edge into a port that *also* receives the initial
+input is dead: the loop never turns. Use `loop()` to drive an actor repeatedly.
+Convergence-style retry loops, where output is fed back until it settles, are
+not currently expressible as a plain cycle.
 
 **Leftover tokens are reported, not fatal.** A run that ends with tokens still
 sitting in a queue warns rather than fails. It usually means a join never got
