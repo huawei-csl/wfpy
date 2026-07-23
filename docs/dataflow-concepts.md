@@ -182,11 +182,15 @@ debugging, or a test that asserts on sequencing.
 **Chain.** `a.Out -> b.In -> c.In`. The everyday pipeline.
 
 **Fan-out.** One output port connected to several consumers. Every consumer gets
-its own token, and they run concurrently.
+its own token, and they run concurrently. Fan-out is a property of *outputs*: an
+output port drives as many edges as you connect to it.
 
-**Join.** An actor with several input ports. It only fires once *all* of them
+**Join.** Inputs are the opposite — an input port does not fan *in*. It takes
+from one source, so combining several producers means an actor with several
+input *ports*, one per source. Such an actor only fires once *all* of its ports
 have a token, which makes a join a synchronisation point without any extra
-machinery.
+machinery. (Pointing two edges at one input port is not a merge; see
+[Sharp edges](#sharp-edges).)
 
 **Iteration over a collection.** `loop(items)` emits one token per item, so a
 downstream actor fires once per item and carries its state between firings. This
@@ -271,13 +275,14 @@ If a multi-output task is emitting `None`, this is why.
 puts a single token holding the list `[1,2,3]` on `In` — not three tokens. To
 feed a sequence, have a source actor emit the items.
 
-**An input port consumes only from its first incoming edge.** Connecting two
-producers to one input port creates two queues, and firing reads `queues[0]`
-only — tokens on the second queue are never consumed, silently. The practical
-consequence is that a feedback edge into a port that *also* receives the initial
-input is dead: the loop never turns. Use `loop()` to drive an actor repeatedly.
-Convergence-style retry loops, where output is fed back until it settles, are
-not currently expressible as a plain cycle.
+**Input ports do not fan in.** Outputs fan out; inputs do not. An input port
+takes from a single source, so pointing two producers at one input port is not a
+merge — the second edge is simply not read. To combine several sources, give the
+actor one input port per source and let it join them (above). The corollary for
+loops: a feedback edge into a port that also carries the initial input does not
+work, because that would be fan-in. Drive an actor repeatedly with `loop()`;
+a convergence loop that feeds output back until it settles is not expressible by
+routing an edge back into an occupied input port.
 
 **Leftover tokens are reported, not fatal.** A run that ends with tokens still
 sitting in a queue warns rather than fails. It usually means a join never got
