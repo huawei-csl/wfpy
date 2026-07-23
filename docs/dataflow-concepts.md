@@ -288,6 +288,14 @@ their declared type. See the README for details.
 Things that are easy to get wrong, all of them verified against the current
 version.
 
+**A default `action` needs a return type annotation to emit anything.** A task's
+plain `action` method (no `@action` decorator) produces output on its ports only
+if it has a `-> T` return annotation. Without one, `def action(self, x): return
+x * 2` fires, runs, and emits *nothing* — every downstream port receives `None`,
+with no error. `def action(self, x) -> int:` works. So does explicit
+`@action(produces={...})`, which does not consult the annotation. This is the
+single most confusing way to get a silently empty run.
+
 **Action parameters bind positionally.** Names are not matched to ports. If
 `Report` declares ports `Score` and `Summary` and its action is
 `def action(self, Summary, Score)`, the values arrive in *port* order, not the
