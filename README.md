@@ -14,13 +14,29 @@ step at a time.
 
 wfpy is fully typed and ships `py.typed` for IDE support.
 
-## Quick start
+## Install
+
+Each [release](https://github.com/huawei-csl/wfpy/releases) attaches a built
+wheel. Install a specific version straight from GitHub:
 
 ```bash
-pip install -e .                 # from this repo's root
-# LLM agent support (@agent decorator: HTTP API, MCP tools, opencode-acp transport):
-pip install -e ".[agent]"
+# pinned release wheel (no clone needed)
+pip install "wfpy @ https://github.com/huawei-csl/wfpy/releases/download/v1.0.0b1/wfpy-1.0.0b1-py3-none-any.whl"
 
+# or download the .whl from the Releases page and install the file
+pip install ./wfpy-1.0.0b1-py3-none-any.whl
+
+# or build from a tagged source
+pip install "git+https://github.com/huawei-csl/wfpy@v1.0.0b1"
+```
+
+Add the `agent` extra for the `@agent` transports (HTTP API, MCP tools,
+opencode-acp): append `[agent]` to the requirement, e.g.
+`pip install "wfpy[agent] @ <wheel-url>"`.
+
+For local development, clone and install editable: `pip install -e ".[dev]"`.
+
+```bash
 wfpy run my_workflow.py          # run a workflow
 ```
 

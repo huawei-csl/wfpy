@@ -1,0 +1,61 @@
+name: Release
+
+# Cutting a release (maintainers):
+#   1. Bump `version` in pyproject.toml (PEP 440, e.g. 1.0.0b2 or 1.0.0).
+#   2. Merge that to main.
+#   3. Tag it and push:  git tag v1.0.0b2 && git push origin v1.0.0b2
+# Pushing the `v<version>` tag runs this workflow, which builds the sdist +
+# wheel and publishes them as a GitHub Release. The tag must match the
+# pyproject version, or the run fails.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write # create the GitHub Release
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Check the tag matches the pyproject version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          ver="$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")"
+          echo "tag=v$tag  pyproject=$ver"
+          if [ "$tag" != "$ver" ]; then
+            echo "::error::tag v$tag does not match pyproject version $ver — bump pyproject.toml first"
+            exit 1
+          fi
+
+      - name: Build sdist + wheel
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build
+
+      - name: Smoke-test the built wheel
+        run: |
+          python -m venv /tmp/smoke
+          /tmp/smoke/bin/pip install --quiet dist/*.whl
+          /tmp/smoke/bin/python -c "import wfpy; print('import OK:', wfpy.__doc__.splitlines()[0])"
+          /tmp/smoke/bin/wfpy --help > /dev/null && echo "CLI OK"
+
+      - name: Publish the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Mark PEP 440 pre-releases (a/b/rc) as GitHub pre-releases.
+          prerelease=""
+          case "$GITHUB_REF_NAME" in
+            *a* | *b* | *rc*) prerelease="--prerelease" ;;
+          esac
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            $prerelease
