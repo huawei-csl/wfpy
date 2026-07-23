@@ -1,4 +1,4 @@
-"""wfpy — Pythonic embedding of WorkflowLang.
+"""wfpy — Pythonic agentic workflows on actor-dataflow semantics.
 
 FIFO-queued dataflow scheduling with round-robin actor execution,
 multi-action tasks with guards, and external tool / LLM agent integration.

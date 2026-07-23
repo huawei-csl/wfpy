@@ -1,6 +1,6 @@
-# wfpy — Pythonic WorkflowLang
+# wfpy — Pythonic agentic workflows on actor-dataflow semantics
 
-A Python embedding of WorkflowLang semantics for orchestrating LLM agents:
+A Pythonic framework for agentic workflows, built on actor-dataflow semantics:
 agents and tasks are actors in a dataflow graph, connected by FIFO queues and
 fired when their inputs are ready. Independent work runs concurrently by
 default, feedback loops are ordinary edges, and the graph is exportable as data.
@@ -108,12 +108,8 @@ wfpy/
 └── __init__.py   # public API re-exports
 ```
 
-Design documents live under [docs/](docs/).
-
-Design note for extending `@agent` to local CLI backends (OpenCode / Claude
-Code / Codex) is tracked in:
-
-- `docs/agent-cli-backends-plan.md`
+Documentation lives under [docs/](docs/): the [dataflow model](docs/dataflow-concepts.md)
+and the [sidecar](docs/sidecar.md).
 
 ## Resource draft
 

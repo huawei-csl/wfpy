@@ -487,7 +487,7 @@ def _handle_request(payload: dict[str, Any]) -> SidecarResponse:
         # Accept canonical / shorthand connection args (sourceId/targetId/source/target).
         if op == "connect":
             args = _normalize_connect_args(args)
-            # Enforce the connection preflight on the actual mutation (parity with calpy):
+            # Enforce the connection preflight on the actual mutation:
             # reject a cross-scope / wrong-direction / type-mismatched edge at write time,
             # not just on the checkConnection dry-run. Only when both endpoints are exprs.
             src_expr, dst_expr = args.get("from_expr"), args.get("to_expr")

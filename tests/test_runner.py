@@ -1222,7 +1222,7 @@ class TestAgentConstants:
     def test_runtime_instruction(self):
         instr = _build_agent_runtime_instruction()
         assert "outputs" in instr
-        assert "WorkflowLang" in instr
+        assert "wfpy @agent task" in instr
 
     def test_runtime_instruction_mentions_empty_string_for_absent_multi_output_files(self):
         ports = {
@@ -2148,8 +2148,8 @@ class TestAgentTransport:
         )
 
         effective_prompt = captured["kwargs"].get("effective_prompt", "")
-        assert effective_prompt.startswith("prompt\n\nYou are executing a WorkflowLang @agent task.")
-        assert effective_prompt.count("You are executing a WorkflowLang @agent task.") == 1
+        assert effective_prompt.startswith("prompt\n\nYou are executing a wfpy @agent task.")
+        assert effective_prompt.count("You are executing a wfpy @agent task.") == 1
         assert effective_prompt.count("Declared output ports are: out.") == 1
         assert effective_prompt.count("extra runtime rule") == 1
 
