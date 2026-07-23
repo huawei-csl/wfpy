@@ -1,8 +1,13 @@
 # wfpy — Pythonic WorkflowLang
 
-A Python embedding of WorkflowLang semantics: FIFO-queued
-dataflow scheduling with round-robin actor execution, multi-action tasks with
-guards, and external tool / LLM agent integration.
+A Python embedding of WorkflowLang semantics for orchestrating LLM agents:
+agents and tasks are actors in a dataflow graph, connected by FIFO queues and
+fired when their inputs are ready. Independent work runs concurrently by
+default, feedback loops are ordinary edges, and the graph is exportable as data.
+
+**New to dataflow? Start with [Dataflow concepts](docs/dataflow-concepts.md)** —
+actors, ports, tokens, firing, guards, and the sharp edges worth knowing before
+you write a graph.
 
 wfpy is fully typed and ships `py.typed` for IDE support.
 
