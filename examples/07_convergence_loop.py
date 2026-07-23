@@ -30,7 +30,9 @@ Expected output — each result is the sum 1..n, reached by looping n times::
     In=5 -> {'Out': [15]}
 
 Tier A ends here. You now have actors, ports, tokens, queues, firing, guards,
-state, both kinds of repetition, and a way to inspect a run.
+state, feedback loops, and a way to inspect a run.
+
+Next (Tier B): 08_nested_workflows.py — composing graphs.
 """
 
 from wfpy import Port, action, connect, run, task, workflow

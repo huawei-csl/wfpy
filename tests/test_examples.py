@@ -45,6 +45,12 @@ EXPECTATIONS: dict[str, tuple[str, dict[str, Any], dict[str, Any]]] = {
     "05_state": ("running_total", {}, {"Out": [100, 250, 400]}),
     "06_inspecting_a_run": ("traced", {"inputs": {"In": 1}}, {"Out": ["L|R"]}),
     "07_convergence_loop": ("countdown", {"inputs": {"In": 4}}, {"Out": [10]}),
+    "08_nested_workflows": (
+        "greeting",
+        {"inputs": {"In": "  Hello, WORLD  "}},
+        {"Out": ["greeting: hello, world!"]},
+    ),
+    "09_loop": ("running_squares", {}, {"Out": [1, 5, 14, 30]}),
 }
 
 EXAMPLE_FILES = sorted(EXAMPLES_DIR.glob("[0-9][0-9]_*.py"))
