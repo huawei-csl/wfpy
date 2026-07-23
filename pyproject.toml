@@ -56,9 +56,11 @@ python_version = "3.10"
 strict = true
 warn_return_any = true
 
-# `acp` (agent-client-protocol) ships no type stubs.
+# Optional `agent`-extra dependencies: absent on a plain `[dev]` install, and
+# `acp` (agent-client-protocol) ships no stubs even when present. Without these,
+# `mypy src/wfpy` fails on a fresh clone for anyone who skipped the extra.
 [[tool.mypy.overrides]]
-module = ["acp", "acp.*"]
+module = ["acp", "acp.*", "httpx", "httpx.*", "mcp", "mcp.*"]
 ignore_missing_imports = true
 
 # The opencode-acp transport module predates the typing pass and is not
