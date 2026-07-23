@@ -50,6 +50,7 @@ from wfpy._agent_tools_runtime import (
     _run_python_tool,
     _sanitize_tool_name,
 )
+from wfpy._mock_agent_runtime import MOCK_TRANSPORT, invoke_mock_agent
 from wfpy.core import AgentSpec
 
 if TYPE_CHECKING:  # import cycle: runner imports this module at runtime
@@ -195,6 +196,10 @@ def _invoke_agent(
     (user + tool rounds + assistant) — used for stateful chat history.
     """
     transport = _normalize_agent_transport(spec)
+    if transport == MOCK_TRANSPORT:
+        # Offline: no model, no network, no credentials. Returns before any
+        # provider/API-key resolution so a mock graph runs on a bare install.
+        return invoke_mock_agent(spec, payload_text, verbose, output_ports=output_ports)
     if transport in {"opencode-cli", "opencode-acp", "claude-cli", "codex-cli"}:
         cli_tools_mode = _normalize_cli_tools_mode(spec, plan_options)
         active_cli_session_id = str(cli_session_id or "").strip()

@@ -7,6 +7,15 @@ All notable changes to wfpy are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- `@agent(transport="mock")` (alias `"offline"`): runs an agent actor with no
+  model, no network call and no credentials. The actor fires under the normal
+  dataflow rules and emits a value on every declared output port, so a graph's
+  wiring — fan-out and join, repair feedback loops, guard routing, firing order
+  — is exercisable in CI without spending tokens or pinning behaviour to a
+  model's wording. Values come from `mock_outputs={port: value}` (camelCase
+  `mockOutputs`) when given, and are otherwise synthesized from each port's
+  declared type, so an `int` port receives an `int` and a `File` port is
+  materialized as a real file.
 - `@agent(ask_user=True)` (camelCase `askUser`): HTTP-transport agents can pause
   mid-firing and ask the user a question via the builtin `ask_user` tool, then
   continue with the reply folded into their context. The answer source resolves
@@ -18,6 +27,14 @@ All notable changes to wfpy are documented here. The format follows
   gate and never exposes the `python`/MCP tools. Surfaced to the IDE via the
   graph export (`askUser`) and run artifacts. See
   `docs/superpowers/specs/2026-07-22-agent-user-elicitation-design.md`.
+
+### Fixed
+- `@agent(prompt=...)` with no `skill=` raised `ValueError: Agent has
+  use_skill=true but no skill name configured` at run time, which made the
+  simplest form of the decorator unusable — `use_skill` defaults to `True`, and
+  every prior workflow happened to configure a skill. It now means "include the
+  configured skill", so an agent with no skill named simply has none to include.
+  A skill that *is* named but cannot be read still raises.
 
 ## [1.0.0b1] — 2026-07-06
 

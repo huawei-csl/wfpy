@@ -418,11 +418,14 @@ class AgentSpec:
     # Legacy — kept for backward compatibility
     output_validators: list[AgentOutputValidator] | None = None  # per-agent output validation
     # Invocation backend transport
-    transport: str = "http"  # "http" | "opencode-cli" | "claude-cli" | "codex-cli"
+    transport: str = "http"  # "http" | "opencode-cli" | "claude-cli" | "codex-cli" | "mock"
     # CLI tool execution mode for non-http transports
     cli_tools_mode: str = "wfpy-none"  # "wfpy-none" | "native"
     # Reasoning effort for opencode CLI (--variant flag)
     variant: str = ""  # "max" | "high" | "minimal" | "" (default)
+    # transport="mock" only: fixed {port: value} outputs. Ports left unlisted are
+    # synthesized from their declared type.
+    mock_outputs: dict[str, Any] | None = None
 
 
 def _normalize_context_scopes(raw: Any) -> list[str]:
@@ -1032,6 +1035,8 @@ def agent(
     cliToolsMode: str | None = None,
     variant: str | None = None,
     reasoningEffort: str | None = None,
+    mock_outputs: dict[str, Any] | None = None,
+    mockOutputs: dict[str, Any] | None = None,
 ) -> Any:
     """Decorator marking a class as an LLM agent task.
 
@@ -1174,6 +1179,7 @@ def agent(
             lsp_max_repair_attempts=lsp_shorthand["lsp_max_repair_attempts"],
             output_validators=parsed_validators,
             variant=effective_variant,
+            mock_outputs=mock_outputs if mockOutputs is None else mockOutputs,
         )
         return klass
 

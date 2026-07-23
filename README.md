@@ -52,11 +52,34 @@ def double_pipeline():
 | FIFO round-robin scheduler | ✅ |
 | `@tool(cmd=...)` external process tasks | ✅ |
 | `@agent(prompt=...)` LLM tasks | ✅ |
+| `@agent(transport="mock")` offline agents (no model, no credentials) | ✅ |
 | `@context(read=[...], write=[...])` task context policy | ✅ |
 | `@viewer(action_name=..., inputs=[...], viewType=...)` sink/view tasks | ✅ |
 | Nested workflows | ✅ |
 | CLI (`wfpy run`) | ✅ |
 | JSON plan IR export | ✅ |
+
+## Running agents offline
+
+`transport="mock"` fires an `@agent` actor without a model, a network call or
+any credentials. The actor still obeys the normal firing rules and still emits a
+value on every declared output port, so the *shape* of a graph — fan-out and
+join, repair feedback loops, guard routing, firing order — can be tested in CI
+without spending tokens or depending on how a model happens to word things.
+
+```python
+@agent(prompt="Summarize the input.", transport="mock",
+       mock_outputs={"Summary": "a concise summary"})
+class Summarizer:
+    class Ports:
+        In = Port[str](direction="in")
+        Summary = Port[str](direction="out")
+        Score = Port[int](direction="out")   # unlisted → synthesized as 0
+```
+
+Ports absent from `mock_outputs` are filled in from their declared type, so an
+`int` port receives an `int` and a `File` port is materialized as a real file.
+Swapping back to a real transport changes nothing else about the graph.
 
 ## Shared context decorator
 
