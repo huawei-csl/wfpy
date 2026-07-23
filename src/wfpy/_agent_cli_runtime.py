@@ -32,12 +32,16 @@ def _normalize_agent_transport(spec: AgentSpec) -> str:
         "claude-cli": "claude-cli",
         "codex": "codex-cli",
         "codex-cli": "codex-cli",
+        # Offline: fires the actor and emits port-shaped values without a model.
+        "mock": "mock",
+        "offline": "mock",
     }
     normalized = aliases.get(raw)
     if normalized is None:
         raise ValueError(
             f"Unsupported agent transport '{spec.transport}'. "
-            "Supported values: http, opencode-cli, opencode-acp, claude-cli, codex-cli."
+            "Supported values: http, opencode-cli, opencode-acp, claude-cli, "
+            "codex-cli, mock."
         )
     return normalized
 
