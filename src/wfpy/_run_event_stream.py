@@ -56,7 +56,7 @@ class RunEventStream:
         self.token = secrets.token_urlsafe(24)
         self._server: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
-        self._subscribers: set[queue.Queue] = set()
+        self._subscribers: set[queue.Queue[dict[str, Any]]] = set()
         self._lock = threading.Lock()
         self._seq = 0
         self._closed = threading.Event()
@@ -195,8 +195,8 @@ class RunEventStream:
                 except queue.Empty:
                     pass
 
-    def _subscribe(self) -> queue.Queue:
-        q: queue.Queue = queue.Queue(maxsize=_SUBSCRIBER_QUEUE_MAX)
+    def _subscribe(self) -> queue.Queue[dict[str, Any]]:
+        q: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=_SUBSCRIBER_QUEUE_MAX)
         with self._lock:
             for past in self._history[-512:]:  # replay recent history to new observers
                 try:
@@ -206,6 +206,6 @@ class RunEventStream:
             self._subscribers.add(q)
         return q
 
-    def _unsubscribe(self, q: queue.Queue) -> None:
+    def _unsubscribe(self, q: queue.Queue[dict[str, Any]]) -> None:
         with self._lock:
             self._subscribers.discard(q)

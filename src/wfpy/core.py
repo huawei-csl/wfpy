@@ -1406,9 +1406,9 @@ def _process_workflow_function(
         if _graph_context._current_graph is not None and _active_wf_builder_depth.get() > 0:
             proxy = _make_workflow_proxy(wf_def)
             if wf_def.factory_name:
-                proxy._wfpy_factory_name = wf_def.factory_name  # type: ignore[attr-defined]
+                proxy._wfpy_factory_name = wf_def.factory_name
             if wf_def.factory_parameters:
-                proxy._wfpy_factory_parameters = copy.deepcopy(wf_def.factory_parameters)  # type: ignore[attr-defined]
+                proxy._wfpy_factory_parameters = copy.deepcopy(wf_def.factory_parameters)
             _graph_context._current_graph.register_actor(proxy)
             return proxy
 

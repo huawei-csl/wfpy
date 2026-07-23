@@ -264,8 +264,12 @@ class PortInstance:
 
     # Support >> operator for pipeline syntax
     def __rshift__(self, other: PortInstance | str) -> PortInstance:
-        from wfpy.graph import _current_graph
-        if _current_graph is None:
+        from wfpy import _graph_context
+
+        # Read through the module: `_current_graph` is rebound on scope entry/exit,
+        # so a `from ... import` would capture a stale snapshot.
+        current_graph = _graph_context._current_graph
+        if current_graph is None:
             raise RuntimeError(">> operator can only be used inside a @workflow function")
         frame = None
         try:
@@ -275,7 +279,7 @@ class PortInstance:
         except Exception:
             frame = None
         caller = frame.f_back if frame is not None else None
-        _current_graph.connect(self, other, caller_frame=caller)
+        current_graph.connect(self, other, caller_frame=caller)
         if frame is not None:
             del frame
         return other if isinstance(other, PortInstance) else self
