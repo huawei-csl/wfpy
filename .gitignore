@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+__pychache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.tmp/
+wf-out/
+work/
+compiled_lib/
+*.layout.json
+**/.*.layout.json
