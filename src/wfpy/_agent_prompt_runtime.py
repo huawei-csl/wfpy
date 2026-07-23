@@ -684,10 +684,12 @@ def _build_effective_agent_prompt(spec: AgentSpec, plan: Any) -> tuple[str, dict
                 profile["warnings"] = warnings
         debug_meta["claudeAgentProfile"] = profile
 
-    if spec.use_skill:
-        skill_name = (spec.skill or "").strip()
-        if not skill_name:
-            raise ValueError("Agent has use_skill=true but no skill name configured.")
+    # `use_skill` means "include the configured skill", so with no skill named
+    # there is simply nothing to include. It defaults to True, so raising here
+    # would make the bare `@agent(prompt=...)` form unusable. A skill that IS
+    # named but cannot be read still raises, from _read_skill_md.
+    skill_name = (spec.skill or "").strip()
+    if spec.use_skill and skill_name:
         skill_text, skill_path = _read_skill_md(skill_name, plan)
         skill_meta, skill_body = _parse_skill_frontmatter(skill_text)
         skill_dir = skill_path.parent
