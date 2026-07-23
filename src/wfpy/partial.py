@@ -502,7 +502,8 @@ def _apply_node_flags(
     located at the connect line for the Problems panel.
     """
     # export_graph_json nests the graph under a "graph" key ({version, graph:{nodes,…}}).
-    container = data.get("graph") if isinstance(data.get("graph"), dict) else data
+    _graph_val = data.get("graph")
+    container = _graph_val if isinstance(_graph_val, dict) else data
     nodes = container.get("nodes")
     if not isinstance(nodes, list) or not failed_connects:
         return

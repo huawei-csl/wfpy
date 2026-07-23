@@ -147,3 +147,46 @@ class TestMap:
     def test_map_default(self):
         m = Map()
         assert m.data == {}
+
+
+class TestPipelineOperator:
+    """`>>` wires ports inside a @workflow body (regression: it used to raise
+    ImportError because it imported `_current_graph` from the wrong module)."""
+
+    def test_rshift_connects_ports(self):
+        from wfpy.core import task, workflow
+        from wfpy.runner import _build_workflow_graph
+
+        @task
+        class Doubler:
+            class Ports:
+                In = Port[int](direction="in")
+                Out = Port[int](direction="out")
+
+        @workflow
+        def pipe():
+            a = Doubler()
+            b = Doubler()
+            a.Out >> b.In
+
+        graph = _build_workflow_graph(pipe._wfpy_workflow)
+
+        assert sorted(graph.actors) == ["a", "b"]
+        assert len(graph.connections) == 1
+        conn = graph.connections[0]
+        assert str(conn.from_port) == "PortInstance(a.Out)"
+        assert str(conn.to_port) == "PortInstance(b.In)"
+
+    def test_rshift_outside_workflow_raises_runtime_error(self):
+        import pytest
+
+        from wfpy.core import task
+
+        @task
+        class Solo:
+            class Ports:
+                In = Port[int](direction="in")
+                Out = Port[int](direction="out")
+
+        with pytest.raises(RuntimeError, match="only be used inside a @workflow"):
+            Solo().Out >> Solo().In

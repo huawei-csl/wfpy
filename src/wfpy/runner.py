@@ -1574,7 +1574,11 @@ def _step_agent(
     # Live event sink: when a run event stream is active, agents publish their message
     # deltas / tool calls to it (tagged with this instance) for read-only observers (IDE).
     if plan.event_stream is not None:
-        def _publish_agent_event(event: dict[str, Any], _stream=plan.event_stream, _instance=actor.name) -> None:
+        def _publish_agent_event(
+            event: dict[str, Any],
+            _stream: Any = plan.event_stream,
+            _instance: str = actor.name,
+        ) -> None:
             _stream.publish({"instance": _instance, **event})
         agent_options["_wf_event_publish"] = _publish_agent_event
 
@@ -2063,7 +2067,7 @@ def _step_agent(
                     )
                 repair_options = dict(agent_options)
                 repair_tool_rounds = min(max_tool_rounds, AGENT_MAX_REPAIR_TOOL_ROUNDS)
-                repair_prior_history: list[ChatMessage] | None = firing_messages
+                repair_prior_history = firing_messages
                 repair_effective = effective_prompt_for_invoke
                 response_text, repair_msgs, repair_error, repair_debug_meta = _invoke_agent_with_timing(
                     agent_spec,
