@@ -29,9 +29,7 @@ Expected output::
 
     {'Out': ['[summary] a one-line summary']}
 
-The rest of wfpy's layer builds on this: ``@tool`` runs an external process as a
-task, ``@viewer`` is a sink for inspecting a run, and ``if_()`` / ``loop()`` add
-control-flow nodes. See the README for the full surface.
+Next (agent orchestration): 10_parallel_agents.py — fan out to several agents.
 """
 
 from wfpy import Port, action, agent, connect, run, task, workflow
