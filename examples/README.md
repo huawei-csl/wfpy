@@ -36,6 +36,17 @@ applies unchanged to agents, because an `@agent` *is* an actor (09).
 | 08 | [`08_networks.py`](08_networks.py) | Sources, sinks, fan-out, and self-terminating feedback |
 | 09 | [`09_agents_are_actors.py`](09_agents_are_actors.py) | An `@agent` is a task; the offline `mock` transport |
 
+## Agent orchestration
+
+The patterns you reach for when wiring LLMs together. Each runs offline via
+`transport="mock"` and is CI-tested; swap in a real transport unchanged.
+
+| | Example | Pattern |
+|---|---|---|
+| 10 | [`10_parallel_agents.py`](10_parallel_agents.py) | Fan out to parallel specialists, reduce with a task (map-reduce) |
+| 11 | [`11_routing.py`](11_routing.py) | Dispatch each request to the right specialist (guard routing) |
+| 12 | [`12_repair_loop.py`](12_repair_loop.py) | Generate → check → revise until good (feedback loop) |
+
 ## Reading order
 
 01 → 02 establish tasks, ports, and wiring. 03 introduces multiple actions (and
@@ -43,4 +54,5 @@ the nondeterminism that motivates 06 and 07). 04 adds guards, 05 adds state — 
 two things that make an actor more than a function. 06 (schedules) and 07
 (priorities) are the two ways to make action selection deterministic. 08 is the
 network-level view: sources, sinks, fan-out, feedback. 09 is the payoff — an LLM
-agent slotted into the same model.
+agent slotted into the same model. 10–12 then apply that model to
+multi-agent orchestration: fan out and reduce, route, and loop.

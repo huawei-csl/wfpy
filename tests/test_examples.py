@@ -66,6 +66,24 @@ EXPECTATIONS: dict[str, tuple[str, dict[str, Any], dict[str, Any], str]] = {
         {"Out": ["[summary] a one-line summary"]},
         "eq",
     ),
+    "10_parallel_agents": (
+        "analyze",
+        {"inputs": {"In": "quarterly results are strong"}},
+        {"Out": ["sentiment=positive | summary=a short summary | keywords=alpha, beta"]},
+        "eq",
+    ),
+    "11_routing": (
+        "triage",
+        {"inputs": {"In": "please review my code"}},
+        {"Out": ["[code expert] here's the fix"]},
+        "eq",
+    ),
+    "12_repair_loop": (
+        "refine_until_good",
+        {"inputs": {"Brief": "write a haiku about autumn"}},
+        {"Final": [8]},
+        "eq",
+    ),
 }
 
 EXAMPLE_FILES = sorted(EXAMPLES_DIR.glob("[0-9][0-9]_*.py"))
