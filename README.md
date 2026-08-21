@@ -21,13 +21,13 @@ wheel. Install a specific version straight from GitHub:
 
 ```bash
 # pinned release wheel (no clone needed)
-pip install "wfpy @ https://github.com/huawei-csl/wfpy/releases/download/v1.0.0b1/wfpy-1.0.0b1-py3-none-any.whl"
+pip install "wfpy @ https://github.com/huawei-csl/wfpy/releases/download/v1.0.0/wfpy-1.0.0-py3-none-any.whl"
 
 # or download the .whl from the Releases page and install the file
-pip install ./wfpy-1.0.0b1-py3-none-any.whl
+pip install ./wfpy-1.0.0-py3-none-any.whl
 
 # or build from a tagged source
-pip install "git+https://github.com/huawei-csl/wfpy@v1.0.0b1"
+pip install "git+https://github.com/huawei-csl/wfpy@v1.0.0"
 ```
 
 Add the `agent` extra for the `@agent` transports (HTTP API, MCP tools,

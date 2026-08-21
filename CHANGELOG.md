@@ -4,9 +4,19 @@ All notable changes to wfpy are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and wfpy uses
 [PEP 440](https://peps.python.org/pep-0440/) versioning.
 
-## [Unreleased]
+## [1.0.0] — 2026-07-24
+
+First stable release.
 
 ### Added
+- A tutorial-ordered example suite (`examples/01`–`12`) that builds the dataflow
+  model from simple tasks through schedules, priorities, networks, and
+  multi-agent orchestration (fan-out/reduce, routing, repair loops). Every
+  example runs offline and is exercised by the test suite, alongside a
+  `docs/dataflow-concepts.md` reference.
+- GitHub Actions CI (pytest across Python 3.10–3.13 + strict mypy) and a
+  tag-triggered release workflow that builds and publishes the wheel to GitHub
+  Releases.
 - `@agent(transport="mock")` (alias `"offline"`): runs an agent actor with no
   model, no network call and no credentials. The actor fires under the normal
   dataflow rules and emits a value on every declared output port, so a graph's
@@ -26,6 +36,12 @@ All notable changes to wfpy are documented here. The format follows
   `--elicit-require`. The `ask_user` tool is exempt from the `agent_tool_auth`
   gate and never exposes the `python`/MCP tools. Surfaced to the IDE via the
   graph export (`askUser`) and run artifacts.
+
+### Changed
+- Project description and the built-in `@agent` runtime prompt no longer
+  reference "WorkflowLang"; wfpy is described as "Pythonic agentic workflows on
+  actor-dataflow semantics". Agents are now told "You are executing a wfpy
+  @agent task."
 
 ### Fixed
 - `@agent(prompt=...)` with no `skill=` raised `ValueError: Agent has

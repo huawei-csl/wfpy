@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "wfpy"
-version = "1.0.0b1"
+version = "1.0.0"
 description = "A Pythonic framework for agentic workflows, built on actor-dataflow semantics"
 readme = "README.md"
 requires-python = ">=3.10"
