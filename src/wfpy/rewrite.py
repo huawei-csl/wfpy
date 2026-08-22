@@ -1187,7 +1187,16 @@ class RewriteEngine:
         new_body = body[:insert_at] + [class_def] + body[insert_at:]
         updated = self.module.with_changes(body=new_body)
         if ensure_import:
+            # Everything the emitted class needs to RUN, not just `Any`: the
+            # decorator that makes it a node and the `Port` its members are
+            # built from. Adding one of the three was enough while every file
+            # already imported the other two by hand; it stops being enough the
+            # moment a node is created in a file that does not.
             updated = self._ensure_any_import(updated)
+            # `kind` IS the decorator's name for all four kinds — `tool` and
+            # `agent` are called (`@tool(...)`), which changes the decorator
+            # expression but not the symbol that has to be in scope.
+            updated = self._ensure_import(updated, "wfpy", ["Port", kind])
         self._set_module(updated)
 
     def create_workflow_type(self, *, name: str) -> None:
@@ -1208,26 +1217,86 @@ class RewriteEngine:
         self._set_module(self.module.with_changes(body=new_body))
 
     def _ensure_any_import(self, module: cst.Module) -> cst.Module:
-        for stmt in module.body:
-            if isinstance(stmt, cst.ImportFrom) and isinstance(stmt.module, cst.Name) and stmt.module.value == "typing":
+        return self._ensure_import(module, "typing", ["Any"])
+
+    def _ensure_import(self, module: cst.Module, package: str, names: list[str]) -> cst.Module:
+        """Make sure `from <package> import <names>` covers every name.
+
+        Generated code has to be code that RUNS. A created task carries a
+        `@task` decorator and `Port[Any]()` members, and dropping that into a
+        file that imports neither leaves the author with a NameError to fix by
+        hand — the sidecar wrote it, so the sidecar owes the import.
+
+        Names are folded into an existing `from <package> import ...` rather
+        than added as a second line, because that is what the examples and the
+        hand-written workflows look like, and a rewriter should leave a file
+        looking the way its author would have written it. Import order within
+        the statement is kept alphabetical for the same reason.
+
+        A star import already covers everything, and an aliased import
+        (`from wfpy import task as t`) is left alone: the name is in scope under
+        another spelling, and adding the plain one would be redundant at best
+        and shadowing at worst.
+        """
+        wanted = [name for name in names if name]
+        if not wanted:
+            return module
+
+        body = list(module.body)
+        for index, line in enumerate(body):
+            # Only a simple statement line can hold an import at module level;
+            # a compound statement (a `try:` guarding an optional dependency,
+            # say) is left alone rather than rewritten from underneath.
+            if not isinstance(line, cst.SimpleStatementLine):
+                continue
+            statements = list(line.body)
+            for position, stmt in enumerate(statements):
+                if not isinstance(stmt, cst.ImportFrom):
+                    continue
+                if not isinstance(stmt.module, cst.Name) or stmt.module.value != package:
+                    continue
                 if isinstance(stmt.names, cst.ImportStar):
                     return module
-                for name in stmt.names:
-                    if isinstance(name, cst.ImportAlias) and name.name.value == "Any":
-                        return module
-        import_any = cst.ImportFrom(
-            module=cst.Name("typing"),
-            names=[cst.ImportAlias(name=cst.Name("Any"))]
-        )
-        body = list(module.body)
+                present = {
+                    alias.name.value
+                    for alias in stmt.names
+                    if isinstance(alias, cst.ImportAlias) and isinstance(alias.name, cst.Name)
+                }
+                # An alias covers the name under a different spelling.
+                aliased = {
+                    alias.name.value
+                    for alias in stmt.names
+                    if isinstance(alias, cst.ImportAlias) and alias.asname is not None
+                }
+                missing = [name for name in wanted if name not in present and name not in aliased]
+                if not missing:
+                    return module
+                merged = sorted(
+                    [*stmt.names, *[cst.ImportAlias(name=cst.Name(name)) for name in missing]],
+                    key=lambda alias: alias.name.value if isinstance(alias.name, cst.Name) else "",
+                )
+                # The last alias must not carry a trailing comma.
+                merged = [alias.with_changes(comma=cst.MaybeSentinel.DEFAULT) for alias in merged]
+                new_statements = list(statements)
+                new_statements[position] = stmt.with_changes(names=merged)
+                body[index] = line.with_changes(body=new_statements)
+                return module.with_changes(body=body)
+
+        new_import = cst.SimpleStatementLine([
+            cst.ImportFrom(
+                module=cst.Name(package),
+                names=[cst.ImportAlias(name=cst.Name(name)) for name in sorted(wanted)],
+            )
+        ])
         insert_at = 0
         if body:
             first = body[0]
             if isinstance(first, cst.SimpleStatementLine) and len(first.body) == 1:
                 expr = first.body[0]
                 if isinstance(expr, cst.Expr) and isinstance(expr.value, cst.SimpleString):
+                    # Keep a module docstring first.
                     insert_at = 1
-        new_body = body[:insert_at] + [import_any] + body[insert_at:]
+        new_body = body[:insert_at] + [new_import] + body[insert_at:]
         return module.with_changes(body=new_body)
 
     def connect(
