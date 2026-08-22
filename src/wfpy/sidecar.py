@@ -17,7 +17,14 @@ from typing import Any
 
 import libcst as cst
 
-from wfpy.rewrite import RewriteEngine, RewriteError, load_module
+from wfpy.package_exports import apply_package_export, find_package_export
+from wfpy.rewrite import (
+    RewriteEngine,
+    RewriteError,
+    _atomic_write_if_unchanged,
+    _source_revision,
+    load_module,
+)
 
 __all__ = ["run_sidecar"]
 
@@ -376,6 +383,42 @@ def _check_connection(engine: RewriteEngine, args: dict[str, Any]) -> SidecarRes
     )
 
 
+def _export_created_class(file_path: str, class_name: str) -> list[dict[str, str]] | None:
+    """Re-export a freshly created class from its package, if it has one.
+
+    Returns what the host needs to snapshot for undo — `[{file, revision}]` —
+    or None when there was nothing to do: no package beside the file, no class
+    name, or an `__init__.py` that already exports it.
+
+    Deliberately forgiving. This runs AFTER the edit the caller asked for has
+    been written, so a failure here must not turn a successful node creation
+    into an error; the node is real either way, and the missing export is a line
+    the author can add. The reason is reported through the response instead.
+    """
+    if not class_name:
+        return None
+    try:
+        export = find_package_export(file_path, class_name)
+        if export is None:
+            return None
+        with open(export.init_path, "r", encoding="utf-8") as handle:
+            before = handle.read()
+        after = apply_package_export(before, export)
+        if after == before:
+            return None
+        _atomic_write_if_unchanged(
+            export.init_path,
+            expected_revision=_source_revision(before),
+            text=after,
+        )
+        return [{
+            "file": export.init_path,
+            "revision": _normalize_revision(_source_revision(after)),
+        }]
+    except Exception:
+        return None
+
+
 def _normalize_revision(revision: str) -> str:
     if not revision:
         return ""
@@ -389,6 +432,18 @@ class SidecarResponse:
     revision: str
     message: str | None = None
     diagnostic: dict[str, Any] | None = None
+    changedFiles: list[dict[str, str]] | None = None
+    """Other files this op wrote, as `{file, revision}`.
+
+    An op edits `file`, and the host snapshots exactly that file to make the
+    edit undoable. When an op has to touch a second one — a package's
+    `__init__.py`, so a created class is exported the way its neighbours are —
+    the host has to be told, or undo restores half the change and the reader is
+    left with an export pointing at a class that no longer exists.
+
+    Additive and optional: a host that does not read it is no worse off than
+    before, and no op sets it unless it was ASKED to touch a second file.
+    """
 
 
 def _emit_response(resp: SidecarResponse) -> None:
@@ -506,13 +561,23 @@ def _handle_request(payload: dict[str, Any]) -> SidecarResponse:
                         diagnostic={"code": code, "details": details},
                     )
 
+        # OPT-IN. The host asks for this only when it can snapshot a second
+        # file for undo; a host that cannot never sets it and never gets a
+        # write it does not know about. That keeps the two repos free to ship
+        # in either order.
+        update_exports = bool(args.pop("updatePackageExports", False))
+        created_name = str(args.get("name") or "") if update_exports else ""
+
         getattr(engine, method_name)(**args)
         engine.save()
+
+        changed = _export_created_class(file_path, created_name) if update_exports else None
         return SidecarResponse(
             status="ok",
             file=file_path,
             revision=_normalize_revision(engine.revision),
             message="ok",
+            changedFiles=changed,
         )
     except cst.ParserSyntaxError as exc:
         # Partial-graph contract v2: an un-parseable file must NOT collapse the diagram for
