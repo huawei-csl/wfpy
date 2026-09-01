@@ -12,7 +12,7 @@ declaration:
 | facade | what it is | double-click target |
 | --- | --- | --- |
 | `design` | an ordinary task that produces or works on a design | the produced artifact — **only after a run** |
-| `instance` | a declared `@network` Python file, compiled and executed | the declared file — always; **`network=` is required**, else the node is an error |
+| `instance` | a typed facade over `calpy run` for a declared `@network` file | the declared file — always; **`network=` is required**, else the node is an error |
 
 ## What already exists
 
@@ -104,26 +104,113 @@ source (below).
   declares the ports and writes the actions. wfpy imposes no port shape, so the
   four-port feedback form and the plain one-in-one-out form are equally available
   and it is the user's choice which to use.
-- **`instance` runs the network file as a subprocess**, using an interpreter from
-  a setting (below). A CalPy network is just a Python file, so wfpy never imports
-  CalPy and takes no dependency on its toolchain.
+- **`instance` invokes `calpy run` as a subprocess.** There is no main to write:
+  CalPy already ships one. `mlir_cal/calpy/run.py` exposes
+  `calpy run <file.py | pkg.module.Class> --input <file>` — "compile and run a
+  CAL network natively" — which compiles and runs in a single step. The node is a
+  typed facade over that command, so wfpy never imports CalPy and takes no
+  dependency on its toolchain beyond the executable being on the configured
+  interpreter's path.
 
 ### The exporter
 
 Drop the `kind == "viewer"` condition so any node carrying a `viewer` annotation
 exports it, and emit `kind: "streamblocks"` plus the annotations.
 
+## A worked example
+
+### The CalPy side — `designs/adder.py`
+
+A network, and its own standalone main:
+
+```python
+from mlir_cal.calpy import Port, action, actor, connect, network, lower_network_symbolic
+
+@actor
+class Stimulus:
+    class Ports:
+        Out = Port[int](direction="out")
+
+    @action(tag="send", produces={Ports.Out: 1})
+    def send(self) -> int:
+        return 42
+
+@actor
+class Double:
+    class Ports:
+        In  = Port[int](direction="in")
+        Out = Port[int](direction="out")
+
+    @action(tag="scale", consumes={Ports.In: 1}, produces={Ports.Out: 1})
+    def scale(self, In: int) -> int:
+        return In * 2
+
+@network
+def adder() -> None:
+    s = Stimulus()
+    d = Double()
+    connect(s.Ports.Out, d.Ports.In, capacity=8)
+
+if __name__ == "__main__":
+    print(lower_network_symbolic(adder))
+```
+
+### The wfpy side
+
+```python
+from wfpy import Port, Resource, connect, streamblocks, workflow
+
+@streamblocks(facade="instance", network="designs/adder.py")
+class Adder:
+    class Ports:
+        stimulus = Port[Resource(kind="file")](direction="in")
+        build    = Port[Resource(kind="folder")](direction="out")
+        trace    = Port[Resource(kind="file")](direction="out", ext=".jsonl")
+
+@workflow(inputs={"bitstream": str}, outputs={"trace": str})
+def run_adder() -> None:
+    adder = Adder()
+    connect("bitstream", adder.stimulus)
+    connect(adder.trace, "trace")
+```
+
+### What one firing does
+
+```
+calpy run designs/adder.py \
+    --input             <stimulus token>
+    --keep-artifacts                        -> build token (Adder__build__0/)
+    --turnus-trace-file <trace path>        -> trace token
+```
+
+The ports ARE the command's surface, which is what makes the node typed rather
+than a shell string:
+
+| port | flag |
+| --- | --- |
+| `stimulus` (in, file) | `--input` |
+| `build` (out, folder) | `--keep-artifacts`, collected into the per-firing folder |
+| `trace` (out, file) | `--turnus-trace-file` |
+
+Double-click opens `designs/adder.py` in the CalPy viewer — the declared path, so
+it works before anything has run and while a long compile is still going.
+
+`--turnus-trace-file` and `--turnus-network-file` are worth noting as an existing
+route into the timeline tooling: a downstream node can consume them without this
+proposal doing anything special.
+
 ## wfpy-ide
 
 - `streamblocks` added to `CreateNodeTypeKind` and the create-node strings.
-- A setting for the interpreter that has the StreamBlocks compiler, following
-  the `getSidecarCommand` pattern:
+- A setting for the interpreter that provides `calpy`, following the
+  `getSidecarCommand` pattern:
 
   ```
   workflow.streamblocks.pythonPath      default: "python"
   ```
 
-  Pointing it at a venv is how the compiler is found. No new mechanism.
+  Pointing it at a venv is how `calpy run` is found. No new mechanism, and the
+  same shape users already configure for both sidecars.
 - The StreamBlocks logo passed through `DiagramProfile.clientAssets`.
 
 ## dialogram
