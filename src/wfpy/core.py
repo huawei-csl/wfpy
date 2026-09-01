@@ -1241,6 +1241,84 @@ def viewer(
     return decorator
 
 
+def streamblocks(
+    cls: type | None = None,
+    *,
+    facade: str = "design",
+    network: str | None = None,
+    inputs: list[str] | None = None,
+) -> Any:
+    """Decorator marking a class as a StreamBlocks/CalPy design node.
+
+    Two facades, chosen per class:
+
+    ``design``
+        An ordinary task. You declare the ports and write the actions; wfpy
+        imposes no shape, so a plain producer and the four-port feedback form
+        are equally available. Double-clicking it in the diagram opens whatever
+        it last produced, which means after a run.
+
+    ``instance``
+        A typed facade over ``calpy run`` for the network named by ``network=``.
+        CalPy already ships the main — ``calpy run <file.py> --input <file>``
+        compiles and runs in one step — so nothing here drives it beyond mapping
+        ports onto flags. Double-clicking opens the DECLARED file, so it works
+        before anything has run and while a long compile is still going.
+
+    ``network=`` is required for ``instance``: without one there is nothing to
+    compile, run or open, which is a static error rather than a run-time
+    failure. It stays optional for ``design``, where having produced nothing yet
+    is a legitimate state.
+
+    The double-click is not new machinery. It rides the same ``viewer``
+    annotation the IDE already reads, with ``source`` saying whether the target
+    is the declared path or the last token.
+    """
+
+    if facade not in {"design", "instance"}:
+        raise TypeError(
+            f"@streamblocks(facade={facade!r}): expected 'design' or 'instance'"
+        )
+    if facade == "instance" and (not isinstance(network, str) or network.strip() == ""):
+        raise TypeError(
+            "@streamblocks(facade='instance') requires network='path/to/network.py' — "
+            "an instance with no network has nothing to compile, run or open"
+        )
+
+    def decorator(klass: type) -> type:
+        klass = task(klass)
+        meta: TaskMeta = klass._wfpy_meta  # type: ignore[attr-defined]
+        meta.kind = "streamblocks"
+
+        streamblocks_annotation: dict[str, Any] = {"facade": facade}
+        if isinstance(network, str) and network.strip() != "":
+            streamblocks_annotation["network"] = network
+        meta.annotations["streamblocks"] = streamblocks_annotation
+
+        # Reuse the viewer annotation rather than inventing a second way to open
+        # something: the IDE keys on the annotation, not on the node's kind. An
+        # instance resolves its target from the declared path; a design has no
+        # path to declare, so it resolves from the last token it produced.
+        viewer_annotation: dict[str, Any] = {
+            "action": "openWith",
+            "viewType": "calpy.networkDiagram",
+            "source": "declared" if facade == "instance" else "token",
+        }
+        if isinstance(network, str) and network.strip() != "":
+            viewer_annotation["path"] = network
+        if inputs:
+            viewer_annotation["inputs"] = list(inputs)
+        elif facade == "design":
+            # Fall back to the outputs, since a design's target is what it made.
+            viewer_annotation["inputs"] = list(meta.output_ports.keys())
+        meta.annotations["viewer"] = viewer_annotation
+        return klass
+
+    if cls is not None:
+        return decorator(cls)
+    return decorator
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Simple annotation decorators
 # ═══════════════════════════════════════════════════════════════════════════

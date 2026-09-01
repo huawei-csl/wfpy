@@ -44,6 +44,7 @@ import wfpy._run_artifacts as _art_runtime
 import wfpy._validation_runtime as _val_runtime
 import wfpy._agent_staging_runtime as _staging_runtime
 import wfpy._step_external_runtime as _ext_runtime
+from wfpy._step_streamblocks_runtime import _step_streamblocks_instance
 import wfpy._action_runtime as _action_runtime
 import wfpy._invoke_runtime as _invoke_runtime
 import wfpy._run_finalization as _run_finalization
@@ -1056,6 +1057,14 @@ def _step_actor(
         return _step_workflow(actor, plan, out_dir, verbose)
     elif actor.kind == "viewer":
         return _step_viewer(actor, plan, verbose)
+    elif actor.kind == "streamblocks":
+        # A `design` facade IS an ordinary task — it declares its own ports and
+        # actions, so it fires exactly like any other. Only an `instance` does
+        # something different, and what it does is run `calpy run`.
+        annotation = actor.meta.annotations.get("streamblocks") or {}
+        if annotation.get("facade") == "instance":
+            return _step_streamblocks_instance(actor, out_dir, plan, verbose)
+        return _step_internal(actor, out_dir, plan, verbose)
     elif actor.kind == "control-if":
         return _step_control_if(actor, plan, out_dir, verbose, active_scopes)
     elif actor.kind == "control-loop":

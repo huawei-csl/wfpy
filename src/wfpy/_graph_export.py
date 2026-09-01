@@ -120,7 +120,11 @@ def _build_task_meta(
                 }
             )
         _upsert_definition_annotation(meta, "priority", priority_args)
-    if rec.meta.annotations.get("viewer") and rec.meta.kind == "viewer":
+    # NOT gated on kind == "viewer". The IDE keys the double-click on this
+    # annotation, not on the node's kind, and welding the two together meant a
+    # node that is openable in an editor had to also be a runtime sink. A
+    # StreamBlocks node is openable and emits.
+    if rec.meta.annotations.get("viewer"):
         viewer_cfg = rec.meta.annotations.get("viewer")
         viewer_args: list[dict[str, Any]] = []
         if isinstance(viewer_cfg, dict):
@@ -141,6 +145,21 @@ def _build_task_meta(
             if isinstance(view_type, str) and view_type.strip():
                 viewer_args.append(
                     {"name": "viewType", "value": _wf_string_literal(view_type)}
+                )
+            # Where the target comes from, and the target itself when it is a
+            # declared path rather than a produced token. Easy to miss, because
+            # the GENERIC annotation exporter above already emitted both and
+            # this block then replaces its entry wholesale — so anything not
+            # repeated here is silently dropped on the way out.
+            source = viewer_cfg.get("source")
+            if isinstance(source, str) and source.strip():
+                viewer_args.append(
+                    {"name": "source", "value": _wf_string_literal(source)}
+                )
+            declared_path = viewer_cfg.get("path")
+            if isinstance(declared_path, str) and declared_path.strip():
+                viewer_args.append(
+                    {"name": "path", "value": _wf_string_literal(declared_path)}
                 )
             command = viewer_cfg.get("command")
             if isinstance(command, str) and command.strip():
@@ -171,6 +190,24 @@ def _build_task_meta(
     ]
     if rec.meta.kind == "viewer":
         meta["viewer"] = True
+    if rec.meta.kind == "streamblocks":
+        annotation = rec.meta.annotations.get("streamblocks") or {}
+        meta["streamblocks"] = dict(annotation)
+        # An instance with no network cannot compile, run or open. That is wrong
+        # in the source whether or not anything has run, so it goes out as a
+        # static diagnostic — which the diagram keeps across run-overlay
+        # cleanup, unlike a run marker.
+        if annotation.get("facade") == "instance" and not str(annotation.get("network") or "").strip():
+            diagnostics = list(meta.get("diagnostics") or [])
+            diagnostics.append(
+                {
+                    "severity": "error",
+                    "message": (
+                        "StreamBlocks instance has no network= to compile, run or open."
+                    ),
+                }
+            )
+            meta["diagnostics"] = diagnostics
     if rec.meta.annotations:
         meta["annotations"] = rec.meta.annotations
     if rec.meta.schedule is not None:
