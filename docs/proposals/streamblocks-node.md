@@ -12,7 +12,7 @@ declaration:
 | facade | what it is | double-click target |
 | --- | --- | --- |
 | `design` | an ordinary task that produces or works on a design | the produced artifact — **only after a run** |
-| `instance` | a declared `@network` Python file, compiled and executed | the declared file — always |
+| `instance` | a declared `@network` Python file, compiled and executed | the declared file — always; **`network=` is required**, else the node is an error |
 
 ## What already exists
 
@@ -90,6 +90,7 @@ class FirDesign:
 class FirRun:
     class Ports:
         samples = Port[list[int]](direction="in")
+        build   = Port[Resource(kind="folder")](direction="out")   # versioned per firing
         results = Port[list[int]](direction="out")
 ```
 
@@ -148,13 +149,90 @@ Three changes, one of them real.
    gives it. That is a real constraint, not a preference — an icon added to core
    fails CI.
 
-## Open questions
+## `network=` is required for `instance`
 
-1. Where does loop termination live? In `examples/12` it is the task's own
-   `score >= target`. With the design node an ordinary task the test can sit in
-   it, in a separate checker, or in the optimising agent emitting on one of two
-   ports. Any of the three works; it should be a deliberate choice.
-2. Does `instance` need a build artifact on an output port, or only results?
-3. Should `network=` be required for `design`? A design node that has not
-   produced anything yet has nothing to open, and a declared path would give it
-   a fallback target — at the cost of two ways to resolve one thing.
+An `instance` with no network has nothing to compile, nothing to run and nothing
+to open. It is not a node waiting for input; it is a node that cannot work. So it
+is a **static error on the node**, red in the diagram, not a failure discovered
+at run time.
+
+The mechanism exists and is the right one. `node.meta['diagnostics']` carries
+`{severity: 'error' | 'warning'}` entries, and the model source is explicit that
+these are durable where run markers are not:
+
+> a graph-export diagnostic is a property of the source, not run state, so it
+> must survive that
+
+which is exactly the distinction here — the missing `network=` is wrong in the
+file, whether or not anything has run. The exporter emits the diagnostic; the
+node goes red; the double-click reports the same reason rather than silently
+doing nothing.
+
+`design` stays optional-by-default: a design node that has not produced anything
+yet legitimately has nothing to open, and the existing "no run overlay found"
+message already says so.
+
+## Versioned artifact folders
+
+`instance` gains a build-artifact folder on an output port, and that is also
+where a `design` facade generates. Which raises the real question: **a loop that
+modifies the network produces several versions of it in one run**, and they must
+not overwrite each other.
+
+### The token is the version
+
+Nothing needs inventing. wfpy already names per-firing artifacts by the actor's
+fire count:
+
+```python
+out_dir / f"{actor.name}__{port_name}__{actor.fire_count}{ext}"
+```
+
+Extend that from files to folders and versioning falls out of the dataflow model
+itself, because in a dataflow graph **each firing already produces its own
+token** — a folder-typed port simply makes that token a directory:
+
+```
+wf-out/
+  Design__out__0/      generated
+  Design__out__1/      after the first optimisation pass
+  Design__out__2/      after the second
+```
+
+`Resource` already normalises `dir` and `directory` to `folder`, so the type side
+needs nothing either.
+
+### What this buys, without extra machinery
+
+- **The viewer opens the current design for free.** Double-click resolves the
+  *last* token, which is the newest folder. No "which version am I looking at"
+  question, and no bookkeeping to keep it right.
+- **Every iteration survives** for comparison — and `@viewer(action="diff")`
+  already takes two inputs, so diffing pass N against pass N-1 is wiring, not a
+  feature.
+- **Nothing is mutated in place**, so a failed optimisation cannot corrupt the
+  last good design.
+- **Provenance is legible on disk.** Folder N came from firing N; the loop's
+  history is the directory listing.
+
+### The cost, stated plainly
+
+A whole project folder per iteration. For a loop of any length that is real disk,
+and the honest mitigations are, in order of preference:
+
+1. **Copy-on-write** (`cp --reflink=auto`) where the filesystem supports it —
+   near-free, and degrades to a plain copy where it does not.
+2. **Hard-link the unchanged files**, copying only what the pass rewrote.
+3. **Materialise a new folder only when the design actually changed**, so an
+   idempotent pass costs nothing.
+
+Retention has a home already: the `@keep` annotation marks task outputs as kept
+rather than cleaned up after a run, so "keep every iteration" versus "keep the
+last" is an existing switch rather than a new setting.
+
+## Open question
+
+Where does loop termination live? In `examples/12` it is the task's own
+`score >= target`. With the design node an ordinary task, the test can sit in it,
+in a separate checker task, or in the optimising agent emitting on one of two
+ports. All three work; it should be a deliberate choice rather than a default.
