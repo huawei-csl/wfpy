@@ -6,7 +6,7 @@ multi-action tasks with guards, and external tool / LLM agent integration.
 Public API::
 
     from wfpy import task, workflow, connect, if_, loop, Port, Resource, File, Map
-    from wfpy import action, guard, agent, tool, viewer
+    from wfpy import action, guard, agent, tool, viewer, streamblocks
     from wfpy import streaming, pipeline, keep, config
     from wfpy import run
 """
@@ -36,6 +36,7 @@ from wfpy.core import (
     agent,
     tool,
     viewer,
+    streamblocks,
     context,
     streaming,
     pipeline,
@@ -69,6 +70,7 @@ __all__ = [
     "agent",
     "tool",
     "viewer",
+    "streamblocks",
     "context",
     "streaming",
     "pipeline",
