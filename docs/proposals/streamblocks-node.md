@@ -317,9 +317,20 @@ Retention has a home already: the `@keep` annotation marks task outputs as kept
 rather than cleaned up after a run, so "keep every iteration" versus "keep the
 last" is an existing switch rather than a new setting.
 
-## Open question
+## Loop termination is not this node's concern
 
-Where does loop termination live? In `examples/12` it is the task's own
-`score >= target`. With the design node an ordinary task, the test can sit in it,
-in a separate checker task, or in the optimising agent emitting on one of two
-ports. All three work; it should be a deliberate choice rather than a default.
+Recorded because it was briefly listed here as an open question, which was
+wrong and caused confusion.
+
+Neither facade loops. A node fires when its inputs have tokens, does its work and
+emits; if it sits in a cycle it fires each time a token comes round, but it holds
+no loop state and makes no decision about continuing. The loop lives in the
+wiring, and it ends when whichever node holds the convergence test emits on its
+exit port rather than its feedback port — `examples/12`'s `Refine` returning
+`{"Final": score}` instead of `{"Again": score + 1}`. Nothing in the runtime
+"runs a loop"; tokens stop circulating.
+
+So for a generate-then-optimise graph the test belongs to whichever node knows
+what "good enough" means for that design. That is ordinary workflow authoring,
+decided per workflow, and it touches nothing in this proposal — not the
+decorator, not the runner, not the diagram.
