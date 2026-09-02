@@ -121,6 +121,7 @@ def _step_streamblocks_instance(
         capture_output=True,
         text=True,
         cwd=str(getattr(plan, "source_dir", None) or Path.cwd()),
+        env=_environment(plan, annotation),
     )
     if proc.returncode != 0:
         raise RuntimeError(
@@ -139,6 +140,32 @@ def _step_streamblocks_instance(
 
     actor.fire_count += 1
     return True
+
+
+def _environment(plan: Any, annotation: dict[str, Any]) -> dict[str, str]:
+    """The environment `calpy run` is given.
+
+    The same contract an external tool gets — OS env, then the workflow's
+    `@config(env=)`, then anything the node itself declares, with the
+    workflow's search paths ahead of PATH. This step used to pass no
+    environment at all, so it inherited the OS one and a workflow could not
+    reach it: `@config(env={"CALPY_CLANG": ...})` was silently ignored, which is
+    exactly the knob someone reaches for when the default clang is too old.
+    """
+    env: dict[str, str] = {**os.environ}
+    workflow_env = getattr(plan, "env", None)
+    if workflow_env:
+        env.update({str(k): str(v) for k, v in workflow_env.items()})
+    node_env = annotation.get("env")
+    if isinstance(node_env, dict):
+        env.update({str(k): str(v) for k, v in node_env.items()})
+
+    search_paths = getattr(plan, "search_paths", None)
+    if search_paths:
+        prefix = os.pathsep.join(str(p) for p in search_paths)
+        existing = env.get("PATH", "")
+        env["PATH"] = f"{prefix}{os.pathsep}{existing}" if existing else prefix
+    return env
 
 
 def _collect_artifacts(stdout: str, destination: Path, actor_name: str) -> None:
