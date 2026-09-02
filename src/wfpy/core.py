@@ -1247,6 +1247,7 @@ def streamblocks(
     facade: str = "design",
     network: str | None = None,
     inputs: list[str] | None = None,
+    env: dict[str, str] | None = None,
 ) -> Any:
     """Decorator marking a class as a StreamBlocks/CalPy design node.
 
@@ -1293,6 +1294,9 @@ def streamblocks(
         streamblocks_annotation: dict[str, Any] = {"facade": facade}
         if isinstance(network, str) and network.strip() != "":
             streamblocks_annotation["network"] = network
+        if env:
+            # Merged over the workflow's own `@config(env=)`, as a tool's is.
+            streamblocks_annotation["env"] = dict(env)
         meta.annotations["streamblocks"] = streamblocks_annotation
 
         # Reuse the viewer annotation rather than inventing a second way to open

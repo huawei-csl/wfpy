@@ -266,6 +266,80 @@ class TestInstanceFiring:
         with pytest.raises(RuntimeError, match="no `binary:` line"):
             _step_streamblocks_instance(actor, tmp_path, FakePlan(tmp_path), False)
 
+    def test_the_workflow_environment_reaches_calpy(self, tmp_path, monkeypatch):
+        """`@config(env=)` is how a workflow points at a different toolchain —
+        CALPY_CLANG when the default one is too old, for instance. This step
+        passed no environment at all, so it inherited the OS one and the
+        workflow's was silently ignored."""
+        seen = tmp_path / "env.txt"
+        script = tmp_path / "env-calpy"
+        script.write_text(
+            "#!/usr/bin/env python3\n"
+            "import os, pathlib\n"
+            f"pathlib.Path({str(seen)!r}).write_text(os.environ.get('CALPY_CLANG', '<unset>'))\n"
+        )
+        script.chmod(0o755)
+        monkeypatch.setenv(CALPY_COMMAND_ENV, str(script))
+
+        @streamblocks(facade="instance", network="n.py")
+        class Node:
+            class Ports:
+                stimulus = Port[str](direction="in")
+
+        plan = FakePlan(tmp_path)
+        plan.env = {"CALPY_CLANG": "/opt/llvm22/bin/clang"}
+        actor = FakeActor(Node, {"stimulus": "a.bin"})
+        _step_streamblocks_instance(actor, tmp_path, plan, False)
+
+        assert seen.read_text() == "/opt/llvm22/bin/clang"
+
+    def test_a_node_can_override_the_workflow_environment(self, tmp_path, monkeypatch):
+        seen = tmp_path / "env.txt"
+        script = tmp_path / "env-calpy"
+        script.write_text(
+            "#!/usr/bin/env python3\n"
+            "import os, pathlib\n"
+            f"pathlib.Path({str(seen)!r}).write_text(os.environ.get('CALPY_CLANG', '<unset>'))\n"
+        )
+        script.chmod(0o755)
+        monkeypatch.setenv(CALPY_COMMAND_ENV, str(script))
+
+        @streamblocks(facade="instance", network="n.py", env={"CALPY_CLANG": "/node/clang"})
+        class Node:
+            class Ports:
+                stimulus = Port[str](direction="in")
+
+        plan = FakePlan(tmp_path)
+        plan.env = {"CALPY_CLANG": "/workflow/clang"}
+        actor = FakeActor(Node, {"stimulus": "a.bin"})
+        _step_streamblocks_instance(actor, tmp_path, plan, False)
+
+        # Node over workflow, as a tool's env is over @config's.
+        assert seen.read_text() == "/node/clang"
+
+    def test_search_paths_lead_the_path(self, tmp_path, monkeypatch):
+        seen = tmp_path / "path.txt"
+        script = tmp_path / "path-calpy"
+        script.write_text(
+            "#!/usr/bin/env python3\n"
+            "import os, pathlib\n"
+            f"pathlib.Path({str(seen)!r}).write_text(os.environ.get('PATH', ''))\n"
+        )
+        script.chmod(0o755)
+        monkeypatch.setenv(CALPY_COMMAND_ENV, str(script))
+
+        @streamblocks(facade="instance", network="n.py")
+        class Node:
+            class Ports:
+                stimulus = Port[str](direction="in")
+
+        plan = FakePlan(tmp_path)
+        plan.search_paths = ["/opt/toolchain/bin"]
+        actor = FakeActor(Node, {"stimulus": "a.bin"})
+        _step_streamblocks_instance(actor, tmp_path, plan, False)
+
+        assert seen.read_text().startswith("/opt/toolchain/bin")
+
     def test_a_failing_run_is_not_silent(self, tmp_path, monkeypatch):
         failing = tmp_path / "failing-calpy"
         failing.write_text("#!/usr/bin/env python3\nimport sys\nsys.exit(3)\n")
