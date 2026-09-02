@@ -545,3 +545,81 @@ class A:
     assert "useSkill=False" in updated
     assert "usePrompt=True" in updated
     assert 'model="old"' in updated
+
+
+class TestCreateStreamblocksType:
+    """The sidecar has to write a node the file can actually run.
+
+    Creating from the palette got as far as this op and was rejected, so the
+    whole UI flow existed with nothing at the end of it.
+    """
+
+    SOURCE = (
+        "from wfpy import workflow\n\n"
+        "@workflow(inputs={}, outputs={})\n"
+        "def top():\n"
+        "    pass\n"
+    )
+
+    def test_a_design_needs_no_network(self, tmp_path):
+        engine = _engine_from_source(tmp_path, self.SOURCE)
+        engine.create_task_type(kind="streamblocks", name="MyDesign", facade="design")
+        code = engine.module.code
+
+        assert '@streamblocks(facade = "design")' in code
+        assert "class MyDesign:" in code
+
+    def test_an_instance_carries_its_network(self, tmp_path):
+        engine = _engine_from_source(tmp_path, self.SOURCE)
+        engine.create_task_type(
+            kind="streamblocks", name="FirRun", facade="instance", network="designs/adder.py"
+        )
+
+        assert 'network = "designs/adder.py"' in engine.module.code
+
+    def test_it_imports_what_the_class_needs(self, tmp_path):
+        """The sidecar wrote the class, so the sidecar owes the imports —
+        otherwise the author gets a NameError to fix by hand."""
+        engine = _engine_from_source(tmp_path, self.SOURCE)
+        engine.create_task_type(kind="streamblocks", name="MyDesign", facade="design")
+        code = engine.module.code
+
+        assert "streamblocks" in code.split("\n")[1]  # folded into the wfpy import
+        assert "Port" in code
+        assert "from typing import Any" in code
+
+    def test_an_instance_without_a_network_is_refused(self, tmp_path):
+        """Caught here rather than written into the file for import time to
+        report."""
+        engine = _engine_from_source(tmp_path, self.SOURCE)
+        with pytest.raises(RewriteError, match="needs network="):
+            engine.create_task_type(kind="streamblocks", name="Bad", facade="instance")
+
+    def test_a_missing_or_wrong_facade_is_refused(self, tmp_path):
+        engine = _engine_from_source(tmp_path, self.SOURCE)
+        with pytest.raises(RewriteError, match="facade="):
+            engine.create_task_type(kind="streamblocks", name="Bad")
+        with pytest.raises(RewriteError, match="facade="):
+            engine.create_task_type(kind="streamblocks", name="Bad", facade="compile")
+
+    def test_the_generated_class_actually_runs(self, tmp_path):
+        """The point of all of the above: valid wfpy, not just valid Python."""
+        engine = _engine_from_source(tmp_path, self.SOURCE)
+        engine.create_task_type(
+            kind="streamblocks", name="FirRun", facade="instance", network="designs/adder.py"
+        )
+        generated = tmp_path / "generated.py"
+        generated.write_text(engine.module.code, encoding="utf-8")
+
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location("generated_wf", generated)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        meta = module.FirRun._wfpy_meta
+        assert meta.kind == "streamblocks"
+        assert meta.annotations["streamblocks"] == {
+            "facade": "instance",
+            "network": "designs/adder.py",
+        }

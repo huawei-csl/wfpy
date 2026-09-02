@@ -1103,10 +1103,32 @@ class RewriteEngine:
 
         return graph
 
-    def create_task_type(self, *, kind: str, name: str) -> None:
+    def create_task_type(
+        self,
+        *,
+        kind: str,
+        name: str,
+        facade: str | None = None,
+        network: str | None = None,
+    ) -> None:
         self._ensure_identifier(name)
-        if kind not in ("tool", "agent", "viewer", "task"):
+        if kind not in ("tool", "agent", "viewer", "task", "streamblocks"):
             raise RewriteError(message=f"Invalid task kind: {kind}")
+        if kind == "streamblocks":
+            if facade not in ("design", "instance"):
+                raise RewriteError(
+                    message=(
+                        "A streamblocks type needs facade='design' or "
+                        f"facade='instance', not {facade!r}"
+                    )
+                )
+            if facade == "instance" and not (network or "").strip():
+                raise RewriteError(
+                    message=(
+                        "A streamblocks instance needs network='path/to/network.py' "
+                        "— without one there is nothing to compile, run or open"
+                    )
+                )
         if kind == "tool":
             decorator: cst.BaseExpression = cst.Call(
                 func=cst.Name("tool"),
@@ -1121,6 +1143,21 @@ class RewriteEngine:
             decorator = cst.Name("viewer")
         elif kind == "task":
             decorator = cst.Name("task")
+        elif kind == "streamblocks":
+            # The decorator refuses a bad combination too, but writing one into
+            # the file and letting import time report it would be a poor way to
+            # find out.
+            sb_args = [
+                cst.Arg(keyword=cst.Name("facade"), value=cst.SimpleString(f'"{facade}"'))
+            ]
+            if (network or "").strip():
+                sb_args.append(
+                    cst.Arg(
+                        keyword=cst.Name("network"),
+                        value=cst.SimpleString(f'"{network}"'),
+                    )
+                )
+            decorator = cst.Call(func=cst.Name("streamblocks"), args=sb_args)
         else:
             decorator = cst.Name(kind)
         ensure_import = False
