@@ -268,6 +268,27 @@ class TestExport:
         assert args["path"] == '"designs/adder.py"'
         assert args["viewType"] == '"calpy.networkDiagram"'
 
+    def test_it_declares_itself_external(self):
+        """The platform does not know the word `streamblocks`, and should not
+        have to: it renders and treats a node as external because the exporter
+        said so. Without this the node draws as an ordinary actor and cannot be
+        opened by double-click, since annotations are only read on an
+        external-actor node."""
+
+        @streamblocks(facade="instance", network="designs/adder.py")
+        class Adder:
+            class Ports:
+                stimulus = Port[str](direction="in")
+
+        def build(connect):
+            a = Adder()
+            connect("In", a.stimulus)
+
+        nodes = self._export(build)["graph"]["nodes"]
+        node = next(n for n in nodes if n["kind"] == "streamblocks")
+
+        assert node["meta"]["external"] is True
+
     def test_it_carries_the_facade_through(self):
         @streamblocks(facade="instance", network="designs/adder.py")
         class Adder:

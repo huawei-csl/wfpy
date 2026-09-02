@@ -193,6 +193,13 @@ def _build_task_meta(
     if rec.meta.kind == "streamblocks":
         annotation = rec.meta.annotations.get("streamblocks") or {}
         meta["streamblocks"] = dict(annotation)
+        # Say what this node IS, rather than relying on the platform to
+        # recognise the word "streamblocks". The platform renders and treats a
+        # node as external when the producer says so; a kind list it would have
+        # to extend for every product is not neutral. Without this the node
+        # draws as an ordinary actor AND cannot be opened by double-click,
+        # because the annotation is only read on an external-actor node.
+        meta["external"] = True
         # An instance with no network cannot compile, run or open. That is wrong
         # in the source whether or not anything has run, so it goes out as a
         # static diagnostic — which the diagram keeps across run-overlay
