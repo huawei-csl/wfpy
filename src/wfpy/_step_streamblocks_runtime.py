@@ -19,13 +19,14 @@ token a directory.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
 
 from .core import TaskMeta
-from .types import infer_resource_kind
+from .types import Resource, infer_resource_kind
 
 #: Flag carrying the stimulus when a node does not say otherwise.
 DEFAULT_INPUT_FLAG = "--input"
@@ -39,16 +40,17 @@ def _calpy_command() -> str:
 
 
 def _port_is_folder(port_desc: Any) -> bool:
-    """Whether a port carries a directory rather than a file."""
-    kind = getattr(getattr(port_desc, "port_type", None), "kind", "")
-    return infer_resource_kind_safe(kind) == "folder"
+    """Whether a port carries a directory rather than a file.
 
-
-def infer_resource_kind_safe(value: Any) -> str:
-    try:
-        return infer_resource_kind(value)
-    except Exception:
-        return ""
+    The Resource itself is handed to `infer_resource_kind`, not its `kind`
+    string: that function takes a Resource OR a locator, so passing the bare
+    word "folder" made it parse it as a path and answer something else. The
+    Resource path also normalises `dir` and `directory` for free.
+    """
+    port_type = getattr(port_desc, "port_type", None)
+    if not isinstance(port_type, Resource):
+        return False
+    return infer_resource_kind(port_type) == "folder"
 
 
 def _step_streamblocks_instance(
@@ -126,10 +128,10 @@ def _step_streamblocks_instance(
             f"code {proc.returncode}:\n{proc.stderr}"
         )
 
-    # `--keep-artifacts` leaves the build beside the network; collect it into
-    # this firing's own directory so the next pass cannot overwrite it.
+    # Collect what the build left into this firing's own directory, so the next
+    # pass cannot overwrite it.
     if artifact_port is not None:
-        _collect_artifacts(network, Path(output_values[artifact_port]))
+        _collect_artifacts(proc.stdout, Path(output_values[artifact_port]), actor.name)
 
     for port_name, value in output_values.items():
         for q in actor.out_queues.get(port_name, []):
@@ -139,13 +141,44 @@ def _step_streamblocks_instance(
     return True
 
 
-def _collect_artifacts(network: str, destination: Path) -> None:
-    """Move a run's kept artifacts into this firing's own folder."""
-    produced = Path(network).resolve().parent / "calpy-out"
+def _collect_artifacts(stdout: str, destination: Path, actor_name: str) -> None:
+    """Move a run's kept artifacts into this firing's own folder.
+
+    Where they are cannot be guessed. `--keep-artifacts` leaves the build in a
+    temp directory with a random suffix — `calpy_native_<random>` — chosen by
+    `mkdtemp` at compile time, and no flag selects it. What CAN be relied on is
+    that `calpy run` prints the binary it produced, and the binary sits in that
+    directory:
+
+        bin_path = work_dir / "decoder_native"   # compile.py
+        print(f"  binary: {binary}")             # run.py
+
+    so the parent of the printed path is the directory to collect.
+
+    An earlier version guessed at `calpy-out` beside the network. That folder is
+    never created, so the copy silently did nothing and the port still handed
+    on a path to an empty directory — a failure that looks exactly like success.
+    Hence raising rather than returning quietly when the line is absent.
+    """
+    match = re.search(r"^\s*binary:\s*(.+?)\s*$", stdout, re.MULTILINE)
+    if match is None:
+        raise RuntimeError(
+            f"StreamBlocks instance {actor_name!r} asked for build artifacts, but "
+            f"`calpy run` printed no `binary:` line to locate them. Without it "
+            f"there is nothing to collect, and handing on an empty folder would "
+            f"look like it had worked."
+        )
+
+    work_dir = Path(match.group(1)).parent
+    if not work_dir.is_dir():
+        raise RuntimeError(
+            f"StreamBlocks instance {actor_name!r}: the build directory "
+            f"{work_dir} does not exist. `calpy run` needs --keep-artifacts for "
+            f"it to survive the run."
+        )
+
     destination.mkdir(parents=True, exist_ok=True)
-    if not produced.is_dir():
-        return
-    for entry in produced.iterdir():
+    for entry in work_dir.iterdir():
         target = destination / entry.name
         if entry.is_dir():
             shutil.copytree(entry, target, dirs_exist_ok=True)

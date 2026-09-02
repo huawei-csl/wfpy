@@ -122,13 +122,24 @@ class FakePlan:
 
 @pytest.fixture
 def recording_calpy(tmp_path, monkeypatch):
-    """A stand-in `calpy` that records the argv it was handed."""
+    """A stand-in `calpy` that records the argv it was handed.
+
+    It also prints a `binary:` line into a build directory it creates, because
+    the real one does: that line is the only way to find where
+    `--keep-artifacts` left the build, the directory being a
+    `calpy_native_<random>` temp dir no flag selects.
+    """
     log = tmp_path / "argv.txt"
+    build = tmp_path / "calpy_native_fake"
     script = tmp_path / "fake-calpy"
     script.write_text(
         "#!/usr/bin/env python3\n"
         "import sys, pathlib\n"
         f"pathlib.Path({str(log)!r}).write_text('\\n'.join(sys.argv[1:]))\n"
+        f"build = pathlib.Path({str(build)!r})\n"
+        "build.mkdir(parents=True, exist_ok=True)\n"
+        "(build / 'llvm.ll').write_text('; ir')\n"
+        "print(f'  binary: {build / \"decoder_native\"}')\n"
     )
     script.chmod(0o755)
     monkeypatch.setenv(CALPY_COMMAND_ENV, str(script))
@@ -202,6 +213,58 @@ class TestInstanceFiring:
         assert first != second
         assert first.endswith("Node__build__0")
         assert second.endswith("Node__build__1")
+
+    def test_it_collects_the_build_from_where_calpy_says_it_is(self, tmp_path, monkeypatch):
+        """Where `--keep-artifacts` leaves the build cannot be guessed: it is a
+        `calpy_native_<random>` temp dir chosen by mkdtemp, and no flag selects
+        it. What can be relied on is the `binary:` line, whose parent IS that
+        directory."""
+        build_dir = tmp_path / "calpy_native_abc123"
+        build_dir.mkdir()
+        (build_dir / "llvm.ll").write_text("; ir")
+        (build_dir / "decoder_native").write_text("elf")
+
+        script = tmp_path / "calpy-with-artifacts"
+        script.write_text(
+            "#!/usr/bin/env python3\n"
+            "import sys\n"
+            f"print('  binary: {build_dir / 'decoder_native'}')\n"
+        )
+        script.chmod(0o755)
+        monkeypatch.setenv(CALPY_COMMAND_ENV, str(script))
+
+        @streamblocks(facade="instance", network="n.py")
+        class Node:
+            class Ports:
+                stimulus = Port[str](direction="in")
+                build = Port[Resource(kind="folder")](direction="out")
+
+        actor = FakeActor(Node, {"stimulus": "a.bin"})
+        _step_streamblocks_instance(actor, tmp_path, FakePlan(tmp_path), False)
+
+        collected = Path(actor.out_queues["build"][0].enqueued[-1])
+        # The earlier version looked beside the network for a `calpy-out` folder
+        # that is never created, so it copied nothing and handed on an empty
+        # directory — which looks exactly like success.
+        assert (collected / "llvm.ll").read_text() == "; ir"
+        assert (collected / "decoder_native").exists()
+
+    def test_it_refuses_to_hand_on_an_empty_build_folder(self, tmp_path, monkeypatch):
+        """A silent no-op producing an empty folder is the bug this replaced."""
+        silent = tmp_path / "silent-calpy"
+        silent.write_text("#!/usr/bin/env python3\n")
+        silent.chmod(0o755)
+        monkeypatch.setenv(CALPY_COMMAND_ENV, str(silent))
+
+        @streamblocks(facade="instance", network="n.py")
+        class Node:
+            class Ports:
+                stimulus = Port[str](direction="in")
+                build = Port[Resource(kind="folder")](direction="out")
+
+        actor = FakeActor(Node, {"stimulus": "a.bin"})
+        with pytest.raises(RuntimeError, match="no `binary:` line"):
+            _step_streamblocks_instance(actor, tmp_path, FakePlan(tmp_path), False)
 
     def test_a_failing_run_is_not_silent(self, tmp_path, monkeypatch):
         failing = tmp_path / "failing-calpy"
