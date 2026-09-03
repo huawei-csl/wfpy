@@ -623,3 +623,157 @@ class TestCreateStreamblocksType:
             "facade": "instance",
             "network": "designs/adder.py",
         }
+
+
+class TestCreateSourceType:
+    """Writing a source from the diagram.
+
+    A source is the one task shape with no inputs, so the generated class must
+    not carry the input port every other kind gets — the ports body is written
+    per kind and the default is `In` + `Out`.
+    """
+
+    SOURCE = (
+        "from wfpy import workflow\n\n"
+        "@workflow(inputs={}, outputs={})\n"
+        "def top():\n"
+        "    pass\n"
+    )
+
+    def test_it_writes_a_source_class(self, tmp_path):
+        engine = _engine_from_source(tmp_path, self.SOURCE)
+        engine.create_task_type(kind="source", name="Frames")
+        code = engine.module.code
+
+        assert "class Frames:" in code
+        assert "@source" in code
+
+    def test_it_has_an_output_and_no_input(self, tmp_path):
+        """A source with an input port is refused at import time, so writing
+        one would produce a class that cannot be loaded."""
+        engine = _engine_from_source(tmp_path, self.SOURCE)
+        engine.create_task_type(kind="source", name="Frames")
+        code = engine.module.code
+
+        assert 'direction = "out"' in code
+        assert 'direction = "in"' not in code
+        assert "In = " not in code
+
+    def test_it_declares_the_path_parameter(self, tmp_path):
+        """Annotated with no default — a default would make it state shared by
+        every node, which the decorator refuses."""
+        engine = _engine_from_source(tmp_path, self.SOURCE)
+        engine.create_task_type(kind="source", name="Frames")
+        code = engine.module.code
+
+        assert "path: File" in code
+        assert "path: File =" not in code
+
+    def test_it_carries_a_named_editor_when_given_one(self, tmp_path):
+        engine = _engine_from_source(tmp_path, self.SOURCE)
+        engine.create_task_type(kind="source", name="Design", viewType="product.diagram")
+
+        assert 'viewType = "product.diagram"' in engine.module.code
+
+    def test_it_omits_the_editor_when_none_is_given(self, tmp_path):
+        """No editor means the default one, which is a real choice — writing an
+        empty viewType would ask the IDE to open with an editor named ''."""
+        engine = _engine_from_source(tmp_path, self.SOURCE)
+        engine.create_task_type(kind="source", name="Frames")
+
+        assert "viewType" not in engine.module.code
+
+    @pytest.mark.parametrize("blank", ["", "   "])
+    def test_a_blank_editor_is_the_same_as_none(self, tmp_path, blank):
+        """An empty viewType is not an empty choice — written out it asks the
+        IDE to open the resource with an editor named "", which matches
+        nothing. The wizard produces one whenever the user skips the question."""
+        engine = _engine_from_source(tmp_path, self.SOURCE)
+        engine.create_task_type(kind="source", name="Frames", viewType=blank)
+
+        assert "viewType" not in engine.module.code
+        assert "@source\n" in engine.module.code
+
+    def test_it_imports_what_the_class_needs(self, tmp_path):
+        engine = _engine_from_source(tmp_path, self.SOURCE)
+        engine.create_task_type(kind="source", name="Frames")
+        code = engine.module.code
+
+        assert "source" in code.split("\n")[1]
+        assert "Port" in code
+        assert "File" in code
+
+    def test_the_written_class_actually_imports(self, tmp_path):
+        """The point of the op. Every assertion above is about the text; this
+        one runs it, which is what the author will do."""
+        engine = _engine_from_source(tmp_path, self.SOURCE)
+        engine.create_task_type(kind="source", name="Frames")
+
+        module = tmp_path / "written.py"
+        module.write_text(engine.module.code)
+        namespace: dict = {}
+        exec(compile(module.read_text(), str(module), "exec"), namespace)
+
+        assert namespace["Frames"]._wfpy_meta.kind == "source"
+
+
+class TestListableKinds:
+    """Every kind the sidecar can create, it can also list.
+
+    These are two hand-maintained lists of kinds, and they had already drifted:
+    `streamblocks` could be created but never listed, so the picker could not
+    show a type the picker itself had written.
+    """
+
+    def _engine(self, tmp_path, body):
+        return _engine_from_source(tmp_path, body)
+
+    def test_every_creatable_kind_is_listable(self, tmp_path):
+        from wfpy.rewrite import TASK_TYPE_KINDS
+
+        for kind in TASK_TYPE_KINDS:
+            engine = self._engine(tmp_path, "from wfpy import workflow\n")
+            assert engine.list_task_types(kind=kind) == [], (
+                f"{kind!r} is creatable but not listable"
+            )
+
+    def test_it_lists_a_bare_decorator(self, tmp_path):
+        engine = self._engine(
+            tmp_path,
+            "from wfpy import source, File, Port\n\n@source\nclass Frames:\n    pass\n",
+        )
+
+        assert engine.list_task_types(kind="source") == ["Frames"]
+
+    def test_it_lists_a_called_decorator(self, tmp_path):
+        engine = self._engine(
+            tmp_path,
+            'from wfpy import source\n\n@source(viewType="x")\nclass Frames:\n    pass\n',
+        )
+
+        assert engine.list_task_types(kind="source") == ["Frames"]
+
+    def test_it_lists_a_streamblocks_type(self, tmp_path):
+        """Creatable since the node shipped, listable only now."""
+        engine = self._engine(
+            tmp_path,
+            'from wfpy import streamblocks\n\n@streamblocks(facade="design")\nclass D:\n    pass\n',
+        )
+
+        assert engine.list_task_types(kind="streamblocks") == ["D"]
+
+    def test_it_does_not_confuse_kinds(self, tmp_path):
+        engine = self._engine(
+            tmp_path,
+            "from wfpy import source, viewer\n\n"
+            "@source\nclass Frames:\n    pass\n\n"
+            "@viewer\nclass Show:\n    pass\n",
+        )
+
+        assert engine.list_task_types(kind="source") == ["Frames"]
+        assert engine.list_task_types(kind="viewer") == ["Show"]
+
+    def test_an_unknown_kind_lists_nothing(self, tmp_path):
+        engine = self._engine(tmp_path, "from wfpy import task\n\n@task\nclass T:\n    pass\n")
+
+        assert engine.list_task_types(kind="nonsense") == []

@@ -142,6 +142,14 @@ def load_module(file_path: str) -> tuple[cst.Module, str, str]:
     return module, source_text, revision
 
 
+# The task kinds the sidecar can create and list. One list, because these are
+# two hand-maintained sets that had already drifted: `streamblocks` was
+# creatable but not listable, so the picker could not offer a type it had
+# written itself. Each name is also the decorator's name, which is what lets
+# one matcher serve every kind.
+TASK_TYPE_KINDS = ("task", "tool", "agent", "viewer", "streamblocks", "source")
+
+
 @dataclasses.dataclass
 class RewriteError(RuntimeError):
     message: str
@@ -921,8 +929,14 @@ class RewriteEngine:
         self._set_module(updated)
 
     def list_task_types(self, *, kind: str) -> list[str]:
-        kinds = {"tool", "agent", "viewer", "task"}
-        if kind not in kinds:
+        """Every class in this file declared with the given kind's decorator.
+
+        The kind IS the decorator name, so one matcher pair serves all of them.
+        This was a ladder of one pair per kind, which is how `streamblocks`
+        came to be creatable but not listable: the picker could not offer a
+        type the picker itself had written.
+        """
+        if kind not in TASK_TYPE_KINDS:
             return []
         results: list[str] = []
 
@@ -930,28 +944,10 @@ class RewriteEngine:
             def visit_ClassDef(self, node: cst.ClassDef) -> None:
                 for dec in node.decorators:
                     target = dec.decorator
-                    if kind == "tool" and m.matches(target, m.Name("tool")):
-                        results.append(node.name.value)
-                        return
-                    if kind == "tool" and m.matches(target, m.Call(func=m.Name("tool"))):
-                        results.append(node.name.value)
-                        return
-                    if kind == "agent" and m.matches(target, m.Name("agent")):
-                        results.append(node.name.value)
-                        return
-                    if kind == "agent" and m.matches(target, m.Call(func=m.Name("agent"))):
-                        results.append(node.name.value)
-                        return
-                    if kind == "viewer" and m.matches(target, m.Name("viewer")):
-                        results.append(node.name.value)
-                        return
-                    if kind == "viewer" and m.matches(target, m.Call(func=m.Name("viewer"))):
-                        results.append(node.name.value)
-                        return
-                    if kind == "task" and m.matches(target, m.Name("task")):
-                        results.append(node.name.value)
-                        return
-                    if kind == "task" and m.matches(target, m.Call(func=m.Name("task"))):
+                    # `@kind` and `@kind(...)` are the same declaration.
+                    if m.matches(target, m.Name(kind)) or m.matches(
+                        target, m.Call(func=m.Name(kind))
+                    ):
                         results.append(node.name.value)
                         return
 
@@ -1110,9 +1106,10 @@ class RewriteEngine:
         name: str,
         facade: str | None = None,
         network: str | None = None,
+        viewType: str | None = None,
     ) -> None:
         self._ensure_identifier(name)
-        if kind not in ("tool", "agent", "viewer", "task", "streamblocks"):
+        if kind not in TASK_TYPE_KINDS:
             raise RewriteError(message=f"Invalid task kind: {kind}")
         if kind == "streamblocks":
             if facade not in ("design", "instance"):
@@ -1158,10 +1155,37 @@ class RewriteEngine:
                     )
                 )
             decorator = cst.Call(func=cst.Name("streamblocks"), args=sb_args)
+        elif kind == "source" and isinstance(viewType, str) and viewType.strip():
+            decorator = cst.Call(
+                func=cst.Name("source"),
+                args=[cst.Arg(
+                    keyword=cst.Name("viewType"),
+                    value=cst.SimpleString(f'"{viewType.strip()}"'),
+                )],
+            )
         else:
+            # An empty viewType is not the same as none: it would ask the IDE
+            # to open with an editor named "". No editor means the default one.
             decorator = cst.Name(kind)
         ensure_import = False
-        if kind == "viewer":
+        # A source is the mirror of a viewer: one output, no input. Writing the
+        # default In + Out would produce a class the decorator refuses to load.
+        if kind == "source":
+            ports_body = [
+                cst.SimpleStatementLine([
+                    cst.Assign(
+                        targets=[cst.AssignTarget(target=cst.Name("Out"))],
+                        value=cst.Call(
+                            func=cst.Subscript(
+                                value=cst.Name("Port"),
+                                slice=[cst.SubscriptElement(slice=cst.Index(value=cst.Name("File")))]
+                            ),
+                            args=[cst.Arg(keyword=cst.Name("direction"), value=cst.SimpleString('"out"'))]
+                        )
+                    )
+                ])
+            ]
+        elif kind == "viewer":
             ports_body = [
                 cst.SimpleStatementLine([
                     cst.Assign(
@@ -1208,12 +1232,22 @@ class RewriteEngine:
             name=cst.Name("Ports"),
             body=cst.IndentedBlock(body=ports_body)
         )
+        class_body: list[cst.BaseStatement] = [ports_class]
+        if kind == "source":
+            # Annotated with NO default. A class-level default would make this
+            # state shared by every node rather than a per-node parameter, and
+            # the decorator refuses that outright.
+            class_body.insert(0, cst.SimpleStatementLine([
+                cst.AnnAssign(
+                    target=cst.Name("path"),
+                    annotation=cst.Annotation(cst.Name("File")),
+                    value=None,
+                )
+            ]))
         class_def = cst.ClassDef(
             name=cst.Name(name),
             decorators=[cst.Decorator(decorator=decorator)],
-            body=cst.IndentedBlock(
-                body=[ports_class]
-            )
+            body=cst.IndentedBlock(body=class_body)
         )
         body = list(self.module.body)
         insert_at = len(body)
@@ -1229,8 +1263,12 @@ class RewriteEngine:
             # built from. Adding one of the three was enough while every file
             # already imported the other two by hand; it stops being enough the
             # moment a node is created in a file that does not.
-            updated = self._ensure_any_import(updated)
-            # `kind` IS the decorator's name for all four kinds — `tool` and
+            if kind == "source":
+                # Its ports and its parameter are typed `File`, not `Any`.
+                updated = self._ensure_import(updated, "wfpy", ["File"])
+            else:
+                updated = self._ensure_any_import(updated)
+            # `kind` IS the decorator's name for every kind — `tool` and
             # `agent` are called (`@tool(...)`), which changes the decorator
             # expression but not the symbol that has to be in scope.
             updated = self._ensure_import(updated, "wfpy", ["Port", kind])
