@@ -170,7 +170,10 @@ def _build_task_meta(
             if rec.meta.kind == "source":
                 instance_path = getattr(rec.instance, "path", None)
                 locator = "" if instance_path is None else str(instance_path)
-                if locator:
+                # Both conditions, though the second implies the first: the
+                # narrowing has to be on the value that gets passed on, not on
+                # the string derived from it.
+                if instance_path is not None and locator:
                     viewer_args.append(
                         {"name": "path", "value": _wf_string_literal(locator)}
                     )
