@@ -30,6 +30,8 @@ __all__ = [
     "keep",
     "config",
     "viewer",
+    "streamblocks",
+    "source",
     # Internal helpers exposed for the runner
     "TaskMeta",
     "WorkflowDef",
@@ -1316,6 +1318,138 @@ def streamblocks(
             # Fall back to the outputs, since a design's target is what it made.
             viewer_annotation["inputs"] = list(meta.output_ports.keys())
         meta.annotations["viewer"] = viewer_annotation
+        return klass
+
+    if cls is not None:
+        return decorator(cls)
+    return decorator
+
+
+def source(
+    cls: type | None = None,
+    *,
+    viewType: str | None = None,
+    action_name: str = "open",
+) -> Any:
+    """Decorator marking a class as a source: one resource, emitted once.
+
+    The mirror of :func:`viewer`. A viewer is a sink you can open; a source is
+    a producer you can open, and what it emits is the resource it holds::
+
+        @source
+        class Frames:
+            path: File          # a parameter: annotated, no class-level default
+
+            class Ports:
+                Out = Port[File](direction="out")
+
+    ``path`` is an ordinary task parameter, so one class serves many files and
+    each node carries its own::
+
+        Frames(path=File("a.yuv"))
+        Frames(path=File("b.yuv"))
+
+    Giving it a class-level default would make it *state* rather than a
+    parameter — wfpy's rule, not this decorator's — and every node would then
+    share one resource. That is refused rather than silently accepted.
+
+    It may name a file, a folder or a URL — :class:`Resource` already covers
+    all three, and the kind is resolved when the graph is exported, where the
+    filesystem is visible. Double-clicking the node opens it: in the editor
+    named by ``viewType=`` if one is named, in the default editor otherwise, in
+    a browser for a URL, and in the explorer for a folder.
+
+    Unlike every other producer, a source has nothing to wait for — no inputs
+    means nothing can trigger it and nothing can stop it. So the emit-once
+    action is written for you, guarded on having not yet fired. A class that
+    declares its own actions keeps them and is left alone; the guarantee is
+    only that you never have to hand-roll the latch.
+    """
+
+    def decorator(klass: type) -> type:
+        ports = extract_ports(klass)
+        inputs, outputs = _infer_direction(ports)
+        if inputs:
+            raise TypeError(
+                f"@source on {klass.__name__}: a source has no inputs, but "
+                f"{', '.join(sorted(inputs))} "
+                f"{'is' if len(inputs) == 1 else 'are'} declared as one. "
+                "A node that consumes is a task, not a source."
+            )
+        if len(outputs) != 1:
+            raise TypeError(
+                f"@source on {klass.__name__}: expected exactly one output "
+                f"port, found {len(outputs)}. A source emits one resource, so "
+                'declare one — Out = Port[File](direction="out").'
+            )
+        out_attr = next(iter(outputs))
+        out_port = outputs[out_attr].name or out_attr
+
+        # Only when the class writes none of its own: a source that needs to do
+        # something more than hand over its path is an ordinary task, and this
+        # must not quietly outvote it.
+        if not any(
+            callable(getattr(klass, attr, None))
+            and hasattr(getattr(klass, attr), "_wfpy_action")
+            for attr in dir(klass)
+        ):
+            def emit(self: Any) -> Any:
+                self._wfpy_source_emitted = True
+                return getattr(self, "path")
+
+            emit.__name__ = "emit"
+            emit.__doc__ = "Emit the declared resource. Fires once."
+            emit._wfpy_action = ActionDef(  # type: ignore[attr-defined]
+                name="emit",
+                fn=emit,
+                # Explicitly zero-input rather than inferred: a source fires
+                # with nothing to consume, and `None` here would mean "work it
+                # out from the signature", which is not the same statement.
+                consumes={},
+                produces={out_port: 1},
+                guard_fn=lambda self: not getattr(self, "_wfpy_source_emitted", False),
+            )
+            setattr(klass, "emit", emit)
+            # State, so the latch is per instance and the runner can see it.
+            klass.__annotations__["_wfpy_source_emitted"] = bool
+            setattr(klass, "_wfpy_source_emitted", False)
+
+        klass = task(klass)
+        meta: TaskMeta = klass._wfpy_meta  # type: ignore[attr-defined]
+        meta.kind = "source"
+
+        # Checked against the classified parameters rather than the raw
+        # annotations, so the two ways of getting this wrong are told apart: a
+        # `path` with a class-level default is state, which every instance would
+        # share, and that reads as a working declaration until two nodes point
+        # at the same file.
+        if "path" not in meta.parameters:
+            if "path" in meta.state_fields:
+                raise TypeError(
+                    f"@source on {klass.__name__}: `path` has a class-level "
+                    "default, which makes it state shared by every instance. "
+                    "Drop the default so each node carries its own resource — "
+                    "`path: File`, then Frames(path=File(\"a.yuv\"))."
+                )
+            raise TypeError(
+                f"@source on {klass.__name__} requires a `path` parameter — "
+                "the resource it emits. Declare it as `path: File`, with no "
+                "class-level default."
+            )
+
+        # The same annotation the IDE already reads to open a node, rather than
+        # a second way to say the same thing. `path` is deliberately absent: it
+        # is per instance, and this dict is shared by every instance of the
+        # class, so the exporter fills it in per node instead.
+        viewer_annotation: dict[str, Any] = {
+            "action": "openWith" if viewType else action_name,
+            "source": "declared",
+            "inputs": [],
+        }
+        if isinstance(viewType, str) and viewType.strip() != "":
+            viewer_annotation["viewType"] = viewType
+        meta.annotations["viewer"] = viewer_annotation
+        meta.annotations["source"] = {"port": out_port}
         return klass
 
     if cls is not None:

@@ -4,6 +4,17 @@ All notable changes to wfpy are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and wfpy uses
 [PEP 440](https://peps.python.org/pep-0440/) versioning.
 
+## [Unreleased]
+
+### Added
+- `@source` — a node holding one resource (file, folder or web resource) that
+  emits it once and opens it on double-click. The mirror of `@viewer`: a viewer
+  is a sink you can open, a source is a producer you can open. The emit-once
+  action is generated, because a source has no inputs and so nothing in the
+  wiring can start or stop it; a class that declares its own actions keeps them.
+  `path` is a task parameter, so one class serves many nodes and each carries
+  its own resource.
+
 ## [1.0.0] — 2026-07-24
 
 First stable release.
