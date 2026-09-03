@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from wfpy.core import TaskMeta, WorkflowDef
+from wfpy.types import infer_resource_kind
 
 
 def _instance_type_name(instance: Any) -> str:
@@ -161,6 +162,32 @@ def _build_task_meta(
                 viewer_args.append(
                     {"name": "path", "value": _wf_string_literal(declared_path)}
                 )
+            # A source declares its target as a PARAMETER, so the value is
+            # per instance while `viewer_cfg` is the class's own dict, shared
+            # by every instance of it. Read the instance and never write back:
+            # mutating the annotation here would leak one node's path onto its
+            # siblings.
+            if rec.meta.kind == "source":
+                instance_path = getattr(rec.instance, "path", None)
+                locator = "" if instance_path is None else str(instance_path)
+                if locator:
+                    viewer_args.append(
+                        {"name": "path", "value": _wf_string_literal(locator)}
+                    )
+                    # What the target IS, settled here because this is where the
+                    # filesystem is visible. The diagram cannot tell a folder
+                    # from a file by looking at the string.
+                    resource_kind = infer_resource_kind(instance_path)
+                    # A locator with a scheme is not a local file whatever the
+                    # port type says: `File` pins kind="file" as a class
+                    # default, so it describes the port, not this value.
+                    locator_kind = infer_resource_kind(locator)
+                    if locator_kind in {"http", "url"}:
+                        resource_kind = locator_kind
+                    if resource_kind:
+                        viewer_args.append(
+                            {"name": "kind", "value": _wf_string_literal(resource_kind)}
+                        )
             command = viewer_cfg.get("command")
             if isinstance(command, str) and command.strip():
                 viewer_args.append(
@@ -190,6 +217,12 @@ def _build_task_meta(
     ]
     if rec.meta.kind == "viewer":
         meta["viewer"] = True
+    if rec.meta.kind == "source":
+        # Say what this node IS. The double-click is only read on an external
+        # node, and a source stands for something outside the graph by
+        # definition — the resource it hands in.
+        meta["external"] = True
+        meta["source"] = dict(rec.meta.annotations.get("source") or {})
     if rec.meta.kind == "streamblocks":
         annotation = rec.meta.annotations.get("streamblocks") or {}
         meta["streamblocks"] = dict(annotation)

@@ -79,6 +79,7 @@ def double_pipeline():
 | `@agent(transport="mock")` offline agents (no model, no credentials) | ✅ |
 | `@context(read=[...], write=[...])` task context policy | ✅ |
 | `@viewer(action_name=..., inputs=[...], viewType=...)` sink/view tasks | ✅ |
+| `@source(viewType=...)` one resource — file, folder or URL — emitted once | ✅ |
 | Nested workflows | ✅ |
 | CLI (`wfpy run`) | ✅ |
 | JSON plan IR export | ✅ |

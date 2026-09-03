@@ -1065,6 +1065,10 @@ def _step_actor(
         if annotation.get("facade") == "instance":
             return _step_streamblocks_instance(actor, out_dir, plan, verbose)
         return _step_internal(actor, out_dir, plan, verbose)
+    elif actor.kind == "source":
+        # An ordinary task: the decorator wrote the emit action, so the normal
+        # firing rules apply and the guard is what stops it after one token.
+        return _step_internal(actor, out_dir, plan, verbose)
     elif actor.kind == "control-if":
         return _step_control_if(actor, plan, out_dir, verbose, active_scopes)
     elif actor.kind == "control-loop":
