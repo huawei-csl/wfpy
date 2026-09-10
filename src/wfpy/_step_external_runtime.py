@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import collections
 import copy
 import logging
 import os
@@ -9,6 +10,8 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,6 +26,64 @@ from wfpy.core import TaskMeta
 logger = logging.getLogger("wfpy")
 
 _PLACEHOLDER_RE = re.compile(r"\{(in|out|param)(?:\.(\w+))?\}")
+
+#: Lines of each stream a failing tool's message keeps.
+_TAIL_LINES = 60
+
+
+def _run_streaming(
+    cmd: str | list[str],
+    *,
+    cwd: str,
+    env: dict[str, str],
+    shell: bool,
+) -> tuple[int, str, str]:
+    """Run a tool with its output streamed to ours as it comes.
+
+    The last lines of each stream are kept for the failure message: a tool
+    that inherited our stdio used to fail with "(no stderr)", hiding the one
+    thing a person needs to see.
+    """
+    proc = subprocess.Popen(
+        cmd,
+        cwd=cwd,
+        env=env,
+        shell=shell,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        errors="replace",
+        bufsize=1,
+    )
+    out_tail: collections.deque[str] = collections.deque(maxlen=_TAIL_LINES)
+    err_tail: collections.deque[str] = collections.deque(maxlen=_TAIL_LINES)
+
+    def pump(stream: Any, sink: Any, tail: collections.deque[str]) -> None:
+        for line in stream:
+            sink.write(line)
+            sink.flush()
+            tail.append(line)
+        stream.close()
+
+    pumps = [
+        threading.Thread(target=pump, args=(proc.stdout, sys.stdout, out_tail), daemon=True),
+        threading.Thread(target=pump, args=(proc.stderr, sys.stderr, err_tail), daemon=True),
+    ]
+    for thread in pumps:
+        thread.start()
+    returncode = proc.wait()
+    for thread in pumps:
+        thread.join()
+    return returncode, "".join(out_tail), "".join(err_tail)
+
+
+def _failure_output(stdout: str | None, stderr: str | None) -> str:
+    """What a failing tool said: its stderr, or its stdout when that is where
+    it wrote the error (yosys, export-rtl), cut to the last lines."""
+    text = (stderr or "").strip() or (stdout or "").strip()
+    if not text:
+        return "(no output)"
+    return "\n".join(text.splitlines()[-_TAIL_LINES:])
 
 
 def _substitute_tool_placeholders(
@@ -213,25 +274,31 @@ def _step_external(
         existing = env.get("PATH", "")
         env["PATH"] = f"{prefix}{os.pathsep}{existing}" if existing else prefix
 
-    # inheritStdio defaults to True (matching TS behaviour)
-    inherit_stdio = tool_spec.inherit_stdio
-
     tool_started = time.perf_counter()
-    proc = subprocess.run(
-        run_cmd,
-        cwd=cwd,
-        env=env,
-        shell=tool_spec.shell,
-        capture_output=not inherit_stdio,
-        text=True,
-    )
+    if tool_spec.inherit_stdio:
+        # Streamed to our own output as it comes, with the last lines kept:
+        # a failure then says what the tool said, not "(no stderr)".
+        returncode, stdout_text, stderr_text = _run_streaming(
+            run_cmd, cwd=cwd, env=env, shell=tool_spec.shell
+        )
+    else:
+        proc = subprocess.run(
+            run_cmd,
+            cwd=cwd,
+            env=env,
+            shell=tool_spec.shell,
+            capture_output=True,
+            text=True,
+            errors="replace",
+        )
+        returncode, stdout_text, stderr_text = proc.returncode, proc.stdout, proc.stderr
     duration_ms = int((time.perf_counter() - tool_started) * 1000)
     print(
-        f"[wfpy][tool] {actor.name} finished: duration={duration_ms}ms, exit_code={proc.returncode}",
+        f"[wfpy][tool] {actor.name} finished: duration={duration_ms}ms, exit_code={returncode}",
         flush=True,
     )
-    if proc.returncode != 0:
-        stderr = proc.stderr or "(no stderr)"
+    if returncode != 0:
+        stderr = _failure_output(stdout_text, stderr_text)
         try:
             _apply_context_patch(
                 plan,
@@ -246,7 +313,7 @@ def _step_external(
                             "value": {
                                 "phase": "result",
                                 "status": "failed",
-                                "exitCode": proc.returncode,
+                                "exitCode": returncode,
                                 "stderr": stderr,
                                 "timestamp": datetime.now(timezone.utc).isoformat(),
                             },
@@ -259,7 +326,7 @@ def _step_external(
             pass
         raise RuntimeError(
             f"External tool {cmd!r} (actor {actor.name!r}) exited with code "
-            f"{proc.returncode}:\n{stderr}"
+            f"{returncode}:\n{stderr}"
         )
 
     # Enqueue output values
