@@ -205,6 +205,7 @@ class WorkflowGraph:
 
         instance._wfpy_instance_name = name
 
+        definition: Any = None
         if meta is not None:
             self.actors[name] = ActorRecord(
                 instance_name=name,
@@ -212,6 +213,7 @@ class WorkflowGraph:
                 meta=meta,
                 scope_id=self.current_scope_id,
             )
+            definition = type(instance)
         elif wf_def is not None:
             self.actors[name] = ActorRecord(
                 instance_name=name,
@@ -219,14 +221,15 @@ class WorkflowGraph:
                 meta=wf_def,
                 scope_id=self.current_scope_id,
             )
+            # A nested workflow's instance is a proxy whose class lives in
+            # wfpy.core; its definition is the workflow's own (a factory's
+            # inner one too).
+            definition = wf_def.builder_fn or wf_def.cls
         if meta is not None or wf_def is not None:
             # Where a diagram node navigates. `_wfpy_source` is the line that
             # created the instance: the IDE resolves "go to definition" from
             # it in the file the diagram shows, so it must be a line of that
-            # file. `_wfpy_definition` is what the node names. A nested
-            # workflow's instance is a proxy whose class lives in wfpy.core;
-            # its definition is the workflow's own (a factory's inner one too).
-            definition = type(instance) if meta is not None else (wf_def.builder_fn or wf_def.cls)
+            # file. `_wfpy_definition` is what the node names.
             if getattr(instance, "_wfpy_source", None) is None:
                 instance._wfpy_source = _caller_outside_wfpy()
             if getattr(instance, "_wfpy_definition", None) is None:

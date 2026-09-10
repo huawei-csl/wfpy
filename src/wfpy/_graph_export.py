@@ -248,8 +248,10 @@ def _build_task_meta(
         # An instance with no network cannot compile, run or open. That is wrong
         # in the source whether or not anything has run, so it goes out as a
         # static diagnostic — which the diagram keeps across run-overlay
-        # cleanup, unlike a run marker.
-        if annotation.get("facade") == "instance" and not str(annotation.get("network") or "").strip():
+        # cleanup, unlike a run marker. The network is the decorator's
+        # `network=` or the node's own `network` parameter.
+        network = annotation.get("network") or getattr(rec.instance, "network", None)
+        if annotation.get("facade") == "instance" and not str(network or "").strip():
             diagnostics = list(meta.get("diagnostics") or [])
             diagnostics.append(
                 {

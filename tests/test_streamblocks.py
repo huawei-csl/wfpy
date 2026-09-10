@@ -580,3 +580,27 @@ class TestNetworkParameter:
         outputs = run(only_the_network, out_dir=str(tmp_path / "wf-out"))
 
         assert outputs == {"Network": ["designs/core.py"]}
+
+    def test_a_network_parameter_is_not_reported_missing(self):
+        """The diagram paints a node with an error diagnostic red, so a node
+        that names its network as a parameter must not get one."""
+        from wfpy import connect, workflow
+        from wfpy.graph import export_graph_json
+        from wfpy.runner import _build_workflow_graph
+
+        @streamblocks(facade="instance", run=False)
+        class Net:
+            network: str
+
+            class Ports:
+                Out = Port[str](direction="out")
+
+        @workflow(outputs={"Network": str})
+        def one():
+            net = Net(network="designs/core.py")
+            connect(net.Out, "Network")
+
+        nodes = export_graph_json(_build_workflow_graph(one._wfpy_workflow))["graph"]["nodes"]
+        net = next(node for node in nodes if node.get("label") == "net")
+
+        assert not net["meta"].get("diagnostics")
