@@ -402,7 +402,8 @@ class TestRunArtifacts:
         )
 
         assert outputs["ObservedText"] == ["nested payload"]
-        assert outputs["ObservedName"] == ["artifact"]
+        # named for the instance and its firing: siblings share this directory
+        assert outputs["ObservedName"] == ["child__artifact__0"]
         assert outputs["ObservedUsesChildWorkDir"] == ["False"]
 
     def test_nested_workflow_does_not_replay_prior_outputs_between_fires(self):

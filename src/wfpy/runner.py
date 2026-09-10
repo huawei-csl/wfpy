@@ -398,6 +398,10 @@ class FifoPlan:
         self.wf_output_queues: dict[str, list[Queue]] = {}
         # wf output port descriptors (for materialization)
         self.wf_output_ports: dict[str, PortDescriptor] = {}
+        # Materialized output stem = prefix + port + suffix; a nested
+        # workflow gets "<instance>__" / "__<firing>" (see _output_stem).
+        self.output_name_prefix: str = ""
+        self.output_name_suffix: str = ""
         # Stable external resource/file paths that should keep provenance when
         # later internal tasks simply re-emit them.
         self.wf_input_resource_paths: set[str] = set()
@@ -615,24 +619,92 @@ def build_plan(
                 "summary",
             ):
                 plan.wf_output_ports[name] = pd
+        # A function workflow declares its outputs in `outputs={...}`; a
+        # Resource there (`File(ext=".mlir")`) carries the extension its
+        # materialized copy keeps.
+        for name, port_type in (wf_def.output_names or {}).items():
+            if name in plan.wf_output_ports or not _is_resource_type(port_type):
+                continue
+            plan.wf_output_ports[name] = PortDescriptor(
+                name=name,
+                port_type=port_type,
+                direction="out",
+                ext=port_type.ext if isinstance(port_type, Resource) else "",
+                validate=[],
+                attr_name=name,
+            )
 
     # 4. Build sub-plans for nested workflow actors
     for ra in plan.actors:
         if ra.kind == "workflow" and isinstance(ra.meta, WorkflowDef):
             sub_graph = _build_workflow_graph(ra.meta)
             sub_plan = build_plan(sub_graph, ra.meta)
-            # Inherit parent search_paths / env into sub-plans
-            if plan.search_paths and not sub_plan.search_paths:
-                sub_plan.search_paths = list(plan.search_paths)
-            if plan.env:
-                merged_env = dict(plan.env)
-                merged_env.update(sub_plan.env)  # child overrides parent
-                sub_plan.env = merged_env
-            if plan.source_path and not sub_plan.source_path:
-                sub_plan.source_path = plan.source_path
+            _inherit_plan_config(plan, sub_plan)
             ra.sub_plan = sub_plan
 
     return plan
+
+
+def _inherit_plan_config(parent: FifoPlan, child: FifoPlan) -> None:
+    """Inherit a parent's search_paths / env / source_path into a sub-plan.
+
+    The child's own sub-plans were built before it inherited anything, so the
+    inheritance is pushed down again from here: without that, a tool two
+    workflows below an ``@config`` never sees it.
+    """
+    if parent.search_paths and not child.search_paths:
+        child.search_paths = list(parent.search_paths)
+    if parent.env:
+        merged_env = dict(parent.env)
+        merged_env.update(child.env)  # child overrides parent
+        child.env = merged_env
+    if parent.source_path and not child.source_path:
+        child.source_path = parent.source_path
+    for ra in child.actors:
+        if ra.sub_plan is not None:
+            _inherit_plan_config(child, ra.sub_plan)
+
+
+def _declared_port_sources(wf_def: WorkflowDef) -> dict[str, dict[str, Any]]:
+    """Where each declared workflow port is written, for "go to source".
+
+    A function workflow declares its ports as the keys of
+    ``@workflow(inputs={...}, outputs={...})``, located by parsing the
+    decorator; a class workflow as its ``Ports`` entries. A port found in
+    neither falls back to the declaration's first line.
+    """
+    import ast
+    import inspect
+    import textwrap
+
+    sources: dict[str, dict[str, Any]] = {}
+    for attr, pd in (wf_def.ports or {}).items():
+        if pd.source_file and pd.source_line:
+            sources[pd.name or attr] = {"file": pd.source_file, "line": pd.source_line}
+
+    target = wf_def.builder_fn or wf_def.cls
+    if target is None:
+        return sources
+    try:
+        file = inspect.getsourcefile(target) or ""
+        lines, start = inspect.getsourcelines(target)
+        tree = ast.parse(textwrap.dedent("".join(lines)))
+    except (OSError, TypeError, SyntaxError):
+        return sources
+
+    definition = tree.body[0] if tree.body else None
+    for decorator in getattr(definition, "decorator_list", []):
+        if not isinstance(decorator, ast.Call):
+            continue
+        for keyword in decorator.keywords:
+            if keyword.arg not in ("inputs", "outputs") or not isinstance(keyword.value, ast.Dict):
+                continue
+            for key in keyword.value.keys:
+                if isinstance(key, ast.Constant) and isinstance(key.value, str):
+                    sources.setdefault(key.value, {"file": file, "line": start + key.lineno - 1})
+    for name in (*wf_def.input_names, *wf_def.output_names):
+        sources.setdefault(name, {"file": file, "line": start})
+    return sources
 
 
 def _build_workflow_graph(wf_def: WorkflowDef) -> WorkflowGraph:
@@ -641,6 +713,9 @@ def _build_workflow_graph(wf_def: WorkflowDef) -> WorkflowGraph:
     graph.factory_name = wf_def.factory_name
     if wf_def.factory_parameters:
         graph.factory_parameters = copy.deepcopy(wf_def.factory_parameters)
+    graph.input_names = dict(wf_def.input_names)
+    graph.output_names = dict(wf_def.output_names)
+    graph.port_sources = _declared_port_sources(wf_def)
     with graph:
         builder_fn = wf_def.builder_fn
         if builder_fn is not None:
@@ -762,12 +837,13 @@ def _streamed_output_path(plan: FifoPlan, port_name: str, value: Any, out_dir: P
         return value
 
     ext = port_desc.ext if port_desc and port_desc.ext else ""
+    stem = _plan_outputs_runtime._output_stem(plan, port_name)
     index = plan._streamed_output_counts.get(port_name, 0)
     plan._streamed_output_counts[port_name] = index + 1
     if index == 0:
-        dst = out_dir / f"{port_name}{ext}"
+        dst = out_dir / f"{stem}{ext}"
     else:
-        dst = out_dir / f"{port_name}__{index}{ext}"
+        dst = out_dir / f"{stem}__{index}{ext}"
     _copy_file_safe(locator, str(dst))
     return str(dst)
 
@@ -2333,6 +2409,11 @@ def _step_workflow(
     # Propagate source_path
     if parent_plan.source_path and not sub_plan.source_path:
         sub_plan.source_path = parent_plan.source_path
+
+    # Its outputs are copied beside its siblings': name them for this
+    # instance and firing, as a tool's outputs are.
+    sub_plan.output_name_prefix = f"{actor.name}__"
+    sub_plan.output_name_suffix = f"__{actor.fire_count}"
 
     sub_plan.overlay_writer = parent_plan.overlay_writer
     sub_plan.overlay_path_prefix = [*parent_plan.overlay_path_prefix, actor.name]

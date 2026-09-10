@@ -167,8 +167,17 @@ def _build_task_meta(
             # by every instance of it. Read the instance and never write back:
             # mutating the annotation here would leak one node's path onto its
             # siblings.
+            # Likewise a StreamBlocks instance whose network is its own
+            # `network` parameter rather than the decorator's `network=`.
+            per_node_attr = None
             if rec.meta.kind == "source":
-                instance_path = getattr(rec.instance, "path", None)
+                per_node_attr = "path"
+            elif rec.meta.kind == "streamblocks" and not (
+                isinstance(declared_path, str) and declared_path.strip()
+            ):
+                per_node_attr = "network"
+            if per_node_attr is not None:
+                instance_path = getattr(rec.instance, per_node_attr, None)
                 locator = "" if instance_path is None else str(instance_path)
                 # Both conditions, though the second implies the first: the
                 # narrowing has to be on the value that gets passed on, not on
@@ -609,14 +618,31 @@ def export_graph_json(graph: Any) -> dict[str, Any]:
     scope_nodes: dict[str, list[str]] = {}
     scope_edges: dict[str, list[str]] = {}
 
-    wf_inputs: set[str] = set()
-    wf_outputs: set[str] = set()
+    # Every declared boundary port, connected or not, and any port that is
+    # only connected by name.
+    wf_inputs: set[str] = set(graph.input_names)
+    wf_outputs: set[str] = set(graph.output_names)
 
     for conn in graph.connections:
         if isinstance(conn.from_port, str):
             wf_inputs.add(conn.from_port)
         if isinstance(conn.to_port, str):
             wf_outputs.add(conn.to_port)
+
+    def boundary_port(node_id: str, name: str, direction: str, declared: dict[str, Any]) -> dict[str, Any]:
+        port: dict[str, Any] = {
+            "id": f"port:{node_id}:{direction}",
+            "name": name,
+            "direction": direction,
+            # the `@workflow(inputs=, outputs=)` type, shown as a task port's
+            # is; a port only connected by name has none
+            "type": _display_type(declared[name]) if name in declared else "any",
+            "role": "data",
+        }
+        source = graph.port_sources.get(name)
+        if source:
+            port["source"] = source
+        return port
 
     # Workflow I/O nodes
     for name in sorted(wf_inputs):
@@ -628,15 +654,7 @@ def export_graph_json(graph: Any) -> dict[str, Any]:
                 "kind": "wf-input",
                 "label": name,
                 "scope": "scope:root",
-                "ports": [
-                    {
-                        "id": f"port:{node_id}:out",
-                        "name": name,
-                        "direction": "out",
-                        "type": "any",
-                        "role": "data",
-                    }
-                ],
+                "ports": [boundary_port(node_id, name, "out", graph.input_names)],
             }
         )
 
@@ -649,15 +667,7 @@ def export_graph_json(graph: Any) -> dict[str, Any]:
                 "kind": "wf-output",
                 "label": name,
                 "scope": "scope:root",
-                "ports": [
-                    {
-                        "id": f"port:{node_id}:in",
-                        "name": name,
-                        "direction": "in",
-                        "type": "any",
-                        "role": "data",
-                    }
-                ],
+                "ports": [boundary_port(node_id, name, "in", graph.output_names)],
             }
         )
 
@@ -779,6 +789,11 @@ def export_graph_json(graph: Any) -> dict[str, Any]:
             source_map = rec.instance._wfpy_source
         if source_map:
             meta["source"] = source_map
+        # What the node names -- its task class, its workflow -- which the
+        # diagram opens for "go to definition" and a drill-down.
+        definition = getattr(rec.instance, "_wfpy_definition", None)
+        if definition:
+            meta["referencedSource"] = definition
         nodes.append(node_entry)
 
     # Scopes
