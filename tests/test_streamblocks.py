@@ -466,3 +466,141 @@ class TestDesignIsAnOrdinaryTask:
             connect(r.Out, "Out")
 
         assert run(wf, inputs={"In": 41}) == {"Out": [42]}
+
+
+# ── network as a node parameter, run=False ─────────────────────────────────
+
+
+class TestNetworkParameter:
+    def test_an_instance_can_take_its_network_as_a_parameter(self):
+        @streamblocks(facade="instance", run=False)
+        class Net:
+            network: str
+
+            class Ports:
+                In = Port[str]()
+                Out = Port[str](direction="out")
+
+        meta: TaskMeta = Net._wfpy_meta
+        assert meta.annotations["streamblocks"] == {"facade": "instance", "run": False}
+        assert "network" in meta.parameters
+        assert meta.annotations["viewer"]["source"] == "declared"
+
+    def test_run_false_is_only_for_an_instance(self):
+        with pytest.raises(TypeError, match="run=False"):
+
+            @streamblocks(facade="design", run=False)
+            class Design:
+                class Ports:
+                    Out = Port[str](direction="out")
+
+    def test_run_false_hands_its_network_on_and_runs_nothing(self, tmp_path, monkeypatch):
+        # a `calpy` that would fail loudly if it were called
+        monkeypatch.setenv(CALPY_COMMAND_ENV, str(tmp_path / "no-such-calpy"))
+
+        @streamblocks(facade="instance", run=False)
+        class Net:
+            network: str
+
+            class Ports:
+                In = Port[str]()
+                Out = Port[str](direction="out")
+
+        actor = FakeActor(Net, {})  # `In` not connected
+        actor.instance = Net(network="designs/core.py")
+        plan = FakePlan(tmp_path)
+
+        assert _step_streamblocks_instance(actor, tmp_path, plan, verbose=False)
+        assert actor.out_queues["Out"][0].enqueued == ["designs/core.py"]
+        # with nothing connected, once
+        assert not _step_streamblocks_instance(actor, tmp_path, plan, verbose=False)
+
+    def test_a_connected_input_fires_it_per_token(self, tmp_path):
+        @streamblocks(facade="instance", run=False)
+        class Net:
+            network: str
+
+            class Ports:
+                In = Port[str]()
+                Out = Port[str](direction="out")
+
+        actor = FakeActor(Net, {"In": "go"})
+        actor.instance = Net(network="designs/core.py")
+        plan = FakePlan(tmp_path)
+
+        assert _step_streamblocks_instance(actor, tmp_path, plan, verbose=False)
+        assert actor.in_queues["In"][0].items == []
+        assert not _step_streamblocks_instance(actor, tmp_path, plan, verbose=False)
+
+    def test_each_node_opens_its_own_network(self):
+        from wfpy import connect, workflow
+        from wfpy.graph import export_graph_json
+        from wfpy.runner import _build_workflow_graph
+
+        @streamblocks(facade="instance", run=False)
+        class Net:
+            network: str
+
+            class Ports:
+                In = Port[str]()
+                Out = Port[str](direction="out")
+
+        @workflow(outputs={"A": str, "B": str})
+        def two():
+            a = Net(network="designs/a.py")
+            b = Net(network="designs/b.py")
+            connect(a.Out, "A")
+            connect(b.Out, "B")
+
+        nodes = export_graph_json(_build_workflow_graph(two._wfpy_workflow))["graph"]["nodes"]
+        paths = {}
+        for node in nodes:
+            for annotation in node.get("meta", {}).get("definitionAnnotations") or []:
+                if annotation["name"] == "viewer":
+                    args = {arg["name"]: arg["value"] for arg in annotation["arguments"]}
+                    paths[node["label"]] = args.get("path")
+        assert paths == {"a": '"designs/a.py"', "b": '"designs/b.py"'}
+
+    def test_without_an_input_it_hands_its_network_on_once(self, tmp_path):
+        from wfpy import connect, run, workflow
+
+        # run=False needs no input: nothing it would read one for
+        @streamblocks(facade="instance", run=False)
+        class Net:
+            network: str
+
+            class Ports:
+                Out = Port[str](direction="out")
+
+        @workflow(outputs={"Network": str})
+        def only_the_network():
+            net = Net(network="designs/core.py")
+            connect(net.Out, "Network")
+
+        outputs = run(only_the_network, out_dir=str(tmp_path / "wf-out"))
+
+        assert outputs == {"Network": ["designs/core.py"]}
+
+    def test_a_network_parameter_is_not_reported_missing(self):
+        """The diagram paints a node with an error diagnostic red, so a node
+        that names its network as a parameter must not get one."""
+        from wfpy import connect, workflow
+        from wfpy.graph import export_graph_json
+        from wfpy.runner import _build_workflow_graph
+
+        @streamblocks(facade="instance", run=False)
+        class Net:
+            network: str
+
+            class Ports:
+                Out = Port[str](direction="out")
+
+        @workflow(outputs={"Network": str})
+        def one():
+            net = Net(network="designs/core.py")
+            connect(net.Out, "Network")
+
+        nodes = export_graph_json(_build_workflow_graph(one._wfpy_workflow))["graph"]["nodes"]
+        net = next(node for node in nodes if node.get("label") == "net")
+
+        assert not net["meta"].get("diagnostics")

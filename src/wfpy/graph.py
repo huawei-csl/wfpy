@@ -26,6 +26,21 @@ def _instance_type_name(instance: Any) -> str:
     return str(getattr(instance, "_wfpy_class_name", type(instance).__name__))
 
 
+def _caller_outside_wfpy() -> dict[str, Any] | None:
+    """File and line of the nearest caller that is not wfpy itself: the
+    workflow line that created an instance, wherever wfpy registers it."""
+    frame = inspect.currentframe()
+    try:
+        while frame is not None:
+            module = frame.f_globals.get("__name__", "")
+            if module != "wfpy" and not module.startswith("wfpy."):
+                return {"file": frame.f_code.co_filename, "line": frame.f_lineno}
+            frame = frame.f_back
+        return None
+    finally:
+        del frame
+
+
 @dataclasses.dataclass
 class Connection:
     """A single connection (edge) between two ports."""
@@ -93,6 +108,11 @@ class WorkflowGraph:
         self.name = name
         self.factory_name: str | None = None
         self.factory_parameters: list[dict[str, Any]] = []
+        # The declared `@workflow(inputs=, outputs=)` ports and where each is
+        # written; the runner fills them from the WorkflowDef.
+        self.input_names: dict[str, Any] = {}
+        self.output_names: dict[str, Any] = {}
+        self.port_sources: dict[str, dict[str, Any]] = {}
         self.actors: dict[str, ActorRecord] = {}
         self.connections: list[Connection] = []
         self.scopes: dict[str, ScopeRecord] = {}
@@ -185,6 +205,7 @@ class WorkflowGraph:
 
         instance._wfpy_instance_name = name
 
+        definition: Any = None
         if meta is not None:
             self.actors[name] = ActorRecord(
                 instance_name=name,
@@ -192,14 +213,7 @@ class WorkflowGraph:
                 meta=meta,
                 scope_id=self.current_scope_id,
             )
-            if getattr(instance, "_wfpy_source", None) is None:
-                try:
-                    instance._wfpy_source = {
-                        "file": inspect.getsourcefile(type(instance)) or "",
-                        "line": inspect.getsourcelines(type(instance))[1],
-                    }
-                except Exception:
-                    instance._wfpy_source = None
+            definition = type(instance)
         elif wf_def is not None:
             self.actors[name] = ActorRecord(
                 instance_name=name,
@@ -207,14 +221,25 @@ class WorkflowGraph:
                 meta=wf_def,
                 scope_id=self.current_scope_id,
             )
+            # A nested workflow's instance is a proxy whose class lives in
+            # wfpy.core; its definition is the workflow's own (a factory's
+            # inner one too).
+            definition = wf_def.builder_fn or wf_def.cls
+        if meta is not None or wf_def is not None:
+            # Where a diagram node navigates. `_wfpy_source` is the line that
+            # created the instance: the IDE resolves "go to definition" from
+            # it in the file the diagram shows, so it must be a line of that
+            # file. `_wfpy_definition` is what the node names.
             if getattr(instance, "_wfpy_source", None) is None:
+                instance._wfpy_source = _caller_outside_wfpy()
+            if getattr(instance, "_wfpy_definition", None) is None:
                 try:
-                    instance._wfpy_source = {
-                        "file": inspect.getsourcefile(type(instance)) or "",
-                        "line": inspect.getsourcelines(type(instance))[1],
+                    instance._wfpy_definition = {
+                        "file": inspect.getsourcefile(definition) or "",
+                        "line": inspect.getsourcelines(definition)[1],
                     }
                 except Exception:
-                    instance._wfpy_source = None
+                    instance._wfpy_definition = None
         self._creation_order.append(("actor", name))
         return name
 
@@ -294,8 +319,14 @@ class WorkflowGraph:
         frame = None
         try:
             frame = inspect.currentframe()
-            if frame is not None and frame.f_back is not None:
-                info = inspect.getframeinfo(frame.f_back)
+            # The public connect() (and `>>`) hand in their caller's frame:
+            # the workflow line that wired this edge. The frame above this
+            # method is wfpy's own connect().
+            where = caller_frame if caller_frame is not None else (
+                frame.f_back if frame is not None else None
+            )
+            if where is not None:
+                info = inspect.getframeinfo(where)
                 if info.filename and info.lineno:
                     source_meta = {"file": info.filename, "line": info.lineno}
         except Exception:

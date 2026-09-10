@@ -38,6 +38,9 @@ def _materialize_outputs(
     - Single File token:   ``{portName}{ext}``
     - Multiple File tokens: ``{portName}__{i}{ext}``
     - Non-File tokens:     ``{portName}.json``
+
+    ``{portName}`` is the stem from :func:`_output_stem`, which a nested
+    workflow extends with its instance and firing.
     """
 
     materialized: dict[str, list[str]] = {}
@@ -54,20 +57,36 @@ def _materialize_outputs(
 
         if not is_file and all(isinstance(v, str) and os.path.isfile(v) for v in values):
             is_file = True
+        # A folder is handed on as it is, as a streamed output already is.
+        if is_file and any(os.path.isdir(str(v)) for v in values):
+            is_file = False
 
         if is_file:
             materialized[port_name] = []
+            stem = _output_stem(plan, port_name)
             if len(values) == 1:
-                dst = out_dir / f"{port_name}{ext}"
+                dst = out_dir / f"{stem}{ext}"
                 _copy_file_safe(str(values[0]), str(dst))
                 materialized[port_name].append(str(dst))
             else:
                 for i, val in enumerate(values):
-                    dst = out_dir / f"{port_name}__{i}{ext}"
+                    dst = out_dir / f"{stem}__{i}{ext}"
                     _copy_file_safe(str(val), str(dst))
                     materialized[port_name].append(str(dst))
 
     return materialized
+
+
+def _output_stem(plan: Any, port_name: str) -> str:
+    """File stem for a workflow output port's materialized copy.
+
+    A top-level run keeps the port's name (``Out.mlir``). A nested workflow
+    materializes into its PARENT's directory, beside its siblings, so the
+    runner gives it the instance and firing a tool output has
+    (``sim__Log__0.log``); otherwise two siblings' ``Out`` are one file.
+    """
+
+    return f"{plan.output_name_prefix}{port_name}{plan.output_name_suffix}"
 
 
 def _serialize_non_file_outputs(

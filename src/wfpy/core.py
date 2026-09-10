@@ -1250,6 +1250,7 @@ def streamblocks(
     network: str | None = None,
     inputs: list[str] | None = None,
     env: dict[str, str] | None = None,
+    run: bool = True,
 ) -> Any:
     """Decorator marking a class as a StreamBlocks/CalPy design node.
 
@@ -1268,10 +1269,15 @@ def streamblocks(
         ports onto flags. Double-clicking opens the DECLARED file, so it works
         before anything has run and while a long compile is still going.
 
-    ``network=`` is required for ``instance``: without one there is nothing to
-    compile, run or open, which is a static error rather than a run-time
-    failure. It stays optional for ``design``, where having produced nothing yet
-    is a legitimate state.
+    ``network=`` is required for ``instance`` -- or a ``network`` parameter
+    (annotated, no default), which gives every node of the class its own
+    network: without one there is nothing to compile, run or open, which is a
+    static error rather than a run-time failure. It stays optional for
+    ``design``, where having produced nothing yet is a legitimate state.
+
+    ``run=False`` makes an ``instance`` stand for its network instead of
+    running it: firing hands the network on, for a flow that lowers the design
+    rather than executing it (``calpy run`` compiles it natively).
 
     The double-click is not new machinery. It rides the same ``viewer``
     annotation the IDE already reads, with ``source`` saying whether the target
@@ -1282,20 +1288,30 @@ def streamblocks(
         raise TypeError(
             f"@streamblocks(facade={facade!r}): expected 'design' or 'instance'"
         )
-    if facade == "instance" and (not isinstance(network, str) or network.strip() == ""):
+    if not run and facade != "instance":
         raise TypeError(
-            "@streamblocks(facade='instance') requires network='path/to/network.py' — "
-            "an instance with no network has nothing to compile, run or open"
+            "@streamblocks(run=False) is for facade='instance': a design runs its "
+            "own actions and never calls `calpy run`"
         )
+    has_network = isinstance(network, str) and network.strip() != ""
 
     def decorator(klass: type) -> type:
         klass = task(klass)
         meta: TaskMeta = klass._wfpy_meta  # type: ignore[attr-defined]
+        if facade == "instance" and not has_network and "network" not in meta.parameters:
+            raise TypeError(
+                f"@streamblocks(facade='instance') on {klass.__name__} requires "
+                "network='path/to/network.py' or a `network` parameter (annotated, "
+                "no default) — an instance with no network has nothing to compile, "
+                "run or open"
+            )
         meta.kind = "streamblocks"
 
         streamblocks_annotation: dict[str, Any] = {"facade": facade}
-        if isinstance(network, str) and network.strip() != "":
+        if has_network:
             streamblocks_annotation["network"] = network
+        if not run:
+            streamblocks_annotation["run"] = False
         if env:
             # Merged over the workflow's own `@config(env=)`, as a tool's is.
             streamblocks_annotation["env"] = dict(env)

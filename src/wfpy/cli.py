@@ -357,9 +357,29 @@ def cmd_plan(args: argparse.Namespace) -> None:
     module = _load_module(args.file)
     workflows = _find_workflows(module)
 
-    if not workflows:
+    # A diagram drill-down into a workflow a factory builds names that
+    # workflow, which is no module attribute until the factory is called.
+    factory = None
+    if (
+        getattr(args, "format", "plan") == "graph"
+        and getattr(args, "best_effort", False)
+        and args.workflow
+        and args.workflow not in workflows
+    ):
+        factory = _find_workflow_factory(module, args.file, args.workflow)
+
+    if not workflows and factory is None:
         print(f"Error: no @workflow found in {args.file}", file=sys.stderr)
         sys.exit(1)
+
+    if factory is not None:
+        try:
+            wf_def = _elaborate_factory_for_display(factory)._wfpy_workflow
+            plan_json = export_graph_json(_build_workflow_graph(wf_def))
+        except Exception as exc:
+            plan_json = build_partial_graph(args.file, args.workflow, exc)
+        _write_plan_json(plan_json, args.output)
+        return
 
     if args.workflow:
         target = workflows.get(args.workflow)
@@ -383,12 +403,71 @@ def cmd_plan(args: argparse.Namespace) -> None:
         plan = build_plan(graph, wf_def)
         plan_json = export_plan_json(plan)
 
-    out_path = args.output
+    _write_plan_json(plan_json, args.output)
+
+
+def _write_plan_json(plan_json: Any, out_path: str | None) -> None:
     if out_path:
         Path(out_path).write_text(json.dumps(plan_json, indent=2))
         print(f"Plan written to {out_path}")
     else:
         print(json.dumps(plan_json, indent=2))
+
+
+def _find_workflow_factory(module: Any, file_path: str, workflow_name: str) -> Any | None:
+    """The module-level function whose body defines ``@workflow workflow_name``.
+
+    Found in the source rather than by calling anything: only a function that
+    visibly builds that workflow is a factory worth calling.
+    """
+    import ast
+    import inspect
+
+    def is_workflow_decorator(decorator: ast.expr) -> bool:
+        target = decorator.func if isinstance(decorator, ast.Call) else decorator
+        return (isinstance(target, ast.Name) and target.id == "workflow") or (
+            isinstance(target, ast.Attribute) and target.attr == "workflow"
+        )
+
+    tree = ast.parse(Path(file_path).read_text(encoding="utf-8"))
+    for fn in tree.body:
+        if not isinstance(fn, ast.FunctionDef):
+            continue
+        for node in ast.walk(fn):
+            if (
+                node is not fn
+                and isinstance(node, ast.FunctionDef)
+                and node.name == workflow_name
+                and any(is_workflow_decorator(d) for d in node.decorator_list)
+            ):
+                factory = getattr(module, fn.name, None)
+                return factory if inspect.isfunction(factory) else None
+    return None
+
+
+def _elaborate_factory_for_display(factory: Any) -> Any:
+    """Call a workflow factory so the workflow it returns can be drawn.
+
+    A diagram drill-down has no arguments to give it: parameters keep their
+    defaults and the rest get ``<name>`` placeholders. For ``plan --format
+    graph --best-effort`` only -- a workflow built this way is for looking
+    at, never for running.
+    """
+    import inspect
+
+    kwargs: dict[str, Any] = {}
+    for param in inspect.signature(factory).parameters.values():
+        if param.kind in (param.VAR_POSITIONAL, param.VAR_KEYWORD) or param.default is not param.empty:
+            continue
+        if param.kind is param.POSITIONAL_ONLY:
+            raise TypeError(
+                f"{factory.__name__}(): positional-only parameter {param.name!r} has no default"
+            )
+        kwargs[param.name] = f"<{param.name}>"
+    target = factory(**kwargs)
+    if not hasattr(target, "_wfpy_workflow"):
+        raise TypeError(f"{factory.__name__}() did not return a @workflow")
+    return target
 
 
 def main() -> None:

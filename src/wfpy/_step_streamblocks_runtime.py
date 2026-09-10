@@ -53,6 +53,31 @@ def _port_is_folder(port_desc: Any) -> bool:
     return infer_resource_kind(port_type) == "folder"
 
 
+def _hand_on_network(actor: Any, network: str) -> bool:
+    """Fire a ``run=False`` instance: pass its network on, run nothing.
+
+    Such a node stands for the design in a flow that lowers it rather than
+    running it. It fires once per token on its connected inputs and, with
+    none connected, once.
+    """
+    meta: TaskMeta = actor.meta
+    connected = [name for name in meta.input_ports if actor.in_queues.get(name)]
+    if connected:
+        if any(q.size() == 0 for name in connected for q in actor.in_queues[name]):
+            return False
+        for name in connected:
+            for q in actor.in_queues[name]:
+                q.dequeue()
+    elif actor.fire_count > 0:
+        return False
+
+    for port_name in meta.output_ports:
+        for q in actor.out_queues.get(port_name, []):
+            q.enqueue(network)
+    actor.fire_count += 1
+    return True
+
+
 def _step_streamblocks_instance(
     actor: Any,
     out_dir: Path,
@@ -62,7 +87,10 @@ def _step_streamblocks_instance(
     """Fire a StreamBlocks instance if every input port has a token."""
     meta: TaskMeta = actor.meta
     annotation = meta.annotations.get("streamblocks") or {}
-    network = str(annotation.get("network") or "").strip()
+    # The decorator's `network=`, or this node's own `network` parameter.
+    network = str(
+        annotation.get("network") or getattr(actor.instance, "network", "") or ""
+    ).strip()
     if not network:
         # The decorator refuses this, so reaching it means the annotation was
         # built by something else. Refusing to fire beats running `calpy run`
@@ -70,6 +98,8 @@ def _step_streamblocks_instance(
         raise RuntimeError(
             f"StreamBlocks instance {actor.name!r} has no network= to run"
         )
+    if annotation.get("run") is False:
+        return _hand_on_network(actor, network)
 
     # Every input must have a token, as for any other actor.
     for port_name in meta.input_ports:
