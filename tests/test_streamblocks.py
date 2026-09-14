@@ -118,6 +118,7 @@ class FakeActor:
 class FakePlan:
     def __init__(self, source_dir):
         self.source_dir = source_dir
+        self.wf_input_resource_paths = set()
 
 
 @pytest.fixture
@@ -580,6 +581,66 @@ class TestNetworkParameter:
         outputs = run(only_the_network, out_dir=str(tmp_path / "wf-out"))
 
         assert outputs == {"Network": ["designs/core.py"]}
+
+    def test_a_handed_on_network_is_replayed_untouched(self, tmp_path):
+        """The network is a configured path, as a FileSource's is. A task
+        downstream that hands the token on again (a loop replaying the
+        design every round) must pass the same path through: a copy in the
+        work directory cannot import the packages beside the network."""
+        from wfpy import File, action, connect, guard, run, task, workflow
+
+        design = tmp_path / "designs" / "core.py"
+        design.parent.mkdir()
+        design.write_text("from designs.parts import Core\n")
+
+        @streamblocks(facade="instance", run=False)
+        class Net:
+            network: str
+
+            class Ports:
+                Out = Port[File](direction="out")
+
+        @task
+        class Replay:
+            held: object = None
+
+            class Ports:
+                In = Port[File](direction="in")
+                Tick = Port[int](direction="in")
+                Out = Port[File](direction="out")
+
+            @action(consumes={"In": 1}, produces={})
+            def hold(self, token):
+                self.held = token
+
+            @action(consumes={"Tick": 1}, produces={"Out": 1})
+            @guard(lambda self, tick: self.held is not None)
+            def replay(self, tick):
+                return {"Out": self.held}
+
+        @task
+        class Seen:
+            paths = []
+
+            class Ports:
+                In = Port[File](direction="in")
+
+            @action(consumes={"In": 1}, produces={})
+            def see(self, token):
+                Seen.paths.append(str(token))
+
+        @workflow(inputs={"Tick": int})
+        def replayed():
+            net = Net(network=str(design))
+            again = Replay()
+            seen = Seen()
+            connect(net.Out, again.In)
+            connect("Tick", again.Tick)
+            connect(again.Out, seen.In)
+
+        run(replayed, inputs={"Tick": 1}, out_dir=str(tmp_path / "wf-out"))
+
+        assert Seen.paths == [str(design)]
 
     def test_a_network_parameter_is_not_reported_missing(self):
         """The diagram paints a node with an error diagnostic red, so a node
