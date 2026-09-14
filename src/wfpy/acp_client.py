@@ -233,6 +233,9 @@ class ACPClient:
         self.env = env
         self.on_event = on_event
         self.on_permission = on_permission
+        # Whether the agent advertised `session/load` at initialize: a session
+        # from an earlier process can be resumed only through it.
+        self.can_load_session = False
         self.client: Optional[SimpleClient] = None
         self.connection: Optional[ClientSideConnection] = None
         self.process = None
@@ -260,13 +263,15 @@ class ACPClient:
         logger.info("ACP subprocess started, initializing connection...")
         
         # Initialize the connection
-        await self.connection.initialize(
+        init = await self.connection.initialize(
             protocol_version=1,
             client_capabilities=None,
             client_info=None,
         )
-        
-        logger.info("ACP connection initialized successfully")
+        capabilities = getattr(init, "agent_capabilities", None) or getattr(init, "agentCapabilities", None)
+        self.can_load_session = bool(getattr(capabilities, "load_session", False)
+                                     or getattr(capabilities, "loadSession", False))
+        logger.info(f"ACP connection initialized successfully (load_session={self.can_load_session})")
         
     async def stop(self):
         """Stop the opencode subprocess."""
@@ -309,6 +314,19 @@ class ACPClient:
         
         return session_id
         
+    async def load_session(self, session_id: str, cwd: str = ".") -> None:
+        """Resume a session from an earlier process: `session/load`, which the
+        agent answers by replaying the session's history as updates. Every
+        firing is a new agent process, so a stateful agent's session lives
+        on only through this."""
+        if not self.connection:
+            raise RuntimeError("Client not started. Call start() first.")
+        logger.info(f"Loading session {session_id} (cwd={cwd})")
+        await self.connection.load_session(session_id=session_id, cwd=cwd, mcp_servers=[])
+        # The replayed history is not this firing's answer.
+        self.client.response_text = ""
+        logger.info(f"Session loaded: {session_id}")
+
     async def send_prompt(self, session_id: str, prompt: str) -> dict[str, Any]:
         """
         Send a prompt to the agent.
@@ -586,9 +604,21 @@ async def invoke_opencode_acp(
         # Start the client
         await client.start()
         
-        # Create or reuse session
-        if session_id:
-            logger.info(f"Reusing existing session: {session_id}")
+        # Resume the session of an earlier firing, or create one. A session id
+        # means nothing to a new agent process until `session/load`; an agent
+        # that does not offer it, or fails to load, gets a fresh session, and
+        # the caller records the new id.
+        if session_id and client.can_load_session:
+            try:
+                await client.load_session(session_id, cwd=cwd)
+                logger.info(f"Resumed session: {session_id}")
+            except Exception as exc:  # noqa: BLE001 — a lost session is a fresh one, not a failed firing
+                logger.warning(f"Could not load session {session_id} ({exc}); creating a new one")
+                session_id = await client.create_session(cwd=cwd)
+        elif session_id:
+            logger.warning(f"The agent does not offer session/load; session {session_id} cannot be "
+                           "resumed in a new process, creating a new one")
+            session_id = await client.create_session(cwd=cwd)
         else:
             session_id = await client.create_session(cwd=cwd)
         
