@@ -318,6 +318,8 @@ def cmd_run(args: argparse.Namespace) -> None:
         agent_debug=getattr(args, "agent_debug", False),
         agent_cli_tools_mode=getattr(args, "agent_cli_tools_mode", None),
         agent_cli_opencode_command=getattr(args, "agent_cli_opencode_command", None),
+        agent_cli_acp_command=getattr(args, "agent_cli_acp_command", None),
+        agent_cli_acp_permissions=getattr(args, "agent_cli_acp_permissions", None),
         agent_cli_opencode_args=getattr(args, "agent_cli_opencode_args", None),
         agent_cli_opencode_agent=getattr(args, "agent_cli_opencode_agent", None),
         agent_cli_opencode_native_args=getattr(args, "agent_cli_opencode_native_args", None),
@@ -584,6 +586,19 @@ def main() -> None:
         "--agent-cli-opencode-command",
         default=None,
         help="Override OpenCode CLI command/executable",
+    )
+    run_parser.add_argument(
+        "--agent-cli-acp-command",
+        default=None,
+        help="The ACP agent's command line for the opencode-acp transport, e.g. "
+        "'claude-agent-acp' (default: the OpenCode command's acp subcommand)",
+    )
+    run_parser.add_argument(
+        "--agent-cli-acp-permissions",
+        default=None,
+        choices=["allow", "reject"],
+        help="What an ACP agent's permission requests get when no user answers them "
+        "(an agent with ask_user=True puts them to the user); default allow",
     )
     run_parser.add_argument(
         "--agent-cli-opencode-args", default=None, help="Extra arguments for OpenCode CLI backend"
