@@ -4111,6 +4111,81 @@ class TestExternalStepShellCommand:
         assert isinstance(captured["args"], str)
 
 
+class TestExternalStepContextRecords:
+    def test_a_tool_record_survives_another_writer_in_between(self, monkeypatch, tmp_path):
+        """The runtime's records of a tool call are appended facts, not a
+        proposal made from a read of the context, so another writer landing
+        between the tool's start and its record must not fail the step: two
+        tools starting in the same instant did exactly that, and the run
+        died on the second one's "baseVersion mismatch"."""
+        import wfpy._step_external_runtime as ext
+        from wfpy.core import TaskMeta, ToolSpec
+        from wfpy.runner import _step_external, Queue, RuntimeActor
+
+        class Inst:
+            pass
+
+        tool_spec = ToolSpec(
+            cmd="python", args=["-c", "print('ok')"], shell=True, inherit_stdio=False
+        )
+        meta = TaskMeta(
+            cls=object,
+            name="ToolTask",
+            kind="external",
+            ports={},
+            input_ports={
+                "In": PortDescriptor(name="In", port_type=str, direction="in", ext="", validate=[])
+            },
+            output_ports={
+                "Out": PortDescriptor(
+                    name="Out", port_type=File, direction="out", ext=".txt", validate=[]
+                )
+            },
+            actions=[],
+            parameters={},
+            state_fields={},
+            tool_spec=tool_spec,
+        )
+        actor = RuntimeActor(name="tool1", kind="external", instance=Inst(), meta=meta)
+        q_in = Queue(queue_id="qin")
+        q_in.enqueue("input")
+        actor.in_queues = {"In": [q_in]}
+        actor.out_queues = {"Out": [Queue(queue_id="qout")]}
+
+        plan = FifoPlan(name="wf")
+        plan.search_paths = []
+        plan.env = {}
+        plan.source_path = str(tmp_path / "wf.py")
+        plan.work_dir = str(tmp_path)
+
+        monkeypatch.setattr("wfpy.runner.shutil.which", lambda cmd: cmd)
+        monkeypatch.setattr(
+            "wfpy.runner.subprocess.run",
+            lambda *a, **k: types.SimpleNamespace(returncode=0, stderr="", stdout=""),
+        )
+
+        # Another actor commits to the context every time this tool is
+        # about to: the version the tool saw when it built its record is
+        # stale by the time the record is applied.
+        real_apply = ext._apply_context_patch
+
+        def with_a_writer_in_between(plan_, actor_, policy, patch, *, source):
+            plan_.context_version += 1
+            return real_apply(plan_, actor_, policy, patch, source=source)
+
+        monkeypatch.setattr(ext, "_apply_context_patch", with_a_writer_in_between)
+
+        assert _step_external(actor, tmp_path, plan, verbose=False) is True
+
+        phases = [
+            op["value"]["phase"]
+            for entry in plan.context_journal
+            for op in entry["ops"]
+            if op["path"] == "tools.calls.tool1"
+        ]
+        assert phases == ["request", "result"]
+
+
 class TestCollectQueueSnapshot:
     def test_snapshot_includes_all_queues(self):
         from wfpy.runner import Queue

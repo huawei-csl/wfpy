@@ -188,8 +188,12 @@ def _step_external(
     for pname in meta.parameters:
         params[pname] = getattr(actor.instance, pname, "")
 
+    # The runtime's own records of a tool call carry no base version: they
+    # are appended facts about the run, not a proposal made from a read of
+    # the context, so there is nothing for the version check to protect.
+    # Stamped with the version read before the lock, two tools starting in
+    # the same instant made the second one fail the check and the run die.
     tool_meta_patch = {
-        "baseVersion": plan.context_version,
         "ops": [
             {
                 "op": "append",
@@ -305,8 +309,7 @@ def _step_external(
                 actor,
                 policy,
                 {
-                    "baseVersion": plan.context_version,
-                    "ops": [
+                                        "ops": [
                         {
                             "op": "append",
                             "path": f"tools.calls.{actor.name}",
@@ -356,8 +359,7 @@ def _step_external(
         actor,
         policy,
         {
-            "baseVersion": plan.context_version,
-            "ops": [
+                        "ops": [
                 {
                     "op": "append",
                     "path": f"tools.calls.{actor.name}",
