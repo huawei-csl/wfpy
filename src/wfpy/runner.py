@@ -2518,6 +2518,8 @@ def run(
     agent_debug: bool = False,
     agent_cli_tools_mode: str | None = None,
     agent_cli_opencode_command: str | None = None,
+    agent_cli_acp_command: str | None = None,
+    agent_cli_acp_permissions: str | None = None,
     agent_cli_opencode_args: str | None = None,
     agent_cli_opencode_agent: str | None = None,
     agent_cli_opencode_native_args: str | None = None,
@@ -2565,6 +2567,9 @@ def run(
         agent_debug: If True, write request/response/chat-history to agent-debug/.
         agent_cli_tools_mode: CLI tools mode for non-http transports: wfpy-none or native.
         agent_cli_opencode_command: Override executable/command for OpenCode backend.
+        agent_cli_acp_command: The ACP agent's command line (opencode-acp transport).
+        agent_cli_acp_permissions: allow (default) or reject an ACP agent's permission
+            requests when no user answers them.
         agent_cli_opencode_args: Extra arguments appended to OpenCode backend command.
         agent_cli_opencode_agent: OpenCode agent profile passed via ``--agent``.
         agent_cli_opencode_native_args: Extra native-tool arguments for OpenCode when cli_tools_mode=native.
@@ -2669,6 +2674,8 @@ def run(
             "agent_debug_dir": str(run_out_dir),
             "agent_cli_tools_mode": agent_cli_tools_mode,
             "agent_cli_opencode_command": agent_cli_opencode_command,
+            "agent_cli_acp_command": agent_cli_acp_command,
+            "agent_cli_acp_permissions": agent_cli_acp_permissions,
             "agent_cli_opencode_args": agent_cli_opencode_args,
             "agent_cli_opencode_agent": agent_cli_opencode_agent,
             "agent_cli_opencode_native_args": agent_cli_opencode_native_args,

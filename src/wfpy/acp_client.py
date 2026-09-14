@@ -16,6 +16,7 @@ from typing import Any, AsyncGenerator, Callable, Optional
 
 import acp
 from acp.client.connection import ClientSideConnection
+from acp.schema import AllowedOutcome, DeniedOutcome
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +26,31 @@ MAX_RETRIES = 5
 CONTINUE_MESSAGE = "You appear stuck. Please continue with the task."
 
 
+PermissionHandler = Callable[[str, list[dict[str, str]]], Optional[str]]
+"""Answers an agent's ``session/request_permission``: given the tool call's
+title and its options (``{"id", "kind", "name"}``, the kinds ``allow_once``,
+``allow_always``, ``reject_once``, ``reject_always``), returns the chosen
+option's id, or ``None`` to cancel the prompt turn. It may block: it runs on
+a worker thread, and the stuck detector waits with it."""
+
+
+def option_of_kind(options: list[dict[str, str]], kind: str) -> Optional[str]:
+    """The id of the first option whose kind starts with ``kind``, else None."""
+    for option in options:
+        if str(option.get("kind", "")).startswith(kind):
+            return option.get("id")
+    return None
+
+
+def allow_once(title: str, options: list[dict[str, str]]) -> Optional[str]:
+    """The default without a user: allow this once, else allow, else the
+    first option the agent offered."""
+    chosen = option_of_kind(options, "allow_once") or option_of_kind(options, "allow")
+    if chosen is None and options:
+        chosen = options[0].get("id")
+    return chosen
+
+
 class SimpleClient:
     """
     Simple client implementation that handles callbacks from the agent.
@@ -32,10 +58,17 @@ class SimpleClient:
     This implements the Client protocol required by the ACP library.
     """
     
-    def __init__(self, on_event: Optional[Callable[[dict[str, Any]], None]] = None):
+    def __init__(self, on_event: Optional[Callable[[dict[str, Any]], None]] = None,
+                 on_permission: Optional[PermissionHandler] = None):
         self.events = asyncio.Queue()
         self.agent = None
         self.response_text = ""  # Accumulated response text
+        # Who answers the agent's permission requests: a handler (the user,
+        # through the elicitation seam, or a policy), else `allow_once`.
+        self.on_permission = on_permission
+        # Permission requests waiting on the handler: the stuck detector
+        # does not count that time.
+        self.permission_pending = 0
         # Optional sink for structured, observer-facing events (live streaming to the
         # IDE). Called synchronously and best-effort; must never raise into the run.
         self.on_event = on_event
@@ -90,11 +123,34 @@ class SimpleClient:
         await self.events.put(event)
         
     async def request_permission(self, options, session_id: str, tool_call, **kwargs):
-        """Called when agent requests permission."""
-        logger.info(f"Permission requested for tool: {tool_call}")
-        # Auto-approve all permissions for now
+        """Called when the agent requests permission for a tool call: the
+        handler's choice, or `allow_once` without one, in the reply the
+        protocol takes (a selected option id, or a cancelled turn)."""
         from acp import RequestPermissionResponse
-        return RequestPermissionResponse(outcome="approved", option_id=options[0].id if options else None)
+        title = str(getattr(tool_call, "title", None) or getattr(tool_call, "kind", None) or "tool call")
+        offered = [{"id": str(getattr(o, "option_id", None) or getattr(o, "optionId", "") or ""),
+                    "kind": str(getattr(o, "kind", "") or ""),
+                    "name": str(getattr(o, "name", "") or "")} for o in options or []]
+        logger.info(f"Permission requested: {title} options={[o['id'] for o in offered]}")
+        self._emit({"type": "agent.permission.requested", "title": title, "options": offered})
+        await self.events.put({"session_id": session_id, "update": None,
+                               "kwargs": {"permission": title}})
+        if self.on_permission is not None:
+            self.permission_pending += 1
+            try:
+                chosen = await asyncio.to_thread(self.on_permission, title, offered)
+            finally:
+                self.permission_pending -= 1
+        else:
+            chosen = allow_once(title, offered)
+        self._emit({"type": "agent.permission.answered", "title": title, "option": chosen})
+        await self.events.put({"session_id": session_id, "update": None,
+                               "kwargs": {"permission": title, "option": chosen}})
+        if chosen is None:
+            logger.info(f"Permission cancelled: {title}")
+            return RequestPermissionResponse(outcome=DeniedOutcome(outcome="cancelled"))
+        logger.info(f"Permission answered: {title} -> {chosen}")
+        return RequestPermissionResponse(outcome=AllowedOutcome(outcome="selected", option_id=str(chosen)))
         
     async def create_terminal(self, command, session_id, args=None, cwd=None, env=None, output_byte_limit=None, **kwargs):
         """Called when agent wants to create a terminal."""
@@ -167,10 +223,16 @@ class ACPClient:
     """
     
     def __init__(self, opencode_command: str = "opencode", env: dict[str, str] | None = None,
-                 on_event: Optional[Callable[[dict[str, Any]], None]] = None):
+                 on_event: Optional[Callable[[dict[str, Any]], None]] = None,
+                 agent_argv: Optional[list[str]] = None,
+                 on_permission: Optional[PermissionHandler] = None):
         self.opencode_command = opencode_command
+        # The agent's command line: `agent_argv` verbatim (`claude-agent-acp`,
+        # any agent speaking ACP over stdio), else opencode's `acp` subcommand.
+        self.agent_argv = list(agent_argv) if agent_argv else [opencode_command, "acp"]
         self.env = env
         self.on_event = on_event
+        self.on_permission = on_permission
         self.client: Optional[SimpleClient] = None
         self.connection: Optional[ClientSideConnection] = None
         self.process = None
@@ -178,16 +240,16 @@ class ACPClient:
 
     async def start(self):
         """Start the opencode subprocess and initialize ACP connection."""
-        logger.info(f"Starting opencode ACP subprocess: {self.opencode_command} acp")
+        logger.info(f"Starting ACP agent subprocess: {' '.join(self.agent_argv)}")
 
         # Create client implementation
-        self.client = SimpleClient(on_event=self.on_event)
+        self.client = SimpleClient(on_event=self.on_event, on_permission=self.on_permission)
         
         # Spawn agent process using the ACP library
         # Increase buffer limit to 10MB to handle large JSON-RPC messages
         self._context_manager = acp.spawn_agent_process(
             self.client,
-            self.opencode_command, "acp",
+            *self.agent_argv,
             env=self.env,
             transport_kwargs={"limit": 10 * 1024 * 1024}  # 10MB buffer
         )
@@ -467,6 +529,10 @@ async def _monitor_events(
                 # Event received, timer reset automatically by wait_for
                 
         except asyncio.TimeoutError:
+            if getattr(client.client, "permission_pending", 0):
+                # The agent is waiting for a permission answer, and so are we.
+                logger.info("Permission request pending, not stuck")
+                continue
             # No event within timeout period - we're stuck!
             logger.warning(f"No events for {stuck_timeout}s - stuck detected")
             raise
@@ -485,6 +551,8 @@ async def invoke_opencode_acp(
     env: dict[str, str] | None = None,
     session_id: str | None = None,
     on_event: Callable[[dict[str, Any]], None] | None = None,
+    agent_argv: list[str] | None = None,
+    on_permission: PermissionHandler | None = None,
 ) -> dict[str, Any]:
     """
     High-level function to invoke opencode via ACP with stuck detection.
@@ -499,6 +567,8 @@ async def invoke_opencode_acp(
         opencode_command: Path to opencode executable
         env: Optional environment variables to pass to the subprocess
         session_id: Optional existing session ID to continue (if None, creates new session)
+        agent_argv: The ACP agent's command line, verbatim; None for opencode's `acp`
+        on_permission: Answers the agent's permission requests; None allows each once
         
     Returns:
         Response from the agent
@@ -509,7 +579,8 @@ async def invoke_opencode_acp(
     """
     logger.info("Invoking opencode via ACP")
     
-    client = ACPClient(opencode_command=opencode_command, env=env, on_event=on_event)
+    client = ACPClient(opencode_command=opencode_command, env=env, on_event=on_event,
+                       agent_argv=agent_argv, on_permission=on_permission)
     
     try:
         # Start the client

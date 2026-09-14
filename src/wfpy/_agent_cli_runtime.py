@@ -813,6 +813,64 @@ def _invoke_agent_opencode_cli(
     return response_text, firing_messages, None, debug_meta
 
 
+def _acp_agent_argv(options: dict[str, Any]) -> list[str]:
+    """The ACP agent's command line: the `agent_cli_acp_command` option
+    verbatim (`claude-agent-acp`, any agent speaking ACP over stdio), else
+    the OpenCode command's `acp` subcommand."""
+    raw = str(options.get("agent_cli_acp_command", "") or "").strip()
+    if raw:
+        return shlex.split(raw)
+    return [
+        _expand_command(str(options.get("agent_cli_opencode_command", "")).strip(), "opencode")[0],
+        "acp",
+    ]
+
+
+def _acp_permission_handler(spec: AgentSpec, options: dict[str, Any]) -> Any:
+    """Who answers the agent's permission requests over ACP.
+
+    An agent declared with ``ask_user=True`` puts them to the user through
+    the elicitation seam (the closure ``runner._step_agent`` injects as
+    ``_wf_elicit``): the question is the tool call's title, the choices the
+    options the agent offered, and the answer is matched to an option by
+    name, id or number; a declined or unmatched answer is the reject option.
+    Otherwise the ``agent_cli_acp_permissions`` option decides: ``allow``
+    (the default, each request allowed once) or ``reject``.
+    """
+    from wfpy.acp_client import option_of_kind
+
+    ask = options.get("_wf_elicit") if getattr(spec, "ask_user", False) else None
+    if callable(ask):
+
+        def via_user(title: str, offered: list[dict[str, str]]) -> str | None:
+            choices = [o.get("name") or o.get("id") or "" for o in offered]
+            resp = ask(
+                title,
+                context="The agent asks permission for this tool call.",
+                choices=choices,
+            )
+            if resp.declined or resp.answer is None:
+                return option_of_kind(offered, "reject")
+            answer = str(resp.answer).strip().lower()
+            for o in offered:
+                if answer in {str(o.get("id", "")).lower(), str(o.get("name", "")).lower()}:
+                    return o.get("id")
+            if answer.isdigit() and 1 <= int(answer) <= len(offered):
+                return offered[int(answer) - 1].get("id")
+            return option_of_kind(offered, "reject")
+
+        return via_user
+
+    policy = str(options.get("agent_cli_acp_permissions", "allow") or "allow").strip().lower()
+    if policy == "reject":
+        return lambda title, offered: option_of_kind(offered, "reject")
+    if policy != "allow":
+        raise ValueError(
+            f"Unsupported agent_cli_acp_permissions '{policy}'. Supported values: allow, reject."
+        )
+    return None
+
+
 def _invoke_agent_opencode_acp(
     spec: AgentSpec,
     payload_text: str,
@@ -885,6 +943,8 @@ def _invoke_agent_opencode_acp(
         str(options.get("agent_cli_opencode_command", "")).strip(),
         "opencode"
     )[0]
+    agent_argv = _acp_agent_argv(options)
+    on_permission = _acp_permission_handler(spec, options)
     
     # Get working directory
     cwd = options.get("work_dir", ".")
@@ -898,6 +958,7 @@ def _invoke_agent_opencode_acp(
     debug_meta: dict[str, Any] = {
         "transport": "opencode-acp",
         "cliToolsMode": cli_tools_mode,
+        "acpAgent": " ".join(agent_argv),
     }
     
     try:
@@ -920,6 +981,8 @@ def _invoke_agent_opencode_acp(
                 env=acp_env if acp_env else None,
                 session_id=session_id if continue_session else None,
                 on_event=on_event,
+                agent_argv=agent_argv,
+                on_permission=on_permission,
             )
         )
 
