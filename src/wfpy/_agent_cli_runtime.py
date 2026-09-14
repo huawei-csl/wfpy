@@ -979,7 +979,10 @@ def _invoke_agent_opencode_acp(
                 max_retries=5,
                 opencode_command=opencode_command,
                 env=acp_env if acp_env else None,
-                session_id=session_id if continue_session else None,
+                # A stateful agent's recorded session id, resumed through
+                # session/load; `continue_session` without an id has nothing
+                # to name over ACP.
+                session_id=session_id or None,
                 on_event=on_event,
                 agent_argv=agent_argv,
                 on_permission=on_permission,
