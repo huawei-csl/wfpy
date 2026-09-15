@@ -51,6 +51,17 @@ def allow_once(title: str, options: list[dict[str, str]]) -> Optional[str]:
     return chosen
 
 
+def _tool_call_fields(update: Any) -> dict[str, Any]:
+    """What a run's observer sees of an ACP tool call: its title (or its
+    kind when it has none), the kind, the status, the id."""
+    title = getattr(update, "title", None)
+    kind = getattr(update, "kind", None)
+    name = getattr(update, "name", None) or title or kind or "tool"
+    call_id = getattr(update, "tool_call_id", None) or getattr(update, "toolCallId", None)
+    return {"name": str(name), "title": title, "kind": kind,
+            "status": getattr(update, "status", None), "id": call_id}
+
+
 class SimpleClient:
     """
     Simple client implementation that handles callbacks from the agent.
@@ -113,12 +124,15 @@ class SimpleClient:
             if content is not None and getattr(content, 'type', None) == 'text' and hasattr(content, 'text'):
                 self._emit({"type": "agent.message.delta", "field": "reasoning", "delta": content.text})
         elif hasattr(update, 'sessionUpdate') and update.sessionUpdate == 'tool_call':
-            tool_name = getattr(update, 'name', 'unknown')
-            logger.info(f"Tool call: {tool_name}")
-            self._emit({"type": "agent.tool_call", "name": tool_name})
+            # An ACP tool call carries a title ("Write choice-a.txt") and a
+            # kind ("edit", "execute"), not a name: the title is what a
+            # viewer shows, the kind what it groups by.
+            tool = _tool_call_fields(update)
+            logger.info(f"Tool call: {tool['name']}")
+            self._emit({"type": "agent.tool_call", **tool})
         elif hasattr(update, 'sessionUpdate') and update.sessionUpdate == 'tool_call_update':
-            logger.info(f"Tool call update")
-            self._emit({"type": "agent.tool_call_update", "name": getattr(update, 'name', None)})
+            logger.info("Tool call update")
+            self._emit({"type": "agent.tool_call_update", **_tool_call_fields(update)})
         
         await self.events.put(event)
         
