@@ -38,9 +38,14 @@ import dataclasses
 import os
 import shlex
 import shutil
-import tomllib
+import sys
 from pathlib import Path
 from typing import Any
+
+if sys.version_info >= (3, 11):
+    import tomllib
+else:  # Python 3.10: the standard library has no tomllib
+    import tomli as tomllib
 
 #: The agents wfpy knows how to spawn without being told.
 KNOWN: dict[str, dict[str, Any]] = {
