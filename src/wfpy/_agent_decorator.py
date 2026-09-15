@@ -24,6 +24,8 @@ def _normalize_agent_kwargs(
     context_budget: int,
     truncation_strategy: str,
     cli_tools_mode: str,
+    connector: str = "",
+    mode: str = "",
     # camelCase aliases
     claudeAgent: str | None,
     useClaudeAgent: bool | None,
@@ -54,6 +56,8 @@ def _normalize_agent_kwargs(
             truncation_strategy if truncationStrategy is None else str(truncationStrategy)
         ),
         "cli_tools_mode": cli_tools_mode if cliToolsMode is None else str(cliToolsMode),
+        "connector": str(connector or ""),
+        "mode": str(mode or ""),
     }
 
 

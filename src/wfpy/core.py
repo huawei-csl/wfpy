@@ -420,7 +420,12 @@ class AgentSpec:
     # Legacy — kept for backward compatibility
     output_validators: list[AgentOutputValidator] | None = None  # per-agent output validation
     # Invocation backend transport
-    transport: str = "http"  # "http" | "opencode-cli" | "claude-cli" | "codex-cli" | "mock"
+    transport: str = "http"  # "http" | "acp" | "opencode-cli" | "claude-cli" | "codex-cli" | "mock"
+    # transport="acp": which ACP connector spawns the agent (`wfpy connectors`);
+    # empty means the run's --acp-connector, else opencode. `mode` is a session
+    # mode the agent offers (Claude Code: default, acceptEdits, plan, ...).
+    connector: str = ""
+    mode: str = ""
     # CLI tool execution mode for non-http transports
     cli_tools_mode: str = "wfpy-none"  # "wfpy-none" | "native"
     # Reasoning effort for opencode CLI (--variant flag)
@@ -986,6 +991,8 @@ def agent(
     prompt: str = "",
     transport: str = "http",
     cli_tools_mode: str = "wfpy-none",
+    connector: str = "",
+    mode: str = "",
     claude_agent: str | None = None,
     use_claude_agent: bool = False,
     skill: str | None = None,
@@ -1111,6 +1118,8 @@ def agent(
             context_budget=context_budget,
             truncation_strategy=truncation_strategy,
             cli_tools_mode=cli_tools_mode,
+            connector=connector,
+            mode=mode,
             ask_user=ask_user,
             claudeAgent=claudeAgent,
             useClaudeAgent=useClaudeAgent,
@@ -1155,6 +1164,8 @@ def agent(
             prompt=prompt,
             transport=transport,
             cli_tools_mode=normalized["cli_tools_mode"],
+            connector=normalized.get("connector", ""),
+            mode=normalized.get("mode", ""),
             claude_agent=normalized["claude_agent"],
             use_claude_agent=normalized["use_claude_agent"],
             skill=skill,

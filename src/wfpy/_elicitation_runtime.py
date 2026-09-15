@@ -9,8 +9,9 @@ Handler resolution (in :func:`resolve_base_handler`):
 
 1. an explicit ``elicitation_handler`` supplied to ``run(...)`` — for embedding,
    the IDE, or an ACP/SSE frontend;
-2. a console handler (default when stdin/stderr is a TTY, or ``--interactive``);
-3. otherwise no handler — the closure applies the non-interactive fallback
+2. the socket handler when ``--elicit-socket`` names one (below);
+3. a console handler (default when stdin/stderr is a TTY, or ``--interactive``);
+4. otherwise no handler — the closure applies the non-interactive fallback
    (graceful "no user available" by default; strict failure under
    ``--elicit-require``; a fixed reply under ``--elicit-default``).
 
@@ -116,6 +117,93 @@ def _read_line_with_timeout(timeout_ms: int) -> str | None:
     return line
 
 
+class SocketElicitationHandler:
+    """A question put to whoever listens on a Unix socket: an IDE, a harness.
+
+    THE WIRE FORMAT, one JSON object a line, the contract with the client:
+
+    wfpy -> client   {"type": "question", "id": 1, "agent": "planner",
+                      "model": "opus", "run_id": "...", "question": "...",
+                      "context": "..." | null, "choices": ["Allow", "Reject"] | null,
+                      "timeout_ms": 600000}
+    client -> wfpy   {"id": 1, "answer": "Allow"}
+                     {"id": 1, "declined": true, "reason": "..."}   (or no answer at all)
+
+    An agent's permission request over ACP arrives the same way, with the tool
+    call's title as the question and the agent's options as the choices. One
+    connection serves the run; questions are serialized on it; a connection
+    that cannot be made, closes, or answers with another id is a declined
+    question, never a failed run.
+    """
+
+    def __init__(self, path: str) -> None:
+        self.path = path
+        self._sock: Any = None
+        self._reader: Any = None
+        self._next_id = 0
+
+    def _connect(self) -> bool:
+        if self._sock is not None:
+            return True
+        import socket
+
+        try:
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sock.connect(self.path)
+        except OSError:
+            return False
+        self._sock = sock
+        self._reader = sock.makefile("r", encoding="utf-8")
+        return True
+
+    def _close(self) -> None:
+        try:
+            if self._reader is not None:
+                self._reader.close()
+            if self._sock is not None:
+                self._sock.close()
+        except OSError:
+            pass
+        self._sock = None
+        self._reader = None
+
+    def __call__(self, req: ElicitationRequest) -> ElicitationResponse:
+        import json
+
+        with _console_lock:
+            if not self._connect():
+                return ElicitationResponse(answer=None, declined=True,
+                                           reason=f"no listener on {self.path}")
+            self._next_id += 1
+            qid = self._next_id
+            message = {
+                "type": "question", "id": qid, "agent": req.agent_name, "model": req.model,
+                "run_id": req.run_id, "question": req.question, "context": req.context,
+                "choices": req.choices, "timeout_ms": req.timeout_ms,
+            }
+            try:
+                self._sock.sendall((json.dumps(message) + "\n").encode("utf-8"))
+                if req.timeout_ms and req.timeout_ms > 0:
+                    self._sock.settimeout(req.timeout_ms / 1000)
+                line = self._reader.readline()
+            except OSError as exc:
+                self._close()
+                return ElicitationResponse(answer=None, declined=True, reason=f"listener lost: {exc}")
+            if not line:
+                self._close()
+                return ElicitationResponse(answer=None, declined=True, reason="listener closed")
+            try:
+                reply = json.loads(line)
+            except ValueError:
+                return ElicitationResponse(answer=None, declined=True, reason="reply was not JSON")
+            if not isinstance(reply, dict) or reply.get("id") != qid:
+                return ElicitationResponse(answer=None, declined=True, reason="reply to another question")
+            if reply.get("declined") or reply.get("answer") is None:
+                return ElicitationResponse(answer=None, declined=True,
+                                           reason=str(reply.get("reason") or "declined"))
+            return ElicitationResponse(answer=str(reply["answer"]))
+
+
 def _is_interactive() -> bool:
     """Best-effort detection of a human at a terminal."""
 
@@ -131,6 +219,14 @@ def resolve_base_handler(plan_options: dict[str, Any]) -> ElicitationHandler | N
     explicit = plan_options.get("_elicitation_handler")
     if callable(explicit):
         return cast(ElicitationHandler, explicit)
+
+    socket_path = str(plan_options.get("elicit_socket") or "").strip()
+    if socket_path:
+        handler = plan_options.get("_elicit_socket_handler")
+        if handler is None:
+            handler = SocketElicitationHandler(socket_path)
+            plan_options["_elicit_socket_handler"] = handler
+        return cast(ElicitationHandler, handler)
 
     interactive = plan_options.get("elicit_interactive")
     if interactive is None:

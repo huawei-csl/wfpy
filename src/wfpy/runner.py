@@ -2520,6 +2520,8 @@ def run(
     agent_cli_opencode_command: str | None = None,
     agent_cli_acp_command: str | None = None,
     agent_cli_acp_permissions: str | None = None,
+    acp_connector: str | None = None,
+    elicit_socket: str | None = None,
     agent_cli_opencode_args: str | None = None,
     agent_cli_opencode_agent: str | None = None,
     agent_cli_opencode_native_args: str | None = None,
@@ -2570,6 +2572,9 @@ def run(
         agent_cli_acp_command: The ACP agent's command line (opencode-acp transport).
         agent_cli_acp_permissions: allow (default) or reject an ACP agent's permission
             requests when no user answers them.
+        acp_connector: The ACP connector an agent on the acp transport spawns when it
+            names none (default opencode).
+        elicit_socket: A Unix socket on which the agents' questions are answered.
         agent_cli_opencode_args: Extra arguments appended to OpenCode backend command.
         agent_cli_opencode_agent: OpenCode agent profile passed via ``--agent``.
         agent_cli_opencode_native_args: Extra native-tool arguments for OpenCode when cli_tools_mode=native.
@@ -2676,6 +2681,8 @@ def run(
             "agent_cli_opencode_command": agent_cli_opencode_command,
             "agent_cli_acp_command": agent_cli_acp_command,
             "agent_cli_acp_permissions": agent_cli_acp_permissions,
+            "acp_connector": acp_connector,
+            "elicit_socket": elicit_socket,
             "agent_cli_opencode_args": agent_cli_opencode_args,
             "agent_cli_opencode_agent": agent_cli_opencode_agent,
             "agent_cli_opencode_native_args": agent_cli_opencode_native_args,
