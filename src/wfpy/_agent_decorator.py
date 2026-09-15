@@ -19,6 +19,7 @@ def _normalize_agent_kwargs(
     use_skill: bool,
     use_skill_hooks: bool,
     ask_user: bool,
+    ask_permissions: bool,
     timeout_ms: int,
     fireable_without_input: int,
     context_budget: int,
@@ -47,6 +48,7 @@ def _normalize_agent_kwargs(
         "use_skill": use_skill if useSkill is None else bool(useSkill),
         "use_skill_hooks": use_skill_hooks if useSkillHooks is None else bool(useSkillHooks),
         "ask_user": ask_user if askUser is None else bool(askUser),
+        "ask_permissions": bool(ask_permissions),
         "timeout_ms": timeout_ms if timeoutMs is None else int(timeoutMs),
         "fireable_without_input": (
             fireable_without_input if fireableWithoutInput is None else int(fireableWithoutInput)

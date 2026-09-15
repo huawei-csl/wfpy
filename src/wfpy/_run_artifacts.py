@@ -313,6 +313,7 @@ def _build_agent_context_entry(actor: Any) -> dict[str, Any]:
         "model": agent_spec.model or None,
         "stateful": bool(agent_spec.stateful),
         "askUser": bool(getattr(agent_spec, "ask_user", False)),
+        "askPermissions": bool(getattr(agent_spec, "ask_permissions", False)),
         "contextBudget": agent_spec.context_budget,
         "truncationStrategy": agent_spec.truncation_strategy,
         "chatHistory": list(actor.chat_history),

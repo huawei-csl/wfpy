@@ -632,7 +632,7 @@ def main() -> None:
         default=None,
         choices=["allow", "reject"],
         help="What an ACP agent's permission requests get when no user answers them "
-        "(an agent with ask_user=True puts them to the user); default allow",
+        "(an agent with ask_permissions=True puts them to the user); default allow",
     )
     run_parser.add_argument(
         "--agent-cli-opencode-args", default=None, help="Extra arguments for OpenCode CLI backend"
