@@ -27,6 +27,9 @@ def _normalize_agent_transport(spec: AgentSpec) -> str:
         "opencode": "opencode-acp",
         "opencode-cli": "opencode-cli",
         "opencode-acp": "opencode-acp",
+        # The ACP transport is generic: which agent it spawns is the connector
+        # (`wfpy connectors`); opencode-acp is its older name.
+        "acp": "opencode-acp",
         "claude": "claude-cli",
         "claude-code": "claude-cli",
         "claude-cli": "claude-cli",
@@ -40,7 +43,7 @@ def _normalize_agent_transport(spec: AgentSpec) -> str:
     if normalized is None:
         raise ValueError(
             f"Unsupported agent transport '{spec.transport}'. "
-            "Supported values: http, opencode-cli, opencode-acp, claude-cli, "
+            "Supported values: http, acp (opencode-acp), opencode-cli, claude-cli, "
             "codex-cli, mock."
         )
     return normalized
@@ -813,13 +816,28 @@ def _invoke_agent_opencode_cli(
     return response_text, firing_messages, None, debug_meta
 
 
-def _acp_agent_argv(options: dict[str, Any]) -> list[str]:
+def _acp_connector(spec: AgentSpec, options: dict[str, Any]) -> Any:
+    """The connector an ACP agent spawns: the agent's own `connector`, else the
+    run's `acp_connector`, resolved among the connectors the workspace sees
+    (`wfpy.connectors`); None when neither names one."""
+    name = str(getattr(spec, "connector", "") or options.get("acp_connector") or "").strip()
+    if not name:
+        return None
+    from wfpy.connectors import load_connectors, resolve_connector
+
+    return resolve_connector(name, load_connectors(options.get("source_path")))
+
+
+def _acp_agent_argv(options: dict[str, Any], spec: AgentSpec | None = None) -> list[str]:
     """The ACP agent's command line: the `agent_cli_acp_command` option
-    verbatim (`claude-agent-acp`, any agent speaking ACP over stdio), else
-    the OpenCode command's `acp` subcommand."""
+    verbatim (any agent speaking ACP over stdio), else the connector the
+    agent or the run names, else the OpenCode command's `acp` subcommand."""
     raw = str(options.get("agent_cli_acp_command", "") or "").strip()
     if raw:
         return shlex.split(raw)
+    connector = _acp_connector(spec, options) if spec is not None else None
+    if connector is not None:
+        return list(connector.argv)
     return [
         _expand_command(str(options.get("agent_cli_opencode_command", "")).strip(), "opencode")[0],
         "acp",
@@ -943,15 +961,25 @@ def _invoke_agent_opencode_acp(
         str(options.get("agent_cli_opencode_command", "")).strip(),
         "opencode"
     )[0]
-    agent_argv = _acp_agent_argv(options)
+    agent_argv = _acp_agent_argv(options, spec)
     on_permission = _acp_permission_handler(spec, options)
+    connector = _acp_connector(spec, options)
+    # The session's model and mode: the agent's, else the connector's. OpenCode
+    # takes its model from OPENCODE_CONFIG_CONTENT above; the others from the
+    # session's `model` config option, when they offer one.
+    session_model = None
+    if connector is not None and not connector.http_api:
+        session_model = (spec.model if spec.model and spec.model != "openai/gpt-4o" else None) or connector.model
+    session_mode = str(getattr(spec, "mode", "") or (connector.mode if connector else "") or "") or None
     
     # Get working directory
     cwd = options.get("work_dir", ".")
     
     # Build environment variables for ACP subprocess (model configuration)
     acp_env: dict[str, str] = {}
-    if spec.model:
+    if connector is not None:
+        acp_env.update(connector.env)
+    if spec.model and (connector is None or connector.http_api):
         acp_env["OPENCODE_CONFIG_CONTENT"] = json.dumps({"model": spec.model})
         logger.info(f"Setting model via OPENCODE_CONFIG_CONTENT: {spec.model}")
     
@@ -959,6 +987,7 @@ def _invoke_agent_opencode_acp(
         "transport": "opencode-acp",
         "cliToolsMode": cli_tools_mode,
         "acpAgent": " ".join(agent_argv),
+        "acpConnector": connector.name if connector is not None else None,
     }
     
     try:
@@ -986,6 +1015,8 @@ def _invoke_agent_opencode_acp(
                 on_event=on_event,
                 agent_argv=agent_argv,
                 on_permission=on_permission,
+                model=session_model,
+                mode=session_mode,
             )
         )
 
@@ -994,6 +1025,7 @@ def _invoke_agent_opencode_acp(
         if on_event is not None:
             on_event({"type": "agent.message.end", "stopReason": response.get("stop_reason")})
         debug_meta["acpSuccess"] = True
+        debug_meta["acpApplied"] = response.get("applied")
         debug_meta["acpStopReason"] = response.get("stop_reason")
         debug_meta["opencodeSessionID"] = response.get("session_id", "")
         

@@ -320,6 +320,8 @@ def cmd_run(args: argparse.Namespace) -> None:
         agent_cli_opencode_command=getattr(args, "agent_cli_opencode_command", None),
         agent_cli_acp_command=getattr(args, "agent_cli_acp_command", None),
         agent_cli_acp_permissions=getattr(args, "agent_cli_acp_permissions", None),
+        acp_connector=getattr(args, "acp_connector", None),
+        elicit_socket=getattr(args, "elicit_socket", None),
         agent_cli_opencode_args=getattr(args, "agent_cli_opencode_args", None),
         agent_cli_opencode_agent=getattr(args, "agent_cli_opencode_agent", None),
         agent_cli_opencode_native_args=getattr(args, "agent_cli_opencode_native_args", None),
@@ -348,6 +350,26 @@ def cmd_run(args: argparse.Namespace) -> None:
             print(f"  {port_name}: {values[0]}")
         else:
             print(f"  {port_name}: {values}")
+
+
+def cmd_connectors(args: argparse.Namespace) -> None:
+    """List the ACP connectors a run from the workspace would see."""
+    import json as _json
+
+    from wfpy.connectors import describe_all, load_connectors, user_file, workspace_file, workspace_root
+
+    root = workspace_root(args.workspace)
+    rows = describe_all(load_connectors(args.workspace))
+    if args.json:
+        print(_json.dumps({"user_file": str(user_file()),
+                           "workspace_file": str(workspace_file(root)) if root else None,
+                           "connectors": rows}, indent=1))
+        return
+    print(f"{'name':<10} {'available':<10} {'source':<11} {'model':<10} {'mode':<12} command")
+    for r in rows:
+        print(f"{r['name']:<10} {'yes' if r['available'] else 'no':<10} {r['source']:<11} "
+              f"{r['model'] or '-':<10} {r['mode'] or '-':<12} {r['command']}")
+    print(f"user file: {user_file()}" + (f"  workspace file: {workspace_file(root)}" if root else ""))
 
 
 def cmd_plan(args: argparse.Namespace) -> None:
@@ -594,6 +616,18 @@ def main() -> None:
         "'claude-agent-acp' (default: the OpenCode command's acp subcommand)",
     )
     run_parser.add_argument(
+        "--acp-connector",
+        default=None,
+        help="The ACP connector an agent on the acp transport spawns when it names none "
+        "(`wfpy connectors` lists them; default opencode)",
+    )
+    run_parser.add_argument(
+        "--elicit-socket",
+        default=None,
+        help="A Unix socket on which an IDE or a harness answers the agents' questions and "
+        "permission requests, one JSON object a line (wfpy._elicitation_runtime)",
+    )
+    run_parser.add_argument(
         "--agent-cli-acp-permissions",
         default=None,
         choices=["allow", "reject"],
@@ -690,6 +724,14 @@ def main() -> None:
         help="Return a partial graph on errors (graph format only)",
     )
     plan_parser.set_defaults(func=cmd_plan)
+
+    # ── connectors ──
+    connectors_parser = subparsers.add_parser(
+        "connectors", help="List the ACP connectors: discovered on the PATH, the user's, the workspace's"
+    )
+    connectors_parser.add_argument("--workspace", default=".", help="A path inside the workspace (default: .)")
+    connectors_parser.add_argument("--json", action="store_true", help="One JSON list instead of a table")
+    connectors_parser.set_defaults(func=cmd_connectors)
 
     args = parser.parse_args()
     args.func(args)

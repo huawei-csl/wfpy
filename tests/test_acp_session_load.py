@@ -23,6 +23,11 @@ class FakeClient:
         self.can_load_session = can_load
         self.load_fails = load_fails
         self.client = types.SimpleNamespace(response_text="", events=asyncio.Queue())
+        self.last_session_response = None
+
+    async def configure_session(self, session_id, response, model=None, mode=None):
+        self.calls.append(("configure", session_id, model, mode))
+        return {}
 
     async def start(self):
         self.calls.append(("start",))
@@ -61,23 +66,26 @@ def run(monkeypatch, *, can_load, load_fails=False, session_id="old"):
 class TestResumingASession:
     def test_a_known_session_is_loaded_before_the_prompt(self, monkeypatch):
         calls, response = run(monkeypatch, can_load=True)
-        assert calls == [("start",), ("load_session", "old", "/w"), ("prompt", "old"), ("stop",)]
+        assert calls == [("start",), ("load_session", "old", "/w"), ("configure", "old", None, None),
+                         ("prompt", "old"), ("stop",)]
         assert response["session_id"] == "old"
 
     def test_an_agent_without_load_gets_a_fresh_session(self, monkeypatch):
         calls, response = run(monkeypatch, can_load=False)
-        assert calls == [("start",), ("new_session", "/w"), ("prompt", "fresh"), ("stop",)]
+        assert calls == [("start",), ("new_session", "/w"), ("configure", "fresh", None, None),
+                         ("prompt", "fresh"), ("stop",)]
         assert response["session_id"] == "fresh"
 
     def test_a_failed_load_is_a_fresh_session_not_a_failed_firing(self, monkeypatch):
         calls, response = run(monkeypatch, can_load=True, load_fails=True)
         assert calls == [("start",), ("load_session", "old", "/w"), ("new_session", "/w"),
-                         ("prompt", "fresh"), ("stop",)]
+                         ("configure", "fresh", None, None), ("prompt", "fresh"), ("stop",)]
         assert response["session_id"] == "fresh"
 
     def test_no_session_id_means_a_new_session(self, monkeypatch):
         calls, response = run(monkeypatch, can_load=True, session_id=None)
-        assert calls == [("start",), ("new_session", "/w"), ("prompt", "fresh"), ("stop",)]
+        assert calls == [("start",), ("new_session", "/w"), ("configure", "fresh", None, None),
+                         ("prompt", "fresh"), ("stop",)]
 
     def test_the_client_reads_the_capability_at_initialize(self):
         client = ACPClient()

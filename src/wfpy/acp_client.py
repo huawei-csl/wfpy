@@ -236,6 +236,9 @@ class ACPClient:
         # Whether the agent advertised `session/load` at initialize: a session
         # from an earlier process can be resumed only through it.
         self.can_load_session = False
+        # The last new_session / load_session response: what the agent offers
+        # (modes, config options) for `configure_session`.
+        self.last_session_response: Any = None
         self.client: Optional[SimpleClient] = None
         self.connection: Optional[ClientSideConnection] = None
         self.process = None
@@ -308,7 +311,7 @@ class ACPClient:
         logger.info(f"Creating new session (cwd={cwd})")
         
         response = await self.connection.new_session(cwd=cwd)
-        
+        self.last_session_response = response
         session_id = response.session_id
         logger.info(f"Session created: {session_id}")
         
@@ -322,10 +325,51 @@ class ACPClient:
         if not self.connection:
             raise RuntimeError("Client not started. Call start() first.")
         logger.info(f"Loading session {session_id} (cwd={cwd})")
-        await self.connection.load_session(session_id=session_id, cwd=cwd, mcp_servers=[])
+        self.last_session_response = await self.connection.load_session(
+            session_id=session_id, cwd=cwd, mcp_servers=[])
         # The replayed history is not this firing's answer.
         self.client.response_text = ""
         logger.info(f"Session loaded: {session_id}")
+
+    async def configure_session(self, session_id: str, response: Any,
+                                model: str | None = None, mode: str | None = None) -> dict[str, Any]:
+        """Apply a connector's model and mode to a session the agent offers
+        them on. `response` is the new_session or load_session response,
+        whose `config_options` and `modes` say what the agent offers: a
+        config option with id `model` (Claude Code: default, sonnet,
+        haiku, opus...) is matched by value, then by name, case-insensitive,
+        then by prefix; a mode by id. What the agent does not offer is
+        logged and left."""
+        applied: dict[str, Any] = {}
+        options = getattr(response, "config_options", None) or getattr(response, "configOptions", None) or []
+        modes = getattr(response, "modes", None)
+        if model:
+            option = next((o for o in options if str(getattr(o, "id", "")) == "model"), None)
+            if option is None:
+                logger.warning(f"The agent offers no model option; model {model!r} not applied")
+            else:
+                choices = list(getattr(option, "options", None) or [])
+                wanted = model.strip().lower()
+                chosen = (next((c for c in choices if str(getattr(c, "value", "")).lower() == wanted), None)
+                          or next((c for c in choices if str(getattr(c, "name", "")).lower() == wanted), None)
+                          or next((c for c in choices if str(getattr(c, "value", "")).lower().startswith(wanted)), None))
+                if chosen is None:
+                    logger.warning(f"The agent's model option has no {model!r}; it offers "
+                                   f"{[getattr(c, 'value', None) for c in choices]}")
+                else:
+                    await self.connection.set_config_option(config_id="model", session_id=session_id,
+                                                            value=str(getattr(chosen, "value")))
+                    applied["model"] = str(getattr(chosen, "value"))
+                    logger.info(f"Session model set to {applied['model']}")
+        if mode:
+            available = [str(getattr(m, "id", "")) for m in (getattr(modes, "available_modes", None) or [])]
+            if mode not in available:
+                logger.warning(f"The agent offers no mode {mode!r}; it offers {available}")
+            else:
+                await self.connection.set_session_mode(session_id=session_id, mode_id=mode)
+                applied["mode"] = mode
+                logger.info(f"Session mode set to {mode}")
+        return applied
 
     async def send_prompt(self, session_id: str, prompt: str) -> dict[str, Any]:
         """
@@ -571,6 +615,8 @@ async def invoke_opencode_acp(
     on_event: Callable[[dict[str, Any]], None] | None = None,
     agent_argv: list[str] | None = None,
     on_permission: PermissionHandler | None = None,
+    model: str | None = None,
+    mode: str | None = None,
 ) -> dict[str, Any]:
     """
     High-level function to invoke opencode via ACP with stuck detection.
@@ -587,6 +633,8 @@ async def invoke_opencode_acp(
         session_id: Optional existing session ID to continue (if None, creates new session)
         agent_argv: The ACP agent's command line, verbatim; None for opencode's `acp`
         on_permission: Answers the agent's permission requests; None allows each once
+        model: A session model to set, if the agent offers a `model` config option
+        mode: A session mode to set, if the agent offers it
         
     Returns:
         Response from the agent
@@ -621,7 +669,8 @@ async def invoke_opencode_acp(
             session_id = await client.create_session(cwd=cwd)
         else:
             session_id = await client.create_session(cwd=cwd)
-        
+        applied = await client.configure_session(session_id, client.last_session_response,
+                                                 model=model, mode=mode)
         # Run with stuck detection
         response = await run_with_stuck_detection(
             client=client,
@@ -635,7 +684,7 @@ async def invoke_opencode_acp(
         
         # Add session_id to response for session continuation
         response["session_id"] = session_id
-        
+        response["applied"] = applied
         return response
         
     finally:
