@@ -84,7 +84,7 @@ class TestWhoAnswers:
             asked.append({"question": question, "choices": choices})
             return ElicitationResponse(answer=next(answers))
 
-        spec = types.SimpleNamespace(ask_user=True)
+        spec = types.SimpleNamespace(ask_permissions=True)
         handler = _acp_permission_handler(spec, self._options(_wf_elicit=elicit))
         assert handler("Write hello.txt", OFFERED) == "reject"
         assert handler("Write hello.txt", OFFERED) == "allow"
@@ -96,7 +96,7 @@ class TestWhoAnswers:
         def elicit(question, *, context=None, choices=None):
             return ElicitationResponse(answer=None, declined=True, reason="no user")
 
-        handler = _acp_permission_handler(types.SimpleNamespace(ask_user=True), self._options(_wf_elicit=elicit))
+        handler = _acp_permission_handler(types.SimpleNamespace(ask_permissions=True), self._options(_wf_elicit=elicit))
         assert handler("Write hello.txt", OFFERED) == "reject"
         assert handler("Write hello.txt", OFFERED[:2]) is None   # nothing to refuse with: cancel
 
@@ -110,7 +110,7 @@ class TestWhoAnswers:
             _acp_permission_handler(spec, self._options(agent_cli_acp_permissions="maybe"))
 
     def test_ask_user_without_a_seam_falls_back_to_the_policy(self):
-        spec = types.SimpleNamespace(ask_user=True)
+        spec = types.SimpleNamespace(ask_permissions=True)
         assert _acp_permission_handler(spec, self._options()) is None
 
 

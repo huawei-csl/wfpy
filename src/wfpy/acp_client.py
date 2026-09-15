@@ -308,7 +308,8 @@ class ACPClient:
             
         logger.info("ACP client stopped")
         
-    async def create_session(self, cwd: str = ".", title: Optional[str] = None) -> str:
+    async def create_session(self, cwd: str = ".", title: Optional[str] = None,
+                             mcp_servers: Optional[list[dict[str, Any]]] = None) -> str:
         """
         Create a new ACP session.
         
@@ -324,14 +325,15 @@ class ACPClient:
             
         logger.info(f"Creating new session (cwd={cwd})")
         
-        response = await self.connection.new_session(cwd=cwd)
+        response = await self.connection.new_session(cwd=cwd, mcp_servers=_mcp_servers(mcp_servers))
         self.last_session_response = response
         session_id = response.session_id
         logger.info(f"Session created: {session_id}")
         
         return session_id
         
-    async def load_session(self, session_id: str, cwd: str = ".") -> None:
+    async def load_session(self, session_id: str, cwd: str = ".",
+                           mcp_servers: Optional[list[dict[str, Any]]] = None) -> None:
         """Resume a session from an earlier process: `session/load`, which the
         agent answers by replaying the session's history as updates. Every
         firing is a new agent process, so a stateful agent's session lives
@@ -340,7 +342,7 @@ class ACPClient:
             raise RuntimeError("Client not started. Call start() first.")
         logger.info(f"Loading session {session_id} (cwd={cwd})")
         self.last_session_response = await self.connection.load_session(
-            session_id=session_id, cwd=cwd, mcp_servers=[])
+            session_id=session_id, cwd=cwd, mcp_servers=_mcp_servers(mcp_servers))
         # The replayed history is not this firing's answer.
         self.client.response_text = ""
         logger.info(f"Session loaded: {session_id}")
@@ -618,6 +620,16 @@ async def _monitor_events(
             return
 
 
+def _mcp_servers(servers: Optional[list[dict[str, Any]]]) -> list[Any]:
+    """The session's MCP servers as the protocol's objects: HTTP ones, a
+    name and a URL each (`session/new` and `session/load` take the list)."""
+    if not servers:
+        return []
+    from acp.schema import HttpMcpServer
+    return [HttpMcpServer(type="http", name=str(s["name"]), url=str(s["url"]), headers=[])
+            for s in servers]
+
+
 async def invoke_opencode_acp(
     prompt: str,
     cwd: str = ".",
@@ -631,6 +643,7 @@ async def invoke_opencode_acp(
     on_permission: PermissionHandler | None = None,
     model: str | None = None,
     mode: str | None = None,
+    mcp_servers: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """
     High-level function to invoke opencode via ACP with stuck detection.
@@ -649,6 +662,8 @@ async def invoke_opencode_acp(
         on_permission: Answers the agent's permission requests; None allows each once
         model: A session model to set, if the agent offers a `model` config option
         mode: A session mode to set, if the agent offers it
+        mcp_servers: HTTP MCP servers for the session, `{"name", "url"}` each: the
+            run's own `ask_user` tool (`_ask_user_mcp`) is one
         
     Returns:
         Response from the agent
@@ -672,17 +687,17 @@ async def invoke_opencode_acp(
         # the caller records the new id.
         if session_id and client.can_load_session:
             try:
-                await client.load_session(session_id, cwd=cwd)
+                await client.load_session(session_id, cwd=cwd, mcp_servers=mcp_servers)
                 logger.info(f"Resumed session: {session_id}")
             except Exception as exc:  # noqa: BLE001 — a lost session is a fresh one, not a failed firing
                 logger.warning(f"Could not load session {session_id} ({exc}); creating a new one")
-                session_id = await client.create_session(cwd=cwd)
+                session_id = await client.create_session(cwd=cwd, mcp_servers=mcp_servers)
         elif session_id:
             logger.warning(f"The agent does not offer session/load; session {session_id} cannot be "
                            "resumed in a new process, creating a new one")
-            session_id = await client.create_session(cwd=cwd)
+            session_id = await client.create_session(cwd=cwd, mcp_servers=mcp_servers)
         else:
-            session_id = await client.create_session(cwd=cwd)
+            session_id = await client.create_session(cwd=cwd, mcp_servers=mcp_servers)
         applied = await client.configure_session(session_id, client.last_session_response,
                                                  model=model, mode=mode)
         # Run with stuck detection

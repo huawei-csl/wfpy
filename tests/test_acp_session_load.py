@@ -35,12 +35,12 @@ class FakeClient:
     async def stop(self):
         self.calls.append(("stop",))
 
-    async def create_session(self, cwd="."):
-        self.calls.append(("new_session", cwd))
+    async def create_session(self, cwd=".", mcp_servers=None):
+        self.calls.append(("new_session", cwd) + ((mcp_servers,) if mcp_servers else ()))
         return "fresh"
 
-    async def load_session(self, session_id, cwd="."):
-        self.calls.append(("load_session", session_id, cwd))
+    async def load_session(self, session_id, cwd=".", mcp_servers=None):
+        self.calls.append(("load_session", session_id, cwd) + ((mcp_servers,) if mcp_servers else ()))
         if self.load_fails:
             raise RuntimeError("no such session")
 

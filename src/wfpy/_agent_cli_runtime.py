@@ -847,17 +847,20 @@ def _acp_agent_argv(options: dict[str, Any], spec: AgentSpec | None = None) -> l
 def _acp_permission_handler(spec: AgentSpec, options: dict[str, Any]) -> Any:
     """Who answers the agent's permission requests over ACP.
 
-    An agent declared with ``ask_user=True`` puts them to the user through
-    the elicitation seam (the closure ``runner._step_agent`` injects as
-    ``_wf_elicit``): the question is the tool call's title, the choices the
-    options the agent offered, and the answer is matched to an option by
+    An agent declared with ``ask_permissions=True`` puts them to the user
+    through the elicitation seam (the closure ``runner._step_agent`` injects
+    as ``_wf_elicit``): the question is the tool call's title, the choices
+    the options the agent offered, and the answer is matched to an option by
     name, id or number; a declined or unmatched answer is the reject option.
     Otherwise the ``agent_cli_acp_permissions`` option decides: ``allow``
-    (the default, each request allowed once) or ``reject``.
+    (the default, each request allowed once) or ``reject``. ``ask_user``
+    alone does not route them: a workflow's agent writing its files is not
+    a question, and the user's questions come through the ``ask_user`` tool
+    (`_ask_user_mcp`) instead.
     """
     from wfpy.acp_client import option_of_kind
 
-    ask = options.get("_wf_elicit") if getattr(spec, "ask_user", False) else None
+    ask = options.get("_wf_elicit") if getattr(spec, "ask_permissions", False) else None
     if callable(ask):
 
         def via_user(title: str, offered: list[dict[str, str]]) -> str | None:
@@ -989,7 +992,18 @@ def _invoke_agent_opencode_acp(
         "acpAgent": " ".join(agent_argv),
         "acpConnector": connector.name if connector is not None else None,
     }
-    
+    # The human port: an agent with `ask_user` gets the `ask_user` tool over
+    # MCP, served by this process for the firing, so it can put a question to
+    # the user (the terminal, the run's --elicit-socket, an IDE's chat).
+    ask_server = None
+    mcp_servers: list[dict[str, Any]] | None = None
+    elicit = options.get("_wf_elicit")
+    if getattr(spec, "ask_user", False) and callable(elicit):
+        from wfpy._ask_user_mcp import SERVER_NAME, AskUserServer
+        ask_server = AskUserServer(elicit)
+        mcp_servers = [{"name": SERVER_NAME, "url": ask_server.start()}]
+        debug_meta["acpAskUserTool"] = mcp_servers[0]["url"]
+
     try:
         # Import ACP client
         from wfpy.acp_client import invoke_opencode_acp
@@ -1017,8 +1031,11 @@ def _invoke_agent_opencode_acp(
                 on_permission=on_permission,
                 model=session_model,
                 mode=session_mode,
+                mcp_servers=mcp_servers,
             )
         )
+        if ask_server is not None:
+            debug_meta["acpQuestionsAsked"] = len(ask_server.calls)
 
         # Extract response text
         response_text = response.get("text", "")
@@ -1053,6 +1070,9 @@ def _invoke_agent_opencode_acp(
             session_id=session_id,
             continue_session=continue_session,
         )
+    finally:
+        if ask_server is not None:
+            ask_server.stop()
 
 
 def _invoke_agent_claude_cli(

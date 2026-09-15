@@ -404,7 +404,8 @@ class AgentSpec:
     timeout_ms: int = 120_000
     fireable_without_input: int = 0
     stateful: bool = False
-    ask_user: bool = False  # allow the agent to pause mid-firing and ask the user (HTTP transport)
+    ask_user: bool = False  # the agent may ask the user: the `ask_user` tool (HTTP, and ACP over MCP)
+    ask_permissions: bool = False  # ACP: the agent's permission requests go to the user too
     context_budget: int = 50
     truncation_strategy: str = "sliding"  # "sliding" | "summarize"
     mcp_servers: list[str] | None = None  # per-agent MCP server filter
@@ -1006,6 +1007,7 @@ def agent(
     fireable_without_input: int = 0,
     stateful: bool = False,
     ask_user: bool = False,
+    ask_permissions: bool = False,
     context_budget: int = 50,
     truncation_strategy: str = "sliding",
     mcp_servers: list[str | dict[str, Any]] | None = None,
@@ -1121,6 +1123,7 @@ def agent(
             connector=connector,
             mode=mode,
             ask_user=ask_user,
+            ask_permissions=ask_permissions,
             claudeAgent=claudeAgent,
             useClaudeAgent=useClaudeAgent,
             usePrompt=usePrompt,
@@ -1179,6 +1182,7 @@ def agent(
             fireable_without_input=normalized["fireable_without_input"],
             stateful=stateful,
             ask_user=normalized["ask_user"],
+            ask_permissions=normalized["ask_permissions"],
             context_budget=normalized["context_budget"],
             truncation_strategy=normalized["truncation_strategy"],
             mcp_servers=server_name_filters,
