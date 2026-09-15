@@ -25,7 +25,7 @@ classifiers = [
     "Typing :: Typed",
 ]
 
-dependencies = ["libcst>=1.4"]
+dependencies = ["libcst>=1.4", "tomli>=2.0; python_version < '3.11'"]
 
 [project.urls]
 Source = "https://github.com/huawei-csl/wfpy"
