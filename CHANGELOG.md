@@ -22,6 +22,12 @@ All notable changes to wfpy are documented here. The format follows
   that qualify, `createNode` takes `importFrom` for a workflow defined in
   another module, and the graph export marks an instance with an `instance`
   annotation.
+- A firing that fails gives back the tokens it took: each goes back to the
+  head of its queue, in order, for an action, a tool, an agent and a
+  StreamBlocks instance. A nested workflow and an if / loop are made of other
+  actors' firings, each atomic on its own. A failed run's queues are
+  left as they were before the failing firing, the first step towards resuming
+  a run (`docs/proposals/resume.md`).
 
 ## [1.0.0] — 2026-07-24
 
