@@ -42,6 +42,16 @@ All notable changes to wfpy are documented here. The format follows
   describe. A value neither can write (a lock, an open file, a local class)
   makes the checkpoint not resumable, naming it. The resumed run records
   `resumedFrom`.
+- Resuming a run at any step of its queue trace:
+  `wfpy run flow.py --resume-from wf-out/<run> --at-step N`. Every firing is
+  journalled in `run.wf-journal.jsonl` (what it took, by digest, what it put,
+  and the actor's state after). A resume at step N starts again from the run's
+  inputs and replays each actor's firings up to the step instead of running
+  them, then carries on live. Replaying per actor is sound with parallel
+  workers, where restoring a snapshot taken at a step is not. A replayed firing
+  whose inputs differ from the original's stops the replay (`replayStopped` in
+  the run record). Trace steps carry `journalSeq` and `replayed`, and the queue
+  trace is now written when a run fails too.
 
 ### Fixed
 - A run whose tokens are arbitrary objects no longer fails writing its overlay
