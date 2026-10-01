@@ -36,6 +36,17 @@ class McpDiscoveredTool:
     input_schema: dict[str, Any] | None = None
 
 
+def _field(obj: Any, name: str, mcp1_name: str, default: Any) -> Any:
+    """A field of an mcp model, under its mcp 2 name or its mcp 1 one.
+
+    mcp 2's models have snake_case attributes (``is_error``, ``input_schema``)
+    and keep the camelCase names only as JSON aliases; mcp 1's attributes are
+    the camelCase names.
+    """
+    value = getattr(obj, name, None)
+    return getattr(obj, mcp1_name, default) if value is None else value
+
+
 # ---------------------------------------------------------------------------
 # Ephemeral connection helper
 # ---------------------------------------------------------------------------
@@ -100,15 +111,25 @@ async def _connect(
             raise RuntimeError(
                 f"MCP server '{server_name}' (streamable-http) requires a non-empty 'url'."
             )
+        unsupported = (
+            f"MCP server '{server_name}' uses 'streamable-http' transport but "
+            "the installed mcp package does not support it. "
+            "Upgrade with: pip install --upgrade mcp"
+        )
         try:
-            from mcp.client.streamable_http import streamablehttp_client
+            from mcp.client import streamable_http
         except ImportError:
-            raise RuntimeError(
-                f"MCP server '{server_name}' uses 'streamable-http' transport but "
-                "the installed mcp package does not support it. "
-                "Upgrade with: pip install --upgrade mcp"
-            )
-        async with streamablehttp_client(url=url) as (read_stream, write_stream, _get_session_id):
+            raise RuntimeError(unsupported)
+        # mcp 2 has only `streamable_http_client`, which yields the read and
+        # write streams; mcp 1 before it only `streamablehttp_client`, which
+        # yields a session-id getter after them.
+        open_streams = getattr(streamable_http, "streamable_http_client", None) or getattr(
+            streamable_http, "streamablehttp_client", None
+        )
+        if open_streams is None:
+            raise RuntimeError(unsupported)
+        async with open_streams(url) as streams:
+            read_stream, write_stream = streams[0], streams[1]
             async with ClientSession(read_stream, write_stream) as session:
                 await session.initialize()
                 yield session
@@ -148,7 +169,7 @@ async def call_mcp_tool(
                     texts.append(getattr(block, "text", ""))
             text = "\n".join(texts)
 
-            is_error = getattr(result, "isError", False)
+            is_error = _field(result, "is_error", "isError", False)
             return McpToolCallResult(
                 ok=not is_error,
                 result="" if is_error else text,
@@ -179,7 +200,7 @@ async def list_mcp_tools(
             tools.append(McpDiscoveredTool(
                 name=getattr(t, "name", ""),
                 description=getattr(t, "description", ""),
-                input_schema=getattr(t, "inputSchema", None),
+                input_schema=_field(t, "input_schema", "inputSchema", None),
             ))
         return tools
 
