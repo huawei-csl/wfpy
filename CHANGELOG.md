@@ -52,6 +52,9 @@ All notable changes to wfpy are documented here. The format follows
   whose inputs differ from the original's stops the replay (`replayStopped` in
   the run record). Trace steps carry `journalSeq` and `replayed`, and the queue
   trace is now written when a run fails too.
+  In wfpy-ide, the queue-trace stepper's ⟲ resumes a run at the step it
+  shows, and a node's "Rerun from Here" resumes it before that node's last
+  firing.
 
 ### Fixed
 - A run whose tokens are arbitrary objects no longer fails writing its overlay

@@ -1,6 +1,6 @@
 # Proposal: resuming a run
 
-**Status:** proposal — phases 1 to 3 (atomic firings, checkpoint on failure, the firing journal and `--at-step`) are implemented; the stepper's resume button is not.
+**Status:** implemented — all four phases: atomic firings, checkpoint on failure (`--resume-from`), the firing journal (`--at-step`), and resuming from the IDE (the stepper's ⟲ and a node's "Rerun from Here"). What is still open is listed under Open questions and in each section's notes.
 **Affects:** wfpy (the runtime and the queue trace); dialogram (the queue-trace
 stepper gets a resume button); wfpy-ide (one command id).
 
@@ -318,6 +318,10 @@ A fix to an actor's code applies to its firings after N.
 
 ## The stepper resumes
 
+**Implemented** (phase 4) as described here, with one adjustment: "Rerun from
+Here" resumes before the node's *last* firing in the run, found by the run
+driver in the trace, since a menu on a node has no step of its own.
+
 The stepper already has the run and the step. One more button in the Debug
 cluster:
 
@@ -362,8 +366,12 @@ flags.
    and that the outputs equal a clean run's. Also covered: a failed run at its
    last step, a loop over a child workflow, a resumed run resumed again,
    replay stopping when inputs differ, and the CLI.
-4. **The stepper's ⟲ button**, and "Rerun from here" on a node (dialogram +
-   wfpy-ide). The button passes the step it shows to `--at-step`.
+4. **The stepper's ⟲ button**, and "Rerun from here" on a node. *Done*
+   (endrix/dialogram#60, endrix/wfpy-ide#17). The run command takes
+   `resumeFrom` with `atStep` or `resumeAtActor`. It finds the step in the
+   trace and refuses, before starting a process, a step the run lacks, a node
+   that never fired, or a trace without journal positions. wfpy-ide's
+   `cliResumeArgs` supplies the flags.
 
 ## Open questions
 
