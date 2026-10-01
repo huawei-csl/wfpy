@@ -1,6 +1,6 @@
 # Proposal: resuming a run
 
-**Status:** proposal — phase 1 (atomic firings) is implemented; the rest is not.
+**Status:** proposal — phases 1 (atomic firings) and 2 (checkpoint on failure, `--resume-from`) are implemented; the queue trace and the stepper are not.
 **Affects:** wfpy (the runtime and the queue trace); dialogram (the queue-trace
 stepper gets a resume button); wfpy-ide (one command id).
 
@@ -115,6 +115,29 @@ which may consume them before failing. Its checkpoint is the sub-plan's own,
 taken recursively, and the parent's tokens are already in it.
 
 ### Write a checkpoint when a run fails
+
+**Implemented** (phase 2), in `_checkpoint_runtime.py`. It differs from the
+sketch below in three places:
+
+- **An interrupted composite firing is marked.** A nested workflow running its
+  sub-plan, an if running its branch, and a loop running its body set
+  `RuntimeActor.pending` before they run the other firings and clear it once
+  done. A failure inside leaves it set; the checkpoint records it (for an if,
+  with the token it passes on). A resumed run finishes that firing rather than
+  starting it again: the child carries on its sub-plan without new input, the
+  if or loop runs its branch or body to quiescence, then completes.
+- **A loop's position** is the iterable and the number of items taken. The
+  iterator is rebuilt on restore and advanced that far. A loop over something
+  that cannot be saved (a generator) makes the checkpoint not resumable.
+- **Paths are written as they are**, absolute. File tokens keep pointing into
+  the failed run's `work/`, which stays where it is. `--copy-work` is not
+  implemented.
+- **A stop from the IDE does not write one yet.** Ctrl-C does: the
+  `KeyboardInterrupt` unwinds through the executor, which waits for the
+  firings in flight. The IDE sends SIGTERM, which Python does not turn into an
+  exception, then SIGKILL after a grace period that a firing in flight (an
+  agent call) can outlast. Handling SIGTERM means choosing between waiting for
+  those firings and abandoning them with their inputs. That is left open.
 
 On failure, after the executor has finished the firings still in flight,
 `run()` writes `run.wf-checkpoint.json` beside the run record:

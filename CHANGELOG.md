@@ -28,6 +28,17 @@ All notable changes to wfpy are documented here. The format follows
   actors' firings, each atomic on its own. A failed run's queues are
   left as they were before the failing firing, the first step towards resuming
   a run (`docs/proposals/resume.md`).
+- Resuming a run that failed: a failed or stopped run writes
+  `run.wf-checkpoint.json` (every queue's tokens, each actor's state, each
+  if / loop's progress, the shared context, recursively for nested workflows),
+  and `wfpy run flow.py --resume-from wf-out/<run>` (or
+  `run(..., resume_from=...)`) builds the plan from the current source,
+  restores that state and carries on. The firings before the failure do not
+  run again. A firing interrupted inside a nested workflow, an if branch or a
+  loop body is finished, not restarted. A changed action body is expected (it is
+  the fix); a changed graph is refused. Values are written as tagged JSON, not
+  pickled, and a value that cannot be written makes the checkpoint not
+  resumable, naming it. The resumed run records `resumedFrom`.
 
 ## [1.0.0] — 2026-07-24
 

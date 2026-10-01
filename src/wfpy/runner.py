@@ -43,6 +43,7 @@ import wfpy._plan_outputs_runtime as _plan_outputs_runtime
 import wfpy._run_artifacts as _art_runtime
 import wfpy._validation_runtime as _val_runtime
 import wfpy._agent_staging_runtime as _staging_runtime
+import wfpy._checkpoint_runtime as _checkpoint_runtime
 import wfpy._step_external_runtime as _ext_runtime
 from wfpy._step_streamblocks_runtime import _step_streamblocks_instance
 import wfpy._action_runtime as _action_runtime
@@ -406,6 +407,12 @@ class RuntimeActor:
 
         # For workflow actors
         self.sub_plan: FifoPlan | None = None
+
+        # A composite firing in progress -- a nested workflow running its
+        # sub-plan, an if / loop running its branch. Set before it runs the
+        # other firings and cleared once they are done, so a firing a failure
+        # interrupted is still marked, and a resumed run finishes it.
+        self.pending: dict[str, Any] | None = None
 
         # Conversation history used for UI/debug overlays; only stateful agents
         # feed it back into subsequent requests.
@@ -832,6 +839,10 @@ def _is_actor_maybe_ready(actor: RuntimeActor) -> bool:
     if actor.kind.startswith("control-"):
         return False
 
+    # A nested workflow a failure interrupted: its tokens are in its sub-plan.
+    if actor.pending is not None:
+        return True
+
     # Agent with remaining fireable-without-input budget
     if actor.kind == "agent" and actor.agent_fire_budget is not None and actor.agent_fire_budget > 0:
         return True
@@ -1184,6 +1195,8 @@ def _step_actor(
     if actor.kind == "workflow":
         return _step_workflow(actor, plan, out_dir, verbose)
     if actor.kind in ("control-if", "control-loop"):
+        if actor.pending is not None:
+            return _finish_control(actor, plan, out_dir, verbose, active_scopes)
         return _dispatch_step(actor, plan, out_dir, verbose, active_scopes)
     with _atomic_firing():
         return _dispatch_step(actor, plan, out_dir, verbose, active_scopes)
@@ -1338,22 +1351,46 @@ def _step_control_if(
         return False
 
     # Execute branch subgraph to quiescence (root remains active)
+    actor.pending = {
+        "scopes": sorted(_control_scopes(plan, branch_scope)),
+        "emit": cond_value,
+    }
+    return _finish_control(actor, plan, out_dir, verbose, active_scopes)
+
+
+def _finish_control(
+    actor: RuntimeActor,
+    plan: FifoPlan,
+    out_dir: Path,
+    verbose: bool,
+    active_scopes: set[str] | None,
+) -> bool:
+    """Run a control firing's branch or body to quiescence, and complete it.
+
+    Also how a resumed run finishes one a failure interrupted: ``pending``
+    holds the scopes it was running and, for an if, the token it passes on.
+    """
+    pending = actor.pending
+    assert pending is not None
     base_scopes = active_scopes or {"scope:root"}
-    branch_scopes = _control_scopes(plan, branch_scope)
     actor._control_running = True
-    _execute_scope_until_quiescence(
-        plan,
-        out_dir,
-        verbose,
-        base_scopes | branch_scopes,
-    )
-    actor._control_running = False
+    try:
+        _execute_scope_until_quiescence(
+            plan,
+            out_dir,
+            verbose,
+            base_scopes | set(pending["scopes"]),
+        )
+    finally:
+        actor._control_running = False
 
-    # Emit a token on out to signal completion (pass through cond)
-    for q in actor.out_queues.get("out", []):
-        q.enqueue(cond_value)
-        _record_edge_token(plan, q, cond_value)
+    if actor.kind == "control-if":
+        # Emit a token on out to signal completion (pass through cond)
+        for q in actor.out_queues.get("out", []):
+            q.enqueue(pending["emit"])
+            _record_edge_token(plan, q, pending["emit"])
 
+    actor.pending = None
     actor.fire_count += 1
     return True
 
@@ -1388,6 +1425,10 @@ def _step_control_loop(
             actor._loop_iter = iter(iterable_value)  # type: ignore[attr-defined]
         except TypeError:
             return False
+        # The iterator itself cannot be saved; what it iterates and how far it
+        # got can, and rebuild it.
+        actor._loop_source = iterable_value  # type: ignore[attr-defined]
+        actor._loop_index = 0  # type: ignore[attr-defined]
         actor._control_initialized = True
 
     loop_iter = getattr(actor, "_loop_iter", None)
@@ -1402,10 +1443,12 @@ def _step_control_loop(
             q.enqueue(None)
             _record_edge_token(plan, q, None)
         actor._control_initialized = False
-        if hasattr(actor, "_loop_iter"):
-            delattr(actor, "_loop_iter")
+        for attr in ("_loop_iter", "_loop_source", "_loop_index"):
+            if hasattr(actor, attr):
+                delattr(actor, attr)
         actor.fire_count += 1
         return True
+    actor._loop_index = getattr(actor, "_loop_index", 0) + 1  # type: ignore[attr-defined]
 
     # Enqueue item to loop.item port
     for q in actor.out_queues.get("item", []):
@@ -1415,16 +1458,8 @@ def _step_control_loop(
     # Execute loop body subgraph to quiescence (root remains active)
     body_scope = record.scopes.get("body")
     if body_scope:
-        base_scopes = active_scopes or {"scope:root"}
-        body_scopes = _control_scopes(plan, body_scope)
-        actor._control_running = True
-        _execute_scope_until_quiescence(
-            plan,
-            out_dir,
-            verbose,
-            base_scopes | body_scopes,
-        )
-        actor._control_running = False
+        actor.pending = {"scopes": sorted(_control_scopes(plan, body_scope))}
+        return _finish_control(actor, plan, out_dir, verbose, active_scopes)
 
     actor.fire_count += 1
     return True
@@ -2448,13 +2483,23 @@ def _step_workflow(
     if sub_plan is None:
         return False
 
-    # Check all input ports have tokens
+    # Resuming a firing a failure interrupted: its tokens are already in the
+    # sub-plan, which carries on from where it stopped.
+    if actor.pending is None:
+        if not _feed_sub_plan(actor, sub_plan):
+            return False
+        actor.pending = {"subPlan": True}
+
+    return _run_sub_plan(actor, sub_plan, parent_plan, out_dir, verbose)
+
+
+def _feed_sub_plan(actor: RuntimeActor, sub_plan: FifoPlan) -> bool:
+    """Move one token per input port into the sub-plan, if each has one."""
     for port_name in actor.in_queues:
         queues = actor.in_queues[port_name]
         if not queues or queues[0].size() < 1:
             return False
 
-    # Feed input tokens into the sub-plan's input queues
     for port_name in actor.in_queues:
         q = actor.in_queues[port_name][0]
         token = q.dequeue()
@@ -2472,7 +2517,16 @@ def _step_workflow(
         for sq in sub_queues:
             sq.enqueue(token)
             _record_edge_token(sub_plan, sq, token)
+    return True
 
+
+def _run_sub_plan(
+    actor: RuntimeActor,
+    sub_plan: FifoPlan,
+    parent_plan: FifoPlan,
+    out_dir: Path,
+    verbose: bool,
+) -> bool:
     # Sub-workflow workDir: parent_workDir/{instName}__wf/
     sub_work_dir: Path | None = None
     if parent_plan.work_dir:
@@ -2545,6 +2599,7 @@ def _step_workflow(
                     parent_q.enqueue(token)
                     _record_edge_token(parent_plan, parent_q, token)
 
+    actor.pending = None
     actor.fire_count += 1
     return True
 
@@ -2634,6 +2689,7 @@ def run(
     context_budget: int | None = None,
     context_summarize: str | bool | None = None,
     resume_context_from: str | None = None,
+    resume_from: str | None = None,
     context_seed: dict[str, Any] | None = None,
     elicitation_handler: Any = None,
     interactive: bool | None = None,
@@ -2687,6 +2743,10 @@ def run(
         context_budget: Approximate context budget for view packing.
         context_summarize: Shared context summarization mode (on/off or bool).
         resume_context_from: Path to prior run.wf-context.json for shared context restore.
+        resume_from: A run that failed or was stopped (its directory, or its
+            ``run.wf-checkpoint.json``). The plan is built from the current
+            source, the run's state is restored into it, and the run carries on
+            from where it stopped; takes no *inputs*.
         context_seed: Optional initial context seed object.
 
     Returns:
@@ -2849,6 +2909,22 @@ def run(
                 if verbose:
                     logger.warning("Failed to restore chat histories: %s", e)
 
+    # Carry on from where a run stopped: its queues, its actors' state, its
+    # control nodes and its sub-plans, restored into the plan just built.
+    resumed_from: str | None = None
+    if resume_from:
+        if inputs:
+            raise ValueError(
+                "run(resume_from=...) takes no inputs: the run's inputs are already "
+                "in its checkpoint, consumed or still queued"
+            )
+        checkpoint_path, checkpoint = _checkpoint_runtime.load_checkpoint(resume_from)
+        _checkpoint_runtime.restore_checkpoint(
+            plan, wf_def.name or "", checkpoint_path, checkpoint
+        )
+        resumed_from = str(checkpoint.get("runId") or checkpoint_path.parent.name)
+        logger.info("Resuming run %s from %s", resumed_from, checkpoint_path)
+
     if verbose:
         logger.info("Run %s  out=%s  work=%s", rid, run_out_dir, wdir or "(none)")
 
@@ -2874,6 +2950,7 @@ def run(
             plan, rid, wf_def, run_out_dir, base_out_dir,
             started_at, finished_at_value, outputs_payload,
             inputs=inputs, has_external=has_external, wdir=wdir, error=error,
+            resumed_from=resumed_from,
         )
 
     # Resolve max_workers: run() arg → @workflow(...) → executor default
@@ -2907,6 +2984,20 @@ def run(
             plan, writers.overlay_base, overlay_writer, run_out_dir, error_info, finished_at_err,
         )
         _persist_run_record(finished_at_err, {}, error=error_info)
+        # Every firing still in flight has finished (the executor waited for
+        # them), and the one that failed gave its tokens back: the plan is a
+        # state between two firings, and a resume starts from it.
+        try:
+            _checkpoint_runtime.write_checkpoint(
+                plan,
+                run_out_dir,
+                workflow_name=wf_def.name or "",
+                source_path=plan.source_path,
+                run_id=rid,
+                error=error_info,
+            )
+        except Exception:
+            logger.warning("Could not write the run's checkpoint", exc_info=True)
         raise
     finally:
         if run_out_token is None:

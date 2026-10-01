@@ -172,6 +172,7 @@ def _persist_run_record(
     has_external: bool = False,
     wdir: Path | None = None,
     error: dict[str, str] | None = None,
+    resumed_from: str | None = None,
 ) -> None:
     """Write run.wf-run.json and append to run-log.jsonl."""
     run_record = {
@@ -212,6 +213,8 @@ def _persist_run_record(
     }
     if error is not None:
         run_record["error"] = error
+    if resumed_from is not None:
+        run_record["resumedFrom"] = resumed_from
 
     run_record_path = run_out_dir / "run.wf-run.json"
     try:
@@ -233,6 +236,8 @@ def _persist_run_record(
     }
     if error is not None:
         log_entry["error"] = error
+    if resumed_from is not None:
+        log_entry["resumedFrom"] = resumed_from
 
     run_log_path = base_out_dir / "run-log.jsonl"
     try:
