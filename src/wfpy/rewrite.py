@@ -31,6 +31,15 @@ def _expr_to_code(node: cst.CSTNode | None) -> str:
     return cst.Module([]).code_for_node(node).strip()
 
 
+def _dotted_name(node: cst.BaseExpression) -> str:
+    """`a.b.c` for the module of a `from a.b.c import ...`."""
+    if isinstance(node, cst.Name):
+        return node.value
+    if isinstance(node, cst.Attribute):
+        return f"{_dotted_name(node.value)}.{node.attr.value}"
+    return ""
+
+
 def _source_revision(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
@@ -854,6 +863,7 @@ class RewriteEngine:
         params: dict[str, Any] | None = None,
         scope_control: str | None = None,
         scope_branch: str | None = None,
+        importFrom: str | None = None,
     ) -> None:
         self._ensure_identifier(name)
         fn, body = self._get_workflow_body(workflow)
@@ -868,6 +878,11 @@ class RewriteEngine:
                 cst.Arg(
                     keyword=cst.Name(str(key)),
                     value=cst.parse_expression(repr(value)),
+                    # `name=value`, as a keyword argument is written by hand.
+                    equal=cst.AssignEqual(
+                        whitespace_before=cst.SimpleWhitespace(""),
+                        whitespace_after=cst.SimpleWhitespace(""),
+                    ),
                 )
             )
         assign = cst.Assign(
@@ -878,6 +893,27 @@ class RewriteEngine:
         new_stmt_body = self._insert_statement(target_body, stmt, "node")
         new_block = target_block.with_changes(body=new_stmt_body)
         self._update_scope_body(fn.name.value, scope_control, scope_branch, new_block)
+        # A type defined in another module, the way a workflow instance's is,
+        # needs its import; one this file already binds does not.
+        if importFrom and type not in self._module_level_names():
+            self._set_module(self._ensure_import(self.module, importFrom, [type]))
+
+    def _module_level_names(self) -> set[str]:
+        """Names a top-level definition or import binds in this file."""
+        names: set[str] = set()
+        for stmt in self.module.body:
+            if isinstance(stmt, (cst.FunctionDef, cst.ClassDef)):
+                names.add(stmt.name.value)
+            elif isinstance(stmt, cst.SimpleStatementLine):
+                for small in stmt.body:
+                    if isinstance(small, (cst.Import, cst.ImportFrom)) and not isinstance(
+                        small.names, cst.ImportStar
+                    ):
+                        for alias in small.names:
+                            bound = alias.asname.name if alias.asname else alias.name
+                            if isinstance(bound, cst.Name):
+                                names.add(bound.value)
+        return names
 
     def create_port(
         self,
@@ -1328,7 +1364,7 @@ class RewriteEngine:
             for position, stmt in enumerate(statements):
                 if not isinstance(stmt, cst.ImportFrom):
                     continue
-                if not isinstance(stmt.module, cst.Name) or stmt.module.value != package:
+                if stmt.module is None or stmt.relative or _dotted_name(stmt.module) != package:
                     continue
                 if isinstance(stmt.names, cst.ImportStar):
                     return module
@@ -1357,9 +1393,11 @@ class RewriteEngine:
                 body[index] = line.with_changes(body=new_statements)
                 return module.with_changes(body=body)
 
+        package_expr = cst.parse_expression(package)
+        assert isinstance(package_expr, (cst.Name, cst.Attribute))
         new_import = cst.SimpleStatementLine([
             cst.ImportFrom(
-                module=cst.Name(package),
+                module=package_expr,
                 names=[cst.ImportAlias(name=cst.Name(name)) for name in sorted(wanted)],
             )
         ])
@@ -1371,6 +1409,20 @@ class RewriteEngine:
                 if isinstance(expr, cst.Expr) and isinstance(expr.value, cst.SimpleString):
                     # Keep a module docstring first.
                     insert_at = 1
+        # And `from __future__` imports, which must precede every other line.
+        while insert_at < len(body):
+            line = body[insert_at]
+            if not (
+                isinstance(line, cst.SimpleStatementLine)
+                and all(
+                    isinstance(stmt, cst.ImportFrom)
+                    and stmt.module is not None
+                    and _dotted_name(stmt.module) == "__future__"
+                    for stmt in line.body
+                )
+            ):
+                break
+            insert_at += 1
         new_body = body[:insert_at] + [new_import] + body[insert_at:]
         return module.with_changes(body=new_body)
 

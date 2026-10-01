@@ -17,6 +17,7 @@ from typing import Any
 
 import libcst as cst
 
+from wfpy._workflow_instance import discover_workflow_instances
 from wfpy.package_exports import apply_package_export, find_package_export
 from wfpy.rewrite import (
     RewriteEngine,
@@ -45,6 +46,9 @@ _QUERY_OPS: dict[str, Callable[[RewriteEngine, dict[str, Any]], dict[str, Any]]]
     "listTaskTypes": lambda engine, args: {"types": engine.list_task_types(**args)},
     "listInstanceNames": lambda engine, args: {"names": engine.list_instance_names(**args)},
     "listWorkflowTypes": lambda engine, args: {"types": engine.list_workflow_types()},
+    "listWorkflowInstances": lambda engine, args: {
+        "candidates": discover_workflow_instances(engine.file_path)
+    },
     "exportWorkflowGraph": lambda engine, args: {"graph": _export_graph(engine, args)},
 }
 

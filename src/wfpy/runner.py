@@ -637,6 +637,9 @@ def build_plan(
     # 4. Build sub-plans for nested workflow actors
     for ra in plan.actors:
         if ra.kind == "workflow" and isinstance(ra.meta, WorkflowDef):
+            # An instance answers from a past run; its child never runs.
+            if getattr(ra.instance, "_wfpy_workflow_instance", None) is not None:
+                continue
             sub_graph = _build_workflow_graph(ra.meta)
             sub_plan = build_plan(sub_graph, ra.meta)
             _inherit_plan_config(plan, sub_plan)
@@ -2367,6 +2370,10 @@ def _step_workflow(
     verbose: bool,
 ) -> bool:
     """Fire a nested workflow actor by running its sub-plan."""
+    recorded = getattr(actor.instance, "_wfpy_workflow_instance", None)
+    if recorded is not None:
+        return _step_workflow_instance(actor, parent_plan, recorded)
+
     sub_plan = actor.sub_plan
     if sub_plan is None:
         return False
@@ -2468,6 +2475,24 @@ def _step_workflow(
                     parent_q.enqueue(token)
                     _record_edge_token(parent_plan, parent_q, token)
 
+    actor.fire_count += 1
+    return True
+
+
+def _step_workflow_instance(
+    actor: RuntimeActor,
+    parent_plan: FifoPlan,
+    recorded: Any,
+) -> bool:
+    """Fire a workflow instance: a source of the outputs its run recorded, once."""
+    if actor.fire_count > 0:
+        return False
+    for port_name, tokens in recorded.outputs.items():
+        for token in tokens:
+            for parent_q in actor.out_queues.get(port_name, []):
+                with parent_plan._parallel_lock:
+                    parent_q.enqueue(token)
+                    _record_edge_token(parent_plan, parent_q, token)
     actor.fire_count += 1
     return True
 

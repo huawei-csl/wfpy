@@ -10,6 +10,8 @@ import functools
 import os as _os
 import re as _re
 import subprocess as _subprocess
+import sys as _sys
+from pathlib import Path as _Path
 from typing import Any, Callable
 
 from wfpy.types import (
@@ -1656,13 +1658,33 @@ def _process_workflow_function(
     def wrapper(*args: Any, **kwargs: Any) -> Any:
         from wfpy import _graph_context
 
-        if _graph_context._current_graph is not None and _active_wf_builder_depth.get() > 0:
+        instance_path = kwargs.pop("instance", None)
+        graph = _graph_context._current_graph
+        nested = graph is not None and _active_wf_builder_depth.get() > 0
+        if instance_path is not None and not nested:
+            raise TypeError(
+                f"{wf_def.name}(instance=...) is only meaningful nested in another workflow"
+            )
+
+        if graph is not None and nested:
             proxy = _make_workflow_proxy(wf_def)
+            if instance_path is not None:
+                from wfpy._workflow_instance import load_workflow_instance
+
+                # Relative to the file that wrote it, as the IDE writes it, so
+                # the run is found whatever directory `wfpy run` starts in.
+                run_path = _Path(instance_path).expanduser()
+                if not run_path.is_absolute():
+                    caller = _Path(_sys._getframe(1).f_code.co_filename)
+                    if caller.is_file():
+                        run_path = caller.parent / run_path
+                proxy._wfpy_workflow_instance = load_workflow_instance(wf_def, run_path)
+                proxy._wfpy_workflow_instance_path = str(instance_path)
             if wf_def.factory_name:
                 proxy._wfpy_factory_name = wf_def.factory_name
             if wf_def.factory_parameters:
                 proxy._wfpy_factory_parameters = copy.deepcopy(wf_def.factory_parameters)
-            _graph_context._current_graph.register_actor(proxy)
+            graph.register_actor(proxy)
             return proxy
 
         if _graph_context._current_graph is not None:
