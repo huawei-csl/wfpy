@@ -41,6 +41,30 @@ def _caller_outside_wfpy() -> dict[str, Any] | None:
         del frame
 
 
+def _definition_location(definition: Any) -> dict[str, Any]:
+    """File and line of a class's or function's own ``class`` / ``def``
+    statement.
+
+    Not the line ``inspect.getsourcelines`` starts at, which for a decorated
+    definition is its first decorator: the IDE resolves "go to source" from
+    the line it is given, and on ``@viewer(...)`` that resolves to wfpy's
+    ``viewer`` rather than the class it decorates.
+    """
+    import ast
+    import textwrap
+
+    file = inspect.getsourcefile(definition) or ""
+    lines, start = inspect.getsourcelines(definition)
+    try:
+        tree = ast.parse(textwrap.dedent("".join(lines)))
+    except SyntaxError:
+        return {"file": file, "line": start}
+    statement = tree.body[0] if tree.body else None
+    if isinstance(statement, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+        return {"file": file, "line": start + statement.lineno - 1}
+    return {"file": file, "line": start}
+
+
 @dataclasses.dataclass
 class Connection:
     """A single connection (edge) between two ports."""
@@ -234,10 +258,7 @@ class WorkflowGraph:
                 instance._wfpy_source = _caller_outside_wfpy()
             if getattr(instance, "_wfpy_definition", None) is None:
                 try:
-                    instance._wfpy_definition = {
-                        "file": inspect.getsourcefile(definition) or "",
-                        "line": inspect.getsourcelines(definition)[1],
-                    }
+                    instance._wfpy_definition = _definition_location(definition)
                 except Exception:
                     instance._wfpy_definition = None
         self._creation_order.append(("actor", name))
