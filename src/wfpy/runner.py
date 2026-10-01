@@ -253,6 +253,48 @@ def _attach_agent_response_meta(
 # ═══════════════════════════════════════════════════════════════════════════
 
 
+# The tokens the firing running on this thread has taken, in the order it took
+# them. Set only while `_atomic_firing` holds it; a dequeue anywhere else is not
+# part of a firing and is not logged.
+_firing_log = threading.local()
+
+
+def _log_taken(queue: "Queue", values: list[Any]) -> None:
+    log: list[tuple[Queue, Any]] | None = getattr(_firing_log, "taken", None)
+    if log is not None:
+        log.extend((queue, value) for value in values)
+
+
+class _atomic_firing:
+    """Give a firing's inputs back when it fails.
+
+    Every actor kind takes its tokens before it runs -- an action after its
+    guard, a tool or an agent on entry -- so a firing that raised had already
+    lost them, and nothing saved after the failure could bring them back. This
+    puts each one back at the head of its queue, in order, before the error
+    propagates: the run stops where the firing had not happened.
+
+    Safe without holding the queues for the whole firing: one actor never
+    fires twice at once, and every queue has one consumer, so nothing else
+    takes from the head meanwhile. A producer appending to the tail is
+    unaffected.
+    """
+
+    def __enter__(self) -> "_atomic_firing":
+        self._outer = getattr(_firing_log, "taken", None)
+        _firing_log.taken = []
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        taken: list[tuple[Queue, Any]] = _firing_log.taken
+        _firing_log.taken = self._outer
+        # A firing that succeeded keeps what it took, whatever fails after it.
+        if exc_type is None:
+            return
+        for queue, value in reversed(taken):
+            queue.give_back(value)
+
+
 class Queue:
     """Unbounded FIFO token queue on one connection edge.  Thread-safe."""
 
@@ -291,7 +333,14 @@ class Queue:
 
     def dequeue(self) -> Any:
         with self._lock:
-            return self.items.popleft()
+            value = self.items.popleft()
+        _log_taken(self, [value])
+        return value
+
+    def give_back(self, value: Any) -> None:
+        """Return a token taken by a firing that failed, to the head."""
+        with self._lock:
+            self.items.appendleft(value)
 
     def peek(self, n: int = 1) -> list[Any]:
         """Return up to *n* items without removing them."""
@@ -314,7 +363,9 @@ class Queue:
         with self._lock:
             if len(self.items) < n:
                 return None
-            return [self.items.popleft() for _ in range(n)]
+            values = [self.items.popleft() for _ in range(n)]
+        _log_taken(self, values)
+        return values
 
     def __repr__(self) -> str:
         return f"Queue({self.id!r}, len={self.size()})"
@@ -1126,6 +1177,25 @@ def _step_actor(
         return False
     if actor.kind.startswith("control-") and actor._control_running:
         return False
+    # A nested workflow and an if / loop are composite: one firing of theirs
+    # runs other actors' firings to completion, and each of those is atomic on
+    # its own. Giving back theirs as well would hand a token to a firing that
+    # already consumed it, and its sub-plan or branch would see it twice.
+    if actor.kind == "workflow":
+        return _step_workflow(actor, plan, out_dir, verbose)
+    if actor.kind in ("control-if", "control-loop"):
+        return _dispatch_step(actor, plan, out_dir, verbose, active_scopes)
+    with _atomic_firing():
+        return _dispatch_step(actor, plan, out_dir, verbose, active_scopes)
+
+
+def _dispatch_step(
+    actor: RuntimeActor,
+    plan: FifoPlan,
+    out_dir: Path,
+    verbose: bool,
+    active_scopes: set[str] | None,
+) -> bool:
     if actor.kind == "internal":
         return _step_internal(actor, out_dir, plan, verbose)
     elif actor.kind == "external":

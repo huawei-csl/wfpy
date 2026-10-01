@@ -1,6 +1,6 @@
 # Proposal: resuming a run
 
-**Status:** proposal — nothing here is implemented.
+**Status:** proposal — phase 1 (atomic firings) is implemented; the rest is not.
 **Affects:** wfpy (the runtime and the queue trace); dialogram (the queue-trace
 stepper gets a resume button); wfpy-ide (one command id).
 
@@ -85,13 +85,30 @@ Today a firing removes its tokens before it runs:
   dequeue on entry.
 
 When the action raises, its inputs are gone, and no checkpoint taken after the
-failure can bring them back. So the first change is **atomic firings**: peek
-the inputs, run, and dequeue only once the firing succeeded.
+failure can bring them back. So the first change is **atomic firings**: a
+firing that fails gives back what it took.
 
-That is safe as it stands. One actor never fires twice at once (the scheduler
-keeps `running_actors`), and every queue has exactly one consumer, so nothing
-else can take a peeked token in between. An internal action's guard already
-works this way; the commit moves from after the guard to after the action.
+**Implemented** (phase 1). Rather than reordering each kind's step, every
+`Queue.dequeue()` made during a firing is logged per thread
+(`_atomic_firing` in `runner.py`, around `_step_actor`). When the firing
+raises, each token goes back to the head of its queue, in reverse order, so
+the queue is as it was. The same log is what phase 3 records as a step's
+`consumed`.
+
+An `if` or a `loop` is not wrapped, any more than a nested workflow is. Its
+firing runs its branch to quiescence, and each firing in the branch is atomic
+on its own. Giving back the condition or the iterable after part of the
+branch had run would run that part twice. Where a control node stopped is
+its state, recorded by the checkpoint.
+
+That is safe without holding the queues for the whole firing. One actor never
+fires twice at once (the scheduler keeps `running_actors`), and every queue
+has exactly one consumer, so nothing else takes from the head meanwhile. A
+producer appending to the tail is unaffected.
+
+What is not given back is the actor's own state. An action that set
+`self._done = True` and then raised has still set it. Phase 2's checkpoint
+records the state as the failure left it.
 
 A nested workflow is the exception: its tokens are handed to the sub-plan,
 which may consume them before failing. Its checkpoint is the sub-plan's own,
