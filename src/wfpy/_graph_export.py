@@ -756,6 +756,17 @@ def export_graph_json(graph: Any) -> dict[str, Any]:
             meta = _build_task_meta(rec, node_id, ports)
         elif isinstance(rec.meta, WorkflowDef):
             meta["taskKind"] = "workflow"
+            # An instance answers from a past run: the annotation is what the
+            # IDE draws it by, and the run is what it names.
+            run_path = getattr(rec.instance, "_wfpy_workflow_instance_path", None)
+            if run_path is not None:
+                meta["workflowInstance"] = {"run": run_path}
+                meta["definitionAnnotations"] = [
+                    {
+                        "name": "instance",
+                        "arguments": [{"name": "run", "value": _wf_string_literal(run_path)}],
+                    }
+                ]
             for port_name, port_type in rec.meta.input_names.items():
                 ports.append(
                     {

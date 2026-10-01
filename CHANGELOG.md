@@ -14,6 +14,14 @@ All notable changes to wfpy are documented here. The format follows
   wiring can start or stop it; a class that declares its own actions keeps them.
   `path` is a task parameter, so one class serves many nodes and each carries
   its own resource.
+- Workflow instances: `child(instance="wf-out/<run>")` nests a workflow that
+  already ran and hands on the outputs its `run.wf-run.json` recorded, once,
+  without running it again — a source made of a past run. Only a workflow with
+  no input ports can be one. A relative path is resolved against the file that
+  writes it. The sidecar's `listWorkflowInstances` lists the runs in a project
+  that qualify, `createNode` takes `importFrom` for a workflow defined in
+  another module, and the graph export marks an instance with an `instance`
+  annotation.
 
 ## [1.0.0] — 2026-07-24
 
