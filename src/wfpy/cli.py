@@ -339,6 +339,7 @@ def cmd_run(args: argparse.Namespace) -> None:
         context_budget=getattr(args, "context_budget", None),
         context_summarize=getattr(args, "context_summarize", None),
         resume_context_from=getattr(args, "resume_context_from", None),
+        resume_from=getattr(args, "resume_from", None),
     )
 
     # Print outputs
@@ -703,6 +704,12 @@ def main() -> None:
         "--resume-context-from",
         default=None,
         help="Path to prior run.wf-context.json for context restore",
+    )
+    run_parser.add_argument(
+        "--resume-from",
+        default=None,
+        help="Carry on a run that failed or was stopped: its run directory, or "
+        "its run.wf-checkpoint.json. Takes no --input.",
     )
     run_parser.add_argument("--verbose", "-v", action="store_true", help="Verbose logging")
     run_parser.set_defaults(func=cmd_run)

@@ -61,6 +61,9 @@ src/wfpy/
 ├── _graph_context.py          Shared _current_graph variable (breaks core↔graph cycle)
 ├── _agent_decorator.py        @agent decorator config parsing helpers
 ├── _run_finalization.py       Run finalization (overlays, artifacts, run record)
+├── _checkpoint_runtime.py     Run checkpoints: capture/restore a plan's state,
+│                              run.wf-checkpoint.json, resume_from
+├── _workflow_instance.py      Workflow instances (child(instance=...)) + run discovery
 ├── _context_runtime.py   Shared-context (@context) runtime
 ├── _lsp_client.py        LSP client for agent LSP integration
 ├── _mcp_client.py        MCP (Model Context Protocol) client
@@ -87,6 +90,7 @@ Public API is re-exported from `src/wfpy/__init__.py`.
 - `cli._load_module()` prepends the workflow module dir, its package parents, and the nearest project root to `sys.path`. Prefer fixing that logic over adding per-example `sys.path` hacks.
 - `RewriteEngine.export_workflow_graph()` resolves nested child workflows recursively, including `from ... import ...` imports, with recursion guards.
 - `run()` defaults `queue_trace=True`; writes `run.wf-queues.json`, `run.wf-run.json`, and appends `run-log.jsonl`. `keep_intermediates=True` copies `work/` into the run output.
+- A run that fails writes `run.wf-checkpoint.json` (queues, actor/control state, sub-plans, context); `run(resume_from=...)` / `wfpy run --resume-from` restores it into a freshly built plan. A firing that raises gives its tokens back (`_atomic_firing`); nested workflows and if/loop are composite, not wrapped, and mark an interrupted firing in `RuntimeActor.pending`. New per-actor runtime state must be added to `_checkpoint_runtime.capture/restore` or a resume silently loses it.
 - CLI `--agent-tools` auto-discovers `agent-tools.json` beside the workflow file. Without the flag, the registry is not auto-loaded.
 - `wfpy plan --format graph --best-effort` falls back to the AST partial-graph builder in `partial.py`; plain `plan` does not.
 - Do not use system `/tmp` for repo work or scratch — use the repo-local `.tmp/` directory.
