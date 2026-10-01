@@ -7,8 +7,14 @@ the failure do not run again, and the outputs are those a clean run gives.
 
 from __future__ import annotations
 
+import collections
 import dataclasses
+import datetime
+import decimal
+import enum
 import json
+import sys
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +28,73 @@ from wfpy._checkpoint_runtime import NotResumable, decode, encode
 class Point:
     x: int
     y: int
+
+
+@dataclasses.dataclass(frozen=True)
+class Frozen:
+    name: str
+    tags: tuple[str, ...] = ()
+
+
+@dataclasses.dataclass
+class Derived:
+    base: int
+    double: int = dataclasses.field(init=False)
+
+    def __post_init__(self) -> None:
+        self.double = self.base * 2
+
+
+class Plain:
+    """An ordinary class: attributes, no dataclass, no saving hooks."""
+
+    def __init__(self, label: str, children: list[Plain] | None = None) -> None:
+        self.label = label
+        self.children = children or []
+        self.when = datetime.date(2026, 10, 1)
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, Plain) and vars(self) == vars(other)
+
+
+class Slotted:
+    __slots__ = ("a", "b")
+
+    def __init__(self, a: int, b: str) -> None:
+        self.a = a
+        self.b = b
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, Slotted) and (self.a, self.b) == (other.a, other.b)
+
+
+class Hooked:
+    """Says how it is saved itself: pickled, its own way."""
+
+    def __init__(self, n: int) -> None:
+        self.n = n
+        self.cache = object()  # not meant to survive
+
+    def __getstate__(self) -> dict[str, int]:
+        return {"n": self.n}
+
+    def __setstate__(self, state: dict[str, int]) -> None:
+        self.n = state["n"]
+        self.cache = None
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, Hooked) and self.n == other.n
+
+
+class Color(enum.Enum):
+    RED = "red"
+
+
+class Level(enum.IntEnum):
+    HIGH = 3
+
+
+Pair = collections.namedtuple("Pair", "left right")
 
 
 class Broken:
@@ -280,7 +353,9 @@ def test_state_that_cannot_be_saved_makes_the_run_not_resumable(tmp_path: Path) 
 
     checkpoint = json.loads((out / "first" / "run.wf-checkpoint.json").read_text())
     assert checkpoint["resumable"] is False
-    assert checkpoint["notResumable"] == ["e._handle: a Opaque cannot be saved"]
+    (reason,) = checkpoint["notResumable"]
+    # A class defined inside a function can be found by neither its name nor pickle.
+    assert reason.startswith("e._handle: a ") and "Opaque cannot be saved" in reason
     with pytest.raises(ValueError, match="cannot be resumed: e._handle"):
         run(wf, out_dir=str(out), resume_from=str(out / "first"))
 
@@ -303,15 +378,103 @@ def test_state_that_cannot_be_saved_makes_the_run_not_resumable(tmp_path: Path) 
         Resource("https://x/y", kind="url"),
         Path("/tmp/p"),
         Point(1, 2),
+        Frozen("f", ("a", "b")),
+        Derived(4),
+        Plain("root", [Plain("leaf")]),
+        Slotted(1, "x"),
+        Hooked(5),
+        Color.RED,
+        Level.HIGH,
+        Pair(1, [2]),
+        collections.Counter("abca"),
+        collections.OrderedDict([("b", 1), ("a", 2)]),
+        datetime.datetime(2026, 10, 1, 12, 30, tzinfo=datetime.timezone.utc),
+        datetime.date(2026, 10, 1),
+        datetime.time(8, 15),
+        datetime.timedelta(days=1, seconds=3),
+        decimal.Decimal("1.10"),
+        uuid.UUID("12345678-1234-5678-1234-567812345678"),
+        1 + 2j,
     ],
 )
 def test_values_round_trip(value: Any) -> None:
-    assert decode(json.loads(json.dumps(encode(value, "v")))) == value
+    back = decode(json.loads(json.dumps(encode(value, "v"))))
+    assert back == value
+    assert type(back) is type(value)
+
+
+def test_an_object_is_written_by_name_not_pickled() -> None:
+    written = encode(Plain("p"), "v")
+
+    assert written["$wfType"] == "object"
+    assert written["type"] == f"{__name__}:Plain"
+    assert written["state"]["label"] == "p"
+
+
+def test_an_object_survives_its_class_changing(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The fix between a failure and its resume changes the class's code; the
+    # object it saved is still read back, as an object of the new class.
+    written = json.loads(json.dumps(encode(Plain("p"), "v")))
+
+    class Plain2(Plain):
+        def shout(self) -> str:
+            return self.label.upper()
+
+    Plain2.__qualname__ = "Plain"
+    monkeypatch.setattr(sys.modules[__name__], "Plain", Plain2)
+
+    back = decode(written)
+    assert type(back) is Plain2
+    assert back.shout() == "P"
+
+
+def test_a_run_passing_objects_fails_and_resumes(tmp_path: Path) -> None:
+    broken = Broken()
+
+    @task
+    class Make:
+        _n: int = 0
+
+        class Ports:
+            Out = Port[object](direction="out")
+
+        @action(consumes={}, produces={"Out": 1})
+        @guard(lambda self: self._n < 3)
+        def emit(self) -> Plain:
+            broken.fired("make")
+            self._n += 1
+            return Plain(f"p{self._n}")
+
+    @task
+    class Label:
+        class Ports:
+            In = Port[object](direction="in")
+            Out = Port[str](direction="out")
+
+        @action(consumes={"In": 1}, produces={"Out": 1})
+        def go(self, p: Plain) -> str:
+            if broken.on and p.label == "p2":
+                raise ValueError("broken on 2")
+            return p.label
+
+    @workflow(outputs={"Out": str})
+    def wf():
+        m = Make()
+        lb = Label()
+        connect(m.Out, lb.In)
+        connect(lb.Out, "Out")
+
+    outputs, _ = _fail_then_resume(wf, tmp_path, broken)
+
+    assert outputs["Out"] == ["p1", "p2", "p3"]
+    assert broken.calls == {"make": 3}
 
 
 def test_a_value_that_cannot_be_saved_is_named() -> None:
-    with pytest.raises(NotResumable, match=r"v\[1\]: a object cannot be saved"):
-        encode([1, object()], "v")
+    import threading
+
+    with pytest.raises(NotResumable, match=r"v\[1\]: a lock cannot be saved"):
+        encode([1, threading.Lock()], "v")
 
 
 CLI_WORKFLOW = """

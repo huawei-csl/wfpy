@@ -26,7 +26,12 @@ class _RuntimeJsonEncoder(json.JSONEncoder):
             return str(o)
         if isinstance(o, bytes):
             return o.decode("utf-8", errors="replace")
-        return super().default(o)
+        # Any other object a task passes on. These files are for reading -- the
+        # overlay, the run record -- so it is written as what it looks like,
+        # never refused: a run must not fail because a token cannot be shown.
+        if dataclasses.is_dataclass(o) and not isinstance(o, type):
+            return dataclasses.asdict(o)
+        return repr(o)
 
 
 def _runtime_json_dumps(value: Any, *, indent: int | None = 2) -> str:

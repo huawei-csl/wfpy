@@ -176,18 +176,34 @@ IDE: a stopped run is a run to resume, too.
 
 ### Tokens and state are written as JSON
 
-Through the runtime JSON encoder, with type tags for what JSON lacks:
+**Implemented.** With type tags for what JSON lacks, tried in this order:
 
-- `File` and `Resource` become `{"$wfType": "file" | "resource", …}`, with the
-  path relative to the run directory when it is inside it;
-- a set becomes `{"$wfType": "set"}`, as the encoder already writes it;
-- a dataclass becomes `{"$wfType": "dataclass", "type": "module:Qualname"}`.
+1. **Builtins, by exact type.** JSON's own types, plus tags for a tuple, a
+   set, a frozenset, bytes, a dict with non-string keys, a `Path`, `File` and
+   `Resource`, an `Enum` member (by name), `datetime` / `date` / `time` /
+   `timedelta`, `Decimal`, `UUID` and `complex`. The match is on the exact
+   type, so a `Counter`, a named tuple or an `IntEnum`'s value is not flattened
+   into its base.
+2. **An object, by name:** `{"$wfType": "object", "type": "module:Qualname",
+   "state": {…its attributes…}}`. It is read back by making a bare object of
+   the class and setting the attributes, frozen dataclasses included. This is
+   the common case: a task's own classes, dataclasses or not. It survives the
+   class's code changing between the failure and the resume, which is what a
+   fix does. Used for a class that can be found by its name, keeps its
+   attributes in a `__dict__` or Python `__slots__`, is not built on a builtin
+   container, and defines none of pickle's hooks.
+3. **Pickle, as the fallback**, for what the attributes do not describe: a
+   class that defines its own `__getstate__` / `__reduce__` (it knows how it is
+   saved), or a subclass of a builtin container. Such a value is tied to its
+   class as pickle is. If the class no longer reads it, the resume says so,
+   naming the checkpoint.
+4. **Otherwise not resumable:** a lock, an open file, a generator, a lambda,
+   an object of a class defined inside a function. The file is still written,
+   naming each value that could not be, with the reason.
 
-A token or a state value that cannot be written makes the checkpoint **not
-resumable**. The file is still written, naming each value that could not be,
-so the reason is visible. Pickle is not used: a checkpoint is read back by a
-newer version of the source, which is the point of resuming, and pickle
-breaks first exactly there.
+The readable files (the overlay, the run record) use their own encoder. It
+now writes any object it cannot otherwise show as its `repr` (a dataclass as
+its fields), instead of failing the run.
 
 ### Resume
 
