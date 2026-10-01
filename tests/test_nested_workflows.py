@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from wfpy import File, Port, Resource, action, config, connect, run, task, workflow
+from wfpy import File, Port, Resource, action, config, connect, run, task, viewer, workflow
 from wfpy.cli import cmd_plan
 from wfpy.graph import export_graph_json
 from wfpy.runner import _build_workflow_graph, build_plan
@@ -275,3 +275,50 @@ def test_edge_and_task_sources_are_workflow_lines() -> None:
     assert Path(leaf["source"]["file"]).resolve() == here
     assert leaf["source"]["line"] == lines[0] - 1
     assert leaf["referencedSource"]["line"] < leaf["source"]["line"]
+
+
+def test_definitions_are_their_class_or_def_line_not_a_decorator() -> None:
+    # The IDE resolves "go to source" from the line it is given; on a
+    # decorator line that is wfpy's `viewer` / `workflow`, not the definition.
+    @viewer(inputs=["In"])
+    class Shown:
+        class Ports:
+            In = Port[int](direction="in")
+
+    def make_inner():
+        @workflow(inputs={"In": int}, outputs={"Out": int})
+        def inner():
+            leaf = Leaf()
+            connect("In", leaf.In)
+            connect(leaf.Out, "Out")
+
+        return inner
+
+    @config(env={"WFPY_DEPTH": "1"})
+    @workflow(inputs={"In": int}, outputs={"Out": int})
+    def stacked():
+        leaf = Leaf()
+        connect("In", leaf.In)
+        connect(leaf.Out, "Out")
+
+    @workflow(inputs={"In": int})
+    def outer():
+        i = make_inner()()
+        s = stacked()
+        shown = Shown()
+        connect("In", i.In)
+        connect(i.Out, s.In)
+        connect(s.Out, shown.In)
+
+    nodes = export_graph_json(_build_workflow_graph(outer._wfpy_workflow))["graph"]["nodes"]
+    lines = Path(__file__).read_text().splitlines()
+    declared = {}
+    for node in nodes:
+        ref = (node.get("meta") or {}).get("referencedSource")
+        if ref is not None:
+            declared[node["label"]] = lines[ref["line"] - 1].strip()
+    assert declared == {
+        "i": "def inner():",
+        "s": "def stacked():",
+        "shown": "class Shown:",
+    }
