@@ -7,19 +7,28 @@ same for every nested workflow. A run that fails writes that state to
 the current source, restores it, and carries on. See
 ``docs/proposals/resume.md``.
 
-Values are written as JSON with type tags for what JSON lacks, not pickled: a
-checkpoint is read back by a newer version of the source -- the version with
-the fix -- and pickle breaks first exactly there. A value that cannot be
-written makes the checkpoint not resumable, and the file says which.
+Values are written as JSON with type tags for what JSON lacks. An object of a
+class of the user's is written by name, as its class and its attributes, and
+read back by making the class's object and setting them -- so it survives the
+class gaining a method or changing one, which is what a fix does between a
+failure and its resume. Pickle is the fallback, for an object that defines its
+own way of being saved, or one the attributes do not describe (a subclass of a
+builtin container). A value neither can write -- a lock, an open file, an
+object of a class defined inside a function -- makes the checkpoint not
+resumable, and the file names it.
 """
 
 from __future__ import annotations
 
 import base64
-import dataclasses
+import datetime
+import decimal
+import enum
 import hashlib
 import importlib
 import json
+import pickle
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -38,8 +47,14 @@ class NotResumable(ValueError):
 
 
 def encode(value: Any, where: str) -> Any:
-    """*value* as JSON, tagged where JSON alone would lose what it is."""
-    if value is None or isinstance(value, (bool, int, float, str)):
+    """*value* as JSON, tagged where JSON alone would lose what it is.
+
+    Builtins are matched by their exact type: a subclass (a ``Counter``, a
+    named tuple, an ``IntEnum``) is more than its base, and written as the
+    object it is.
+    """
+    kind = type(value)
+    if value is None or kind in (bool, int, float, str):
         return value
     if isinstance(value, File):
         return {
@@ -58,22 +73,22 @@ def encode(value: Any, where: str) -> Any:
         }
     if isinstance(value, Path):
         return {_TAG: "path", "path": str(value)}
-    if isinstance(value, list):
+    if kind is list:
         return [encode(item, f"{where}[{i}]") for i, item in enumerate(value)]
-    if isinstance(value, tuple):
+    if kind is tuple:
         return {
             _TAG: "tuple",
             "items": [encode(item, f"{where}[{i}]") for i, item in enumerate(value)],
         }
-    if isinstance(value, (set, frozenset)):
+    if kind in (set, frozenset):
         return {
-            _TAG: "frozenset" if isinstance(value, frozenset) else "set",
+            _TAG: kind.__name__,
             "items": [encode(item, f"{where}{{}}") for item in value],
         }
-    if isinstance(value, bytes):
+    if kind is bytes:
         return {_TAG: "bytes", "base64": base64.b64encode(value).decode("ascii")}
-    if isinstance(value, dict):
-        if all(isinstance(key, str) for key in value) and _TAG not in value:
+    if kind is dict:
+        if all(type(key) is str for key in value) and _TAG not in value:
             return {key: encode(item, f"{where}.{key}") for key, item in value.items()}
         return {
             _TAG: "dict",
@@ -81,19 +96,114 @@ def encode(value: Any, where: str) -> Any:
                 [encode(k, f"{where}<key>"), encode(v, f"{where}[{k!r}]")] for k, v in value.items()
             ],
         }
-    if dataclasses.is_dataclass(value) and not isinstance(value, type):
-        cls = type(value)
-        if "<locals>" in cls.__qualname__:
-            raise NotResumable(f"{where}: {cls.__qualname__} is defined inside a function")
-        return {
-            _TAG: "dataclass",
-            "type": f"{cls.__module__}:{cls.__qualname__}",
-            "fields": {
-                f.name: encode(getattr(value, f.name), f"{where}.{f.name}")
-                for f in dataclasses.fields(value)
-            },
-        }
-    raise NotResumable(f"{where}: a {type(value).__name__} cannot be saved")
+    if isinstance(value, enum.Enum):
+        return {_TAG: "enum", "type": _type_name(kind), "name": value.name}
+    if kind is datetime.datetime:
+        return {_TAG: "datetime", "iso": value.isoformat()}
+    if kind is datetime.date:
+        return {_TAG: "date", "iso": value.isoformat()}
+    if kind is datetime.time:
+        return {_TAG: "time", "iso": value.isoformat()}
+    if kind is datetime.timedelta:
+        return {_TAG: "timedelta", "seconds": value.total_seconds()}
+    if kind is decimal.Decimal:
+        return {_TAG: "decimal", "value": str(value)}
+    if kind is uuid.UUID:
+        return {_TAG: "uuid", "value": str(value)}
+    if kind is complex:
+        return {_TAG: "complex", "real": value.real, "imag": value.imag}
+    return _encode_object(value, where)
+
+
+def _type_name(cls: type) -> str:
+    return f"{cls.__module__}:{cls.__qualname__}"
+
+
+def _import_type(name: str) -> Any:
+    module_name, _, qualname = name.partition(":")
+    target: Any = importlib.import_module(module_name)
+    for part in qualname.split("."):
+        target = getattr(target, part)
+    return target
+
+
+def _importable(cls: type) -> bool:
+    """Whether the class can be found again by its name."""
+    if "<locals>" in cls.__qualname__:
+        return False
+    try:
+        return bool(_import_type(_type_name(cls)) is cls)
+    except Exception:
+        return False
+
+
+_SAVING_HOOKS = (
+    "__reduce__",
+    "__reduce_ex__",
+    "__getstate__",
+    "__setstate__",
+    "__getnewargs__",
+    "__getnewargs_ex__",
+)
+
+
+def _described_by_attributes(cls: type) -> bool:
+    """Whether setting its attributes on a bare instance rebuilds one.
+
+    True for an ordinary class written in Python. False for a class that says
+    how it is saved itself (it knows better), for one built on a builtin
+    container (its contents are not attributes), and for one implemented in C
+    (a lock has no attributes, and a bare one is not the lock).
+    """
+    # Somewhere to keep attributes: an instance __dict__, or __slots__ declared
+    # in Python. A type implemented in C (a lock) has neither, whatever its
+    # module says.
+    keeps_attributes = cls.__dictoffset__ != 0 or any(
+        "__slots__" in base.__dict__ for base in cls.__mro__ if base is not object
+    )
+    if not keeps_attributes:
+        return False
+    if any(base.__module__ == "builtins" and base is not object for base in cls.__mro__):
+        return False
+    return all(getattr(cls, hook, None) is getattr(object, hook, None) for hook in _SAVING_HOOKS)
+
+
+def _attributes(value: Any) -> dict[str, Any]:
+    state = dict(vars(value)) if hasattr(value, "__dict__") else {}
+    for cls in type(value).__mro__:
+        slots = cls.__dict__.get("__slots__", ())
+        for slot in [slots] if isinstance(slots, str) else slots:
+            if slot not in ("__dict__", "__weakref__") and hasattr(value, slot):
+                state[slot] = getattr(value, slot)
+    return state
+
+
+def _encode_object(value: Any, where: str) -> Any:
+    cls = type(value)
+    reason = ""
+    if _importable(cls) and _described_by_attributes(cls):
+        try:
+            return {
+                _TAG: "object",
+                "type": _type_name(cls),
+                "state": {
+                    name: encode(item, f"{where}.{name}")
+                    for name, item in _attributes(value).items()
+                },
+            }
+        except NotResumable as exc:
+            reason = str(exc)
+    try:
+        data = pickle.dumps(value)
+    except Exception as exc:
+        raise NotResumable(
+            reason or f"{where}: a {cls.__qualname__} cannot be saved ({exc})"
+        ) from exc
+    return {
+        _TAG: "pickle",
+        "type": _type_name(cls),
+        "base64": base64.b64encode(data).decode("ascii"),
+    }
 
 
 def decode(value: Any) -> Any:
@@ -128,12 +238,36 @@ def decode(value: Any) -> Any:
         return base64.b64decode(value["base64"])
     if tag == "dict":
         return {decode(k): decode(v) for k, v in value["items"]}
-    if tag == "dataclass":
-        module_name, _, qualname = value["type"].partition(":")
-        target: Any = importlib.import_module(module_name)
-        for part in qualname.split("."):
-            target = getattr(target, part)
-        return target(**{name: decode(item) for name, item in value["fields"].items()})
+    if tag == "enum":
+        return _import_type(value["type"])[value["name"]]
+    if tag == "datetime":
+        return datetime.datetime.fromisoformat(value["iso"])
+    if tag == "date":
+        return datetime.date.fromisoformat(value["iso"])
+    if tag == "time":
+        return datetime.time.fromisoformat(value["iso"])
+    if tag == "timedelta":
+        return datetime.timedelta(seconds=value["seconds"])
+    if tag == "decimal":
+        return decimal.Decimal(value["value"])
+    if tag == "uuid":
+        return uuid.UUID(value["value"])
+    if tag == "complex":
+        return complex(value["real"], value["imag"])
+    if tag == "object":
+        cls = _import_type(value["type"])
+        obj = cls.__new__(cls)
+        for name, item in value["state"].items():
+            # Through `object`, so a frozen dataclass or a class guarding its
+            # own __setattr__ is rebuilt as it was, not refused.
+            object.__setattr__(obj, name, decode(item))
+        return obj
+    if tag == "pickle":
+        return pickle.loads(base64.b64decode(value["base64"]))
+    if tag == "dataclass":  # written by the first checkpoints
+        return _import_type(value["type"])(
+            **{name: decode(item) for name, item in value["fields"].items()}
+        )
     raise ValueError(f"unknown checkpoint value tag {tag!r}")
 
 
@@ -339,9 +473,17 @@ def restore_checkpoint(
             "their kinds or its connections). An action's code can change before a "
             "resume; its wiring cannot."
         )
-    restore(plan, checkpoint["plan"])
     context = checkpoint.get("context") or {}
-    plan.context_store = decode(context.get("store")) or {}
-    plan.context_journal = decode(context.get("journal")) or []
+    try:
+        restore(plan, checkpoint["plan"])
+        plan.context_store = decode(context.get("store")) or {}
+        plan.context_journal = decode(context.get("journal")) or []
+    except Exception as exc:
+        # A class that moved or was renamed, or a pickled value its class no
+        # longer reads: the checkpoint is fine, the code no longer fits it.
+        raise ValueError(
+            f"{checkpoint_path}: a saved value cannot be read back with the current "
+            f"code: {type(exc).__name__}: {exc}"
+        ) from exc
     plan.context_version = context.get("version", plan.context_version)
     plan.context_commit_seq = context.get("commitSeq", plan.context_commit_seq)

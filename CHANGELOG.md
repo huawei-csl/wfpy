@@ -36,9 +36,17 @@ All notable changes to wfpy are documented here. The format follows
   restores that state and carries on. The firings before the failure do not
   run again. A firing interrupted inside a nested workflow, an if branch or a
   loop body is finished, not restarted. A changed action body is expected (it is
-  the fix); a changed graph is refused. Values are written as tagged JSON, not
-  pickled, and a value that cannot be written makes the checkpoint not
-  resumable, naming it. The resumed run records `resumedFrom`.
+  the fix); a changed graph is refused. Values are written as tagged JSON: an
+  object of the user's own classes by its class name and attributes (so it
+  survives the class's code changing), pickle only for what attributes do not
+  describe. A value neither can write (a lock, an open file, a local class)
+  makes the checkpoint not resumable, naming it. The resumed run records
+  `resumedFrom`.
+
+### Fixed
+- A run whose tokens are arbitrary objects no longer fails writing its overlay
+  or run record: an object those files cannot otherwise show is written as its
+  `repr` (a dataclass as its fields).
 
 ## [1.0.0] — 2026-07-24
 
