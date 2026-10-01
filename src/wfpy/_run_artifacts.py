@@ -530,6 +530,10 @@ class QueueTraceStep:
     actor_kind: str
     actor_fire_count: int
     queue_sizes: list[dict[str, Any]]
+    # How many firings the journal held when this step was recorded: the
+    # firings a resume at this step replays. None without a journal.
+    journal_seq: int | None = None
+    replayed: bool = False
 
 
 @dataclasses.dataclass
@@ -554,6 +558,8 @@ class QueueTraceCollector:
                 actor_kind=actor.kind,
                 actor_fire_count=actor.fire_count,
                 queue_sizes=sizes,
+                journal_seq=plan.journal.seq if plan.journal is not None else None,
+                replayed=bool(getattr(actor, "replayed", False)),
             )
         )
 
@@ -583,6 +589,8 @@ class QueueTraceCollector:
                     "actorKind": step.actor_kind,
                     "actorFireCount": step.actor_fire_count,
                     "queueSizes": step.queue_sizes,
+                    **({"journalSeq": step.journal_seq} if step.journal_seq is not None else {}),
+                    **({"replayed": True} if step.replayed else {}),
                 }
                 for step in self.steps
             ],

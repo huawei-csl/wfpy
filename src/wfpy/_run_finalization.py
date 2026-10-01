@@ -173,6 +173,7 @@ def _persist_run_record(
     wdir: Path | None = None,
     error: dict[str, str] | None = None,
     resumed_from: str | None = None,
+    extra: dict[str, Any] | None = None,
 ) -> None:
     """Write run.wf-run.json and append to run-log.jsonl."""
     run_record = {
@@ -215,6 +216,7 @@ def _persist_run_record(
         run_record["error"] = error
     if resumed_from is not None:
         run_record["resumedFrom"] = resumed_from
+    run_record.update(extra or {})
 
     run_record_path = run_out_dir / "run.wf-run.json"
     try:
@@ -238,6 +240,7 @@ def _persist_run_record(
         log_entry["error"] = error
     if resumed_from is not None:
         log_entry["resumedFrom"] = resumed_from
+    log_entry.update(extra or {})
 
     run_log_path = base_out_dir / "run-log.jsonl"
     try:
@@ -269,6 +272,22 @@ def _write_error_overlay(
         viewer_path.write_text(_runtime_json_dumps(error_overlay))
     except OSError:
         pass
+
+
+def _write_queue_trace(
+    plan: Any, run_out_dir: Path, finished_at: datetime, *, verbose: bool = False
+) -> None:
+    """Write run.wf-queues.json -- for a run that failed as for one that did not.
+
+    A failed run is the run most worth stepping through, and the trace is what
+    the IDE steps through and what a resume at a step reads.
+    """
+    if plan.queue_trace and plan.queue_trace.steps:
+        trace_json = plan.queue_trace.build(finished_at.isoformat(), plan)
+        qt_path = run_out_dir / "run.wf-queues.json"
+        qt_path.write_text(_runtime_json_dumps(trace_json))
+        if verbose:
+            logger.info("Queue trace: %d steps → %s", len(plan.queue_trace.steps), qt_path)
 
 
 def _finalize_run(
@@ -338,13 +357,7 @@ def _finalize_run(
         except OSError:
             pass
 
-    # Write queue trace (run.wf-queues.json)
-    if plan.queue_trace and plan.queue_trace.steps:
-        trace_json = plan.queue_trace.build(finished_at.isoformat(), plan)
-        qt_path = run_out_dir / "run.wf-queues.json"
-        qt_path.write_text(_runtime_json_dumps(trace_json))
-        if verbose:
-            logger.info("Queue trace: %d steps → %s", len(plan.queue_trace.steps), qt_path)
+    _write_queue_trace(plan, run_out_dir, finished_at, verbose=verbose)
 
     if verbose:
         logger.info("Run %s finished. Output: %s", rid, run_out_dir)

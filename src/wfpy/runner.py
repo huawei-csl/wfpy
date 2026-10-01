@@ -44,6 +44,7 @@ import wfpy._run_artifacts as _art_runtime
 import wfpy._validation_runtime as _val_runtime
 import wfpy._agent_staging_runtime as _staging_runtime
 import wfpy._checkpoint_runtime as _checkpoint_runtime
+import wfpy._journal_runtime as _journal_runtime
 import wfpy._step_external_runtime as _ext_runtime
 from wfpy._step_streamblocks_runtime import _step_streamblocks_instance
 import wfpy._action_runtime as _action_runtime
@@ -266,6 +267,12 @@ def _log_taken(queue: "Queue", values: list[Any]) -> None:
         log.extend((queue, value) for value in values)
 
 
+def _log_put(queue: "Queue", value: Any) -> None:
+    log: list[tuple[Queue, Any]] | None = getattr(_firing_log, "put", None)
+    if log is not None:
+        log.append((queue, value))
+
+
 class _atomic_firing:
     """Give a firing's inputs back when it fails.
 
@@ -282,17 +289,20 @@ class _atomic_firing:
     """
 
     def __enter__(self) -> "_atomic_firing":
-        self._outer = getattr(_firing_log, "taken", None)
+        self._outer = (getattr(_firing_log, "taken", None), getattr(_firing_log, "put", None))
         _firing_log.taken = []
+        _firing_log.put = []
         return self
 
     def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
-        taken: list[tuple[Queue, Any]] = _firing_log.taken
-        _firing_log.taken = self._outer
+        # What the firing took and put, in order: the journal records both.
+        self.taken: list[tuple[Queue, Any]] = _firing_log.taken
+        self.put: list[tuple[Queue, Any]] = _firing_log.put
+        _firing_log.taken, _firing_log.put = self._outer
         # A firing that succeeded keeps what it took, whatever fails after it.
         if exc_type is None:
             return
-        for queue, value in reversed(taken):
+        for queue, value in reversed(self.taken):
             queue.give_back(value)
 
 
@@ -331,6 +341,7 @@ class Queue:
     def enqueue(self, value: Any) -> None:
         with self._lock:
             self.items.append(value)
+        _log_put(self, value)
 
     def dequeue(self) -> Any:
         with self._lock:
@@ -414,6 +425,9 @@ class RuntimeActor:
         # interrupted is still marked, and a resumed run finishes it.
         self.pending: dict[str, Any] | None = None
 
+        # Whether its last firing was replayed from another run's journal.
+        self.replayed = False
+
         # Conversation history used for UI/debug overlays; only stateful agents
         # feed it back into subsequent requests.
         self.chat_history: list[dict[str, str]] = []
@@ -446,6 +460,9 @@ class FifoPlan:
         self.name = name
         self.actors: list[RuntimeActor] = []
         self.all_queues: list[Queue] = []
+        # The run's firing journal, shared with every sub-plan (see
+        # _journal_runtime). None when the run keeps none.
+        self.journal: _journal_runtime.Journal | None = None
         self.scopes: dict[str, ScopeRecord] = {}
         self.control_nodes: dict[str, ControlNodeRecord] = {}
 
@@ -1106,6 +1123,18 @@ def execute_plan(
 
                 if not in_flight:
                     if not control_fired and not submitted and not streamed:
+                        # Firings still waiting to be replayed can never come
+                        # due now: the run has gone another way. Carry on live.
+                        journal = plan.journal
+                        if (
+                            journal is not None
+                            and journal.replaying
+                            and not plan.overlay_path_prefix
+                            and journal.pending()
+                        ):
+                            journal.stop_replay("the run went quiet with firings left to replay")
+                            blocked_until_progress.clear()
+                            continue
                         break  # quiescence
                     continue
 
@@ -1198,8 +1227,21 @@ def _step_actor(
         if actor.pending is not None:
             return _finish_control(actor, plan, out_dir, verbose, active_scopes)
         return _dispatch_step(actor, plan, out_dir, verbose, active_scopes)
-    with _atomic_firing():
-        return _dispatch_step(actor, plan, out_dir, verbose, active_scopes)
+
+    journal = plan.journal
+    actor.replayed = False
+    if journal is not None and journal.replaying:
+        replayed = journal.replay_firing(plan, actor)
+        if replayed is not None:
+            actor.replayed = replayed
+            return replayed
+
+    context_version = plan.context_version
+    with _atomic_firing() as firing:
+        fired = _dispatch_step(actor, plan, out_dir, verbose, active_scopes)
+    if fired and journal is not None:
+        journal.record(plan, actor, firing.taken, firing.put, context_version)
+    return fired
 
 
 def _dispatch_step(
@@ -2547,6 +2589,7 @@ def _run_sub_plan(
     sub_plan.output_name_suffix = f"__{actor.fire_count}"
 
     sub_plan.overlay_writer = parent_plan.overlay_writer
+    sub_plan.journal = parent_plan.journal
     sub_plan.overlay_path_prefix = [*parent_plan.overlay_path_prefix, actor.name]
     sub_plan.agent_context_writer = parent_plan.agent_context_writer
     sub_plan.context_store = parent_plan.context_store
@@ -2645,6 +2688,41 @@ def _step_viewer(actor: RuntimeActor, plan: FifoPlan, verbose: bool) -> bool:
 # ═══════════════════════════════════════════════════════════════════════════
 
 
+def _replay_from_step(plan: FifoPlan, workflow_name: str, source: Path, step: int) -> Any:
+    """Load the firings *source*'s run had completed by *step* for replay.
+
+    Returns the inputs that run started from: this one starts from them too.
+    """
+    run_dir = source.expanduser().resolve()
+    if run_dir.is_file():
+        run_dir = run_dir.parent
+    if step < 0:
+        raise ValueError(f"at_step must be 0 or more, not {step}")
+    header, entries = _journal_runtime.load_journal(run_dir)
+    if header.get("workflowName") != workflow_name:
+        raise ValueError(
+            f"{run_dir} is a run of {header.get('workflowName')!r}, not {workflow_name!r}"
+        )
+    if header.get("graph") != _checkpoint_runtime.graph_fingerprint(plan):
+        raise ValueError(
+            f"{run_dir}: the workflow's graph changed since the run (its actors, their "
+            "kinds or its connections). An action's code can change before a resume; "
+            "its wiring cannot."
+        )
+    if "inputs" not in header:
+        reason = header.get("inputsNotSaved") or (
+            f"it was itself resumed from {header.get('resumedFrom')!r}; resume at a step "
+            "of that run instead"
+            if header.get("resumedFrom")
+            else "its inputs were not recorded"
+        )
+        raise ValueError(f"{run_dir} cannot be resumed at a step: {reason}")
+    if plan.journal is None:
+        raise ValueError("run(at_step=...) needs the queue trace (queue_trace=True)")
+    plan.journal.load_replay(_journal_runtime.entries_at_step(run_dir, step, entries))
+    return _checkpoint_runtime.decode(header["inputs"]) or None
+
+
 def run(
     target: Any,
     inputs: dict[str, Any] | None = None,
@@ -2690,6 +2768,7 @@ def run(
     context_summarize: str | bool | None = None,
     resume_context_from: str | None = None,
     resume_from: str | None = None,
+    at_step: int | None = None,
     context_seed: dict[str, Any] | None = None,
     elicitation_handler: Any = None,
     interactive: bool | None = None,
@@ -2747,6 +2826,11 @@ def run(
             ``run.wf-checkpoint.json``). The plan is built from the current
             source, the run's state is restored into it, and the run carries on
             from where it stopped; takes no *inputs*.
+        at_step: With *resume_from*: carry on from this step of that run's queue
+            trace (the step the IDE's stepper shows), rather than from where
+            it stopped. The run starts again from that run's inputs, and the
+            firings the run had completed by the step are replayed from its
+            journal instead of run.
         context_seed: Optional initial context seed object.
 
     Returns:
@@ -2909,21 +2993,47 @@ def run(
                 if verbose:
                     logger.warning("Failed to restore chat histories: %s", e)
 
+    # Every firing is journalled, so this run can be resumed from any step.
+    if queue_trace:
+        plan.journal = _journal_runtime.Journal(run_out_dir / _journal_runtime.JOURNAL)
+
     # Carry on from where a run stopped: its queues, its actors' state, its
-    # control nodes and its sub-plans, restored into the plan just built.
+    # control nodes and its sub-plans, restored into the plan just built. Or,
+    # at a step, replay the firings it had completed by then.
     resumed_from: str | None = None
+    resume_extra: dict[str, Any] = {}
+    if at_step is not None and not resume_from:
+        raise ValueError("run(at_step=...) needs resume_from=: the run whose step it is")
     if resume_from:
         if inputs:
             raise ValueError(
                 "run(resume_from=...) takes no inputs: the run's inputs are already "
                 "in its checkpoint, consumed or still queued"
             )
-        checkpoint_path, checkpoint = _checkpoint_runtime.load_checkpoint(resume_from)
-        _checkpoint_runtime.restore_checkpoint(
-            plan, wf_def.name or "", checkpoint_path, checkpoint
+        if at_step is not None:
+            inputs = _replay_from_step(plan, wf_def.name or "", Path(resume_from), at_step)
+            resumed_from = Path(resume_from).expanduser().resolve().name
+            if Path(resume_from).is_file():
+                resumed_from = Path(resume_from).expanduser().resolve().parent.name
+            resume_extra["resumedAtStep"] = at_step
+            logger.info("Resuming run %s at its step %d", resumed_from, at_step)
+        else:
+            checkpoint_path, checkpoint = _checkpoint_runtime.load_checkpoint(resume_from)
+            _checkpoint_runtime.restore_checkpoint(
+                plan, wf_def.name or "", checkpoint_path, checkpoint
+            )
+            resumed_from = str(checkpoint.get("runId") or checkpoint_path.parent.name)
+            logger.info("Resuming run %s from %s", resumed_from, checkpoint_path)
+
+    if plan.journal is not None:
+        plan.journal.header(
+            workflow_name=wf_def.name or "",
+            graph=_checkpoint_runtime.graph_fingerprint(plan),
+            # A run resumed from a checkpoint starts mid-way: there are no
+            # inputs to start it again from, so it cannot be resumed at a step.
+            inputs=None if (resume_from and at_step is None) else inputs,
+            resumed_from=resumed_from if at_step is None else None,
         )
-        resumed_from = str(checkpoint.get("runId") or checkpoint_path.parent.name)
-        logger.info("Resuming run %s from %s", resumed_from, checkpoint_path)
 
     if verbose:
         logger.info("Run %s  out=%s  work=%s", rid, run_out_dir, wdir or "(none)")
@@ -2951,6 +3061,14 @@ def run(
             started_at, finished_at_value, outputs_payload,
             inputs=inputs, has_external=has_external, wdir=wdir, error=error,
             resumed_from=resumed_from,
+            extra={
+                **resume_extra,
+                **(
+                    {"replayStopped": plan.journal.replay_stopped}
+                    if plan.journal is not None and plan.journal.replay_stopped
+                    else {}
+                ),
+            },
         )
 
     # Resolve max_workers: run() arg → @workflow(...) → executor default
@@ -2983,6 +3101,7 @@ def run(
         _run_finalization._write_error_overlay(
             plan, writers.overlay_base, overlay_writer, run_out_dir, error_info, finished_at_err,
         )
+        _run_finalization._write_queue_trace(plan, run_out_dir, finished_at_err)
         _persist_run_record(finished_at_err, {}, error=error_info)
         # Every firing still in flight has finished (the executor waited for
         # them), and the one that failed gave its tokens back: the plan is a
@@ -3000,6 +3119,8 @@ def run(
             logger.warning("Could not write the run's checkpoint", exc_info=True)
         raise
     finally:
+        if plan.journal is not None:
+            plan.journal.close()
         if run_out_token is None:
             os.environ.pop("WF_RUN_OUT_DIR", None)
         else:

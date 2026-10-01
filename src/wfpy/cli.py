@@ -340,6 +340,7 @@ def cmd_run(args: argparse.Namespace) -> None:
         context_summarize=getattr(args, "context_summarize", None),
         resume_context_from=getattr(args, "resume_context_from", None),
         resume_from=getattr(args, "resume_from", None),
+        at_step=getattr(args, "at_step", None),
     )
 
     # Print outputs
@@ -710,6 +711,14 @@ def main() -> None:
         default=None,
         help="Carry on a run that failed or was stopped: its run directory, or "
         "its run.wf-checkpoint.json. Takes no --input.",
+    )
+    run_parser.add_argument(
+        "--at-step",
+        type=int,
+        default=None,
+        help="With --resume-from: carry on from this step of that run's queue trace "
+        "(the step the IDE's stepper shows) instead of from where it stopped. "
+        "The firings up to it are replayed, not run.",
     )
     run_parser.add_argument("--verbose", "-v", action="store_true", help="Verbose logging")
     run_parser.set_defaults(func=cmd_run)

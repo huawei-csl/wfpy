@@ -299,6 +299,39 @@ def _instance_state(actor: Any) -> dict[str, Any]:
     return {name: getattr(actor.instance, name) for name in names if hasattr(actor.instance, name)}
 
 
+def actor_state(actor: Any, enc: Any, at: str) -> dict[str, Any]:
+    """An actor's own state -- not a control node's -- written with *enc*.
+
+    Its task fields and the runtime attributes wfpy keeps on the instance, and
+    an agent's budget, conversation and CLI sessions. Shared by the checkpoint
+    and the firing journal, so both carry the same state.
+    """
+    entry: dict[str, Any] = {
+        "state": {
+            name: enc(value, f"{at}.{name}") for name, value in _instance_state(actor).items()
+        }
+    }
+    if actor.agent_fire_budget is not None:
+        entry["agentFireBudget"] = actor.agent_fire_budget
+    if actor.chat_history:
+        entry["chatHistory"] = enc(actor.chat_history, f"{at}.chatHistory")
+    if actor.agent_cli_session_ids:
+        entry["agentCliSessionIds"] = dict(actor.agent_cli_session_ids)
+    return entry
+
+
+def restore_actor_state(actor: Any, entry: dict[str, Any]) -> None:
+    """Put back what :func:`actor_state` wrote."""
+    for field, value in (entry.get("state") or {}).items():
+        setattr(actor.instance, field, decode(value))
+    if "agentFireBudget" in entry:
+        actor.agent_fire_budget = entry["agentFireBudget"]
+    if "chatHistory" in entry:
+        actor.chat_history = decode(entry["chatHistory"])
+    if "agentCliSessionIds" in entry:
+        actor.agent_cli_session_ids = dict(entry["agentCliSessionIds"])
+
+
 def capture(plan: Any, problems: list[str], where: str = "") -> dict[str, Any]:
     """The state of *plan* and its sub-plans; what cannot be saved goes to *problems*."""
 
@@ -333,15 +366,7 @@ def capture(plan: Any, problems: list[str], where: str = "") -> dict[str, Any]:
                 control["loopIndex"] = actor._loop_index
             entry["control"] = control
         else:
-            entry["state"] = {
-                name: enc(value, f"{at}.{name}") for name, value in _instance_state(actor).items()
-            }
-            if actor.agent_fire_budget is not None:
-                entry["agentFireBudget"] = actor.agent_fire_budget
-            if actor.chat_history:
-                entry["chatHistory"] = enc(actor.chat_history, f"{at}.chatHistory")
-            if actor.agent_cli_session_ids:
-                entry["agentCliSessionIds"] = dict(actor.agent_cli_session_ids)
+            entry.update(actor_state(actor, enc, at))
         if actor.sub_plan is not None:
             entry["subPlan"] = capture(actor.sub_plan, problems, f"{at}/")
         actors[actor.name] = entry
@@ -379,14 +404,7 @@ def restore(plan: Any, saved: dict[str, Any]) -> None:
                 actor._loop_source = source
                 actor._loop_index = control["loopIndex"]
                 actor._loop_iter = iterator
-        for field, value in (entry.get("state") or {}).items():
-            setattr(actor.instance, field, decode(value))
-        if "agentFireBudget" in entry:
-            actor.agent_fire_budget = entry["agentFireBudget"]
-        if "chatHistory" in entry:
-            actor.chat_history = decode(entry["chatHistory"])
-        if "agentCliSessionIds" in entry:
-            actor.agent_cli_session_ids = dict(entry["agentCliSessionIds"])
+        restore_actor_state(actor, entry)
         if "subPlan" in entry and actor.sub_plan is not None:
             restore(actor.sub_plan, entry["subPlan"])
 
