@@ -56,6 +56,14 @@ All notable changes to wfpy are documented here. The format follows
   shows, and a node's "Rerun from Here" resumes it before that node's last
   firing.
 
+- `wfpy plan <file> --format graph --hierarchy`: the root workflow's graph plus
+  `hierarchy`, a tree of every nested workflow instance at its path from the
+  root, each with its own graph, the file defining it, its node in the parent's
+  graph and its node count. Each nested graph is elaborated from the instance
+  its parent built, factory parameters included, as a run elaborates it. An IDE
+  navigating the hierarchy in one editor reads every view, and its outline,
+  from one export.
+
 ### Fixed
 - Each token that goes to `work/edge-tokens/` gets its own file
   (`<queue>__<n>.json`), instead of one file per queue rewritten by every
