@@ -67,7 +67,16 @@ def _materialize_edge_token(plan: Any, q: Any, value: Any) -> Any:
     token_dir = Path(work_dir) / "edge-tokens"
     token_dir.mkdir(parents=True, exist_ok=True)
     safe_queue_id = re.sub(r"[^A-Za-z0-9._-]+", "_", q.id).strip("_") or "queue"
-    token_path = token_dir / f"{safe_queue_id}.json"
+    # One file per token, numbered per queue. One file per queue was rewritten
+    # by every token, so the queue trace's last token at an early step -- what
+    # the IDE's stepper opens -- read as the run's final one.
+    counts = getattr(plan, "edge_token_counts", None)
+    if counts is None:
+        counts = {}
+        plan.edge_token_counts = counts
+    index = counts.get(q.id, 0)
+    counts[q.id] = index + 1
+    token_path = token_dir / f"{safe_queue_id}__{index}.json"
     token_path.write_text(_runtime_json_dumps(value))
     return str(token_path)
 

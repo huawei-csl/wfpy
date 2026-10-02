@@ -513,6 +513,8 @@ class FifoPlan:
         self.edge_info_by_queue_id: dict[str, dict[str, str]] = {}
         # queue_id → last value that traversed the edge
         self.edge_last_token_by_queue_id: dict[str, Any] = {}
+        # How many tokens each queue has written to edge-tokens/, numbering the files.
+        self.edge_token_counts: dict[str, int] = {}
 
         # Viewer overlay writer (set by run(), None in standalone execute_plan)
         self.overlay_writer: _ViewerOverlayWriter | None = None

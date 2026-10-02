@@ -77,3 +77,56 @@ def test_a_queue_no_token_has_reached_carries_no_last_token(tmp_path: Path) -> N
     assert steps[0]["actorInstanceName"] == "c"
     assert "lastToken" not in first["d.Out-->WF.Out"]
     assert "lastToken" in first["c.Out-->d.In"]
+
+
+@task
+class Pairs:
+    """Emits a different list three times: tokens that go to edge-tokens/ files.
+
+    Not a dict: a dict returned for one output is read as ``{port: value}``.
+    """
+
+    _n: int = 0
+
+    class Ports:
+        Out = Port[list](direction="out")
+
+    @action(consumes={}, produces={"Out": 1})
+    @guard(lambda self: self._n < 3)
+    def emit(self) -> list[int]:
+        self._n += 1
+        return [self._n]
+
+
+@task
+class Keep:
+    class Ports:
+        In = Port[list](direction="in")
+        Out = Port[list](direction="out")
+
+    @action(consumes={"In": 1}, produces={"Out": 1})
+    def go(self, x: list[int]) -> list[int]:
+        return x
+
+
+@workflow(outputs={"Out": list})
+def pairs():
+    p = Pairs()
+    k = Keep()
+    connect(p.Out, k.In)
+    connect(k.Out, "Out")
+
+
+def test_the_last_token_at_each_step_is_the_token_then(tmp_path: Path) -> None:
+    run(pairs, out_dir=str(tmp_path), run_id="r", max_workers=1)
+    steps = json.loads((tmp_path / "r" / "run.wf-queues.json").read_text())["steps"]
+
+    # What the stepper opens for the edge into Keep, step by step: each token
+    # as it was when it was the last one, not the run's final token.
+    seen = []
+    for step in steps:
+        queue = next(q for q in step["queueSizes"] if q["queueId"] == "p.Out-->k.In")
+        content = json.loads(Path(queue["lastToken"]).read_text())
+        if not seen or seen[-1] != content:
+            seen.append(content)
+    assert seen == [[1], [2], [3]]
