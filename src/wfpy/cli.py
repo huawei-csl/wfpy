@@ -418,8 +418,13 @@ def cmd_plan(args: argparse.Namespace) -> None:
     wf_def = target._wfpy_workflow
     if getattr(args, "format", "plan") == "graph":
         try:
-            graph = _build_workflow_graph(wf_def)
-            plan_json = export_graph_json(graph)
+            if getattr(args, "hierarchy", False):
+                from wfpy._hierarchy_export import export_hierarchy
+
+                plan_json = export_hierarchy(wf_def, str(Path(args.file).resolve()))
+            else:
+                graph = _build_workflow_graph(wf_def)
+                plan_json = export_graph_json(graph)
         except Exception as exc:
             if not getattr(args, "best_effort", False):
                 raise
@@ -738,6 +743,12 @@ def main() -> None:
         "--best-effort",
         action="store_true",
         help="Return a partial graph on errors (graph format only)",
+    )
+    plan_parser.add_argument(
+        "--hierarchy",
+        action="store_true",
+        help="With --format graph: also export every nested workflow instance, "
+        "elaborated as its parent built it, under 'hierarchy'",
     )
     plan_parser.set_defaults(func=cmd_plan)
 
