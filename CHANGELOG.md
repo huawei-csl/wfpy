@@ -65,6 +65,11 @@ All notable changes to wfpy are documented here. The format follows
   from one export.
 
 ### Fixed
+- A run's error names the actor that failed by its instance path under every
+  nested workflow (`error.entityInstancePath`, e.g. `["m", "i", "x"]`, in the
+  run record and the overlay). It used to name the last actor the overlay saw
+  become active: no path, and with parallel workers not necessarily the actor
+  that failed.
 - Each token that goes to `work/edge-tokens/` gets its own file
   (`<queue>__<n>.json`), instead of one file per queue rewritten by every
   token. The queue trace's last token at an earlier step, which the IDE's
