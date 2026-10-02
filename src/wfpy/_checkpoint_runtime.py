@@ -419,7 +419,7 @@ def write_checkpoint(
     workflow_name: str,
     source_path: str | None,
     run_id: str,
-    error: dict[str, str],
+    error: dict[str, Any],
 ) -> Path:
     """Write ``run.wf-checkpoint.json`` for a run that stopped."""
     problems: list[str] = []

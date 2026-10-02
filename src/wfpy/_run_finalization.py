@@ -171,7 +171,7 @@ def _persist_run_record(
     inputs: dict[str, Any] | None = None,
     has_external: bool = False,
     wdir: Path | None = None,
-    error: dict[str, str] | None = None,
+    error: dict[str, Any] | None = None,
     resumed_from: str | None = None,
     extra: dict[str, Any] | None = None,
 ) -> None:
@@ -255,7 +255,7 @@ def _write_error_overlay(
     overlay_base: _ViewerOverlayBase,
     overlay_writer: _ViewerOverlayWriter,
     run_out_dir: Path,
-    error_info: dict[str, str],
+    error_info: dict[str, Any],
     finished_at: datetime,
 ) -> None:
     """Write error overlay to run.wf-viewer.json."""

@@ -1239,11 +1239,38 @@ def _step_actor(
             return replayed
 
     context_version = plan.context_version
-    with _atomic_firing() as firing:
-        fired = _dispatch_step(actor, plan, out_dir, verbose, active_scopes)
+    try:
+        with _atomic_firing() as firing:
+            fired = _dispatch_step(actor, plan, out_dir, verbose, active_scopes)
+    except BaseException as exc:
+        _note_failed_firing(exc, plan, actor)
+        raise
     if fired and journal is not None:
         journal.record(plan, actor, firing.taken, firing.put, context_version)
     return fired
+
+
+def _note_failed_firing(exc: BaseException, plan: FifoPlan, actor: RuntimeActor) -> None:
+    """Mark *exc* with the instance path of the firing it came out of.
+
+    The innermost firing marks it first; a nested workflow it propagates out
+    of leaves the mark alone. So the run's error names the actor that failed,
+    under every nested workflow it is in -- not merely the last actor the
+    overlay saw become active, which with parallel workers need not be the one
+    that failed, and which carries no path.
+    """
+    if getattr(exc, "_wfpy_failed_path", None) is not None:
+        return
+    try:
+        exc._wfpy_failed_path = [*plan.overlay_path_prefix, actor.name]  # type: ignore[attr-defined]
+    except (AttributeError, TypeError):
+        pass
+
+
+def failed_instance_path(exc: BaseException) -> list[str] | None:
+    """The instance path :func:`_note_failed_firing` put on *exc*, if any."""
+    path = getattr(exc, "_wfpy_failed_path", None)
+    return list(path) if isinstance(path, list) and path else None
 
 
 def _dispatch_step(
@@ -3056,7 +3083,7 @@ def run(
         finished_at_value: datetime,
         outputs_payload: dict[str, Any],
         *,
-        error: dict[str, str] | None = None,
+        error: dict[str, Any] | None = None,
     ) -> None:
         _run_finalization._persist_run_record(
             plan, rid, wf_def, run_out_dir, base_out_dir,
@@ -3079,7 +3106,7 @@ def run(
         _effective_max_workers = wf_def.max_workers
 
     # Execute
-    error_info: dict[str, str] | None = None
+    error_info: dict[str, Any] | None = None
     try:
         outputs = execute_plan(
             plan,
@@ -3098,7 +3125,14 @@ def run(
         error_info = {
             "message": error_message,
         }
-        if last_active_entries:
+        # Where it failed: the failing firing's own instance path, under every
+        # nested workflow it is in (an IDE goes there from the root). Without
+        # one -- a failure outside any firing -- the last actor seen active.
+        failed_path = failed_instance_path(exc)
+        if failed_path:
+            error_info["entityInstanceName"] = failed_path[-1]
+            error_info["entityInstancePath"] = failed_path
+        elif last_active_entries:
             error_info["entityInstanceName"] = last_active_entries[-1].entity_instance_name
         _run_finalization._write_error_overlay(
             plan, writers.overlay_base, overlay_writer, run_out_dir, error_info, finished_at_err,
