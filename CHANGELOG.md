@@ -57,6 +57,10 @@ All notable changes to wfpy are documented here. The format follows
   firing.
 
 ### Fixed
+- Each token that goes to `work/edge-tokens/` gets its own file
+  (`<queue>__<n>.json`), instead of one file per queue rewritten by every
+  token. The queue trace's last token at an earlier step, which the IDE's
+  stepper opens, read as the run's final token.
 - A run whose tokens are arbitrary objects no longer fails writing its overlay
   or run record: an object those files cannot otherwise show is written as its
   `repr` (a dataclass as its fields).
