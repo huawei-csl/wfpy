@@ -608,6 +608,15 @@ def _collect_queue_snapshot(plan: Any) -> list[dict[str, Any]]:
             "queueId": q.id,
             "size": q.size(),
         }
+        # Which edge the queue is, said as the overlay says it -- its source
+        # path, or its endpoints. Without it the IDE's stepper has a size and a
+        # token for every queue and no edge to draw them on.
+        if q.overlay_ast_path:
+            entry["overlayAstPath"] = q.overlay_ast_path
+        edge = plan.edge_info_by_queue_id.get(q.id) or {}
+        for key in ("fromEntity", "outPort", "toEntity", "inPort"):
+            if edge.get(key):
+                entry[key] = edge[key]
         if q.id in plan.edge_last_token_by_queue_id:
             entry["lastToken"] = plan.edge_last_token_by_queue_id[q.id]
         sizes.append(entry)
