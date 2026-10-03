@@ -323,6 +323,7 @@ class ACPClient:
         if not self.connection:
             raise RuntimeError("Client not started. Call start() first.")
             
+        cwd = _session_cwd(cwd)
         logger.info(f"Creating new session (cwd={cwd})")
         
         response = await self.connection.new_session(cwd=cwd, mcp_servers=_mcp_servers(mcp_servers))
@@ -340,6 +341,7 @@ class ACPClient:
         on only through this."""
         if not self.connection:
             raise RuntimeError("Client not started. Call start() first.")
+        cwd = _session_cwd(cwd)
         logger.info(f"Loading session {session_id} (cwd={cwd})")
         self.last_session_response = await self.connection.load_session(
             session_id=session_id, cwd=cwd, mcp_servers=_mcp_servers(mcp_servers))
@@ -618,6 +620,12 @@ async def _monitor_events(
             # Task was cancelled (prompt completed)
             logger.debug("Event monitor cancelled")
             return
+
+
+def _session_cwd(cwd: str) -> str:
+    """The session's working directory as the protocol wants it: an absolute
+    path (`session/new` and `session/load` refuse a relative one)."""
+    return os.path.abspath(cwd)
 
 
 def _mcp_servers(servers: Optional[list[dict[str, Any]]]) -> list[Any]:
