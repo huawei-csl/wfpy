@@ -50,11 +50,11 @@ a connector is available when its command is on the `PATH`:
 | Connector | Command wfpy spawns | Install | Sign in |
 |---|---|---|---|
 | `opencode` (default) | `opencode acp` | `npm install -g opencode-ai` (or `curl -fsSL https://opencode.ai/install \| bash`) | `opencode auth login` |
-| `claude` | `claude-agent-acp` | `npm install -g @anthropic-ai/claude-code @zed-industries/claude-agent-acp` | run `claude` once and `/login`, or set `ANTHROPIC_API_KEY` |
+| `claude` | `claude-agent-acp` | `npm install -g @anthropic-ai/claude-code @agentclientprotocol/claude-agent-acp` | run `claude` once and `/login`, or set `ANTHROPIC_API_KEY` |
 | `codex` | `codex-acp` | `npm install -g @zed-industries/codex-acp` | `codex login`, or set `OPENAI_API_KEY` |
 | `gemini` | `gemini --experimental-acp` | `npm install -g @google/gemini-cli` | run `gemini` once and sign in, or set `GEMINI_API_KEY` |
 
-`claude-agent-acp` is Zed's ACP adapter for Claude Code: it drives Claude Code,
+`claude-agent-acp` is the ACP adapter for Claude Code: it drives Claude Code,
 so it uses Claude Code's login and settings. Install the connectors you want.
 Only `opencode` is needed for the defaults. The npm packages need Node.js 18 or
 newer.
@@ -67,7 +67,7 @@ pip install -e ".[agent]"                  # or "wfpy[agent] @ <wheel-url>"
 
 # 2. the connectors (pick the ones you use)
 npm install -g opencode-ai
-npm install -g @anthropic-ai/claude-code @zed-industries/claude-agent-acp
+npm install -g @anthropic-ai/claude-code @agentclientprotocol/claude-agent-acp
 
 # 3. sign in once per agent
 opencode auth login

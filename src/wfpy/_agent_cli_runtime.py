@@ -844,6 +844,14 @@ def _acp_agent_argv(options: dict[str, Any], spec: AgentSpec | None = None) -> l
     ]
 
 
+def _acp_agent_is_opencode(agent_argv: list[str], opencode_command: str, connector: Any) -> bool:
+    """Whether the ACP agent is OpenCode, the one agent with a CLI to fall back
+    on: the connector says so when it is the one spawned, else the command."""
+    if connector is not None and agent_argv == list(connector.argv):
+        return bool(connector.http_api)
+    return agent_argv[0] == opencode_command
+
+
 def _acp_permission_handler(spec: AgentSpec, options: dict[str, Any]) -> Any:
     """Who answers the agent's permission requests over ACP.
 
@@ -909,7 +917,8 @@ def _invoke_agent_opencode_acp(
 ) -> tuple[str, list[dict[str, str]], Exception | None, dict[str, Any]]:
     """Invoke agent through OpenCode ACP protocol with stuck detection.
     
-    Falls back to CLI mode if ACP fails.
+    Falls back to CLI mode if ACP fails and the agent is OpenCode; another
+    agent's failure is the firing's error.
     
     If validators are provided, constructs an enhanced prompt that instructs
     the agent to validate and fix its output.
@@ -1056,10 +1065,15 @@ def _invoke_agent_opencode_acp(
         return response_text, firing_messages, None, debug_meta
         
     except Exception as acp_exc:
-        logger.warning(f"ACP invocation failed: {acp_exc}. Falling back to CLI mode.")
         debug_meta["acpError"] = str(acp_exc)
+        if not _acp_agent_is_opencode(agent_argv, opencode_command, connector):
+            # Not OpenCode: its CLI would answer as a different agent.
+            logger.warning(f"ACP invocation failed: {acp_exc}")
+            err = RuntimeError(f"ACP agent '{shlex.join(agent_argv)}' failed: {acp_exc}")
+            return "", [{"role": "user", "content": payload_text}], err, debug_meta
+        logger.warning(f"ACP invocation failed: {acp_exc}. Falling back to CLI mode.")
         debug_meta["acpFallbackToCli"] = True
-        
+
         # Fall back to CLI mode
         return _invoke_agent_opencode_cli(
             spec,
