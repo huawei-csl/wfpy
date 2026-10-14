@@ -6,7 +6,31 @@ All notable changes to wfpy are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.1.0] — 2026-10-14
+
+First release published to [PyPI](https://pypi.org/project/wfpy/):
+`pip install wfpy`, or `pip install "wfpy[agent]"` for the agent transports.
+
 ### Added
+- ACP connectors: an `@agent(transport="acp")` spawns any agent speaking the
+  Agent Client Protocol, not only OpenCode. wfpy discovers `opencode`,
+  `claude` (Zed's `claude-agent-acp`), `codex` and `gemini` on the PATH; a
+  user's `~/.config/wfpy/connectors.toml` and a project's
+  `.wfpy/connectors.toml` add or override them (command, model, mode, env).
+  An agent names one with `connector=`, a run's default is
+  `--acp-connector`, and `wfpy connectors` lists what a workspace sees. The
+  session's model and mode are set where the agent offers them, a stateful
+  agent's session is resumed through `session/load`, the `ask_user` tool
+  reaches the user over MCP, and permission requests go to the user only when
+  `ask_permissions` asks for it.
+- A firing records the agent session it talked to -- its id, the connector
+  and the directory -- on the `agent.message.end` run event and as
+  `agentSession` on the agent's reply, so an IDE can open it again in the
+  agent's own CLI (`claude --resume`, `opencode -s`).
+- The StreamBlocks node: a CalPy network as a node of a workflow, declared
+  external, run through `calpy run` with the same environment a tool gets,
+  its build collected from where calpy leaves it. The sidecar creates the type
+  from the diagram.
 - `@source` — a node holding one resource (file, folder or web resource) that
   emits it once and opens it on double-click. The mirror of `@viewer`: a viewer
   is a sink you can open, a source is a producer you can open. The emit-once
@@ -65,6 +89,11 @@ All notable changes to wfpy are documented here. The format follows
   from one export.
 
 ### Fixed
+- An ACP session gets an absolute working directory (`session/new` refuses a
+  relative one), and the failure of an ACP agent other than OpenCode is the
+  firing's error rather than a fall back to OpenCode's CLI.
+- The native MCP client works with `mcp` 2 as well as 1.
+- A failing tool says why: the tail of what it printed is kept in its error.
 - A run's error names the actor that failed by its instance path under every
   nested workflow (`error.entityInstancePath`, e.g. `["m", "i", "x"]`, in the
   run record and the overlay). It used to name the last actor the overlay saw
