@@ -7,32 +7,31 @@ agents and tasks are actors in a dataflow graph, connected by FIFO queues and
 fired when their inputs are ready. Independent work runs concurrently by
 default, feedback loops are ordinary edges, and the graph is exportable as data.
 
-**New to dataflow?** Read [Dataflow concepts](docs/dataflow-concepts.md) for the
+**New to dataflow?** Read [Dataflow concepts](https://github.com/huawei-csl/wfpy/blob/main/docs/dataflow-concepts.md) for the
 model — actors, ports, tokens, firings, guards, schedules, priorities — and work
-through the tutorial in [`examples/`](examples/), which builds it up one runnable
+through the tutorial in [`examples/`](https://github.com/huawei-csl/wfpy/tree/main/examples), which builds it up one runnable
 step at a time.
 
 wfpy is fully typed and ships `py.typed` for IDE support.
 
 ## Install
 
-Each [release](https://github.com/huawei-csl/wfpy/releases) attaches a built
-wheel. Install a specific version straight from GitHub:
-
 ```bash
-# pinned release wheel (no clone needed)
-pip install "wfpy @ https://github.com/huawei-csl/wfpy/releases/download/v1.0.0/wfpy-1.0.0-py3-none-any.whl"
-
-# or download the .whl from the Releases page and install the file
-pip install ./wfpy-1.0.0-py3-none-any.whl
-
-# or build from a tagged source
-pip install "git+https://github.com/huawei-csl/wfpy@v1.0.0"
+pip install wfpy             # the core: workflows, tasks, the CLI
+pip install "wfpy[agent]"    # + the @agent transports: HTTP API, MCP tools, ACP
 ```
 
-Add the `agent` extra for the `@agent` transports (HTTP API, MCP tools,
-opencode-acp): append `[agent]` to the requirement, e.g.
-`pip install "wfpy[agent] @ <wheel-url>"`.
+Each [release](https://github.com/huawei-csl/wfpy/releases) is published to
+[PyPI](https://pypi.org/project/wfpy/) and also attaches the built wheel. Use
+these to install a version that is not on PyPI, or without PyPI access:
+
+```bash
+# a release wheel straight from GitHub
+pip install "wfpy @ https://github.com/huawei-csl/wfpy/releases/download/v1.0.0/wfpy-1.0.0-py3-none-any.whl"
+
+# or a tagged source
+pip install "git+https://github.com/huawei-csl/wfpy@v1.0.0"
+```
 
 For local development, clone and install editable: `pip install -e ".[dev]"`.
 
@@ -250,8 +249,8 @@ wfpy/
 └── __init__.py   # public API re-exports
 ```
 
-Documentation lives under [docs/](docs/): the [dataflow model](docs/dataflow-concepts.md)
-and the [sidecar](docs/sidecar.md).
+Documentation lives under [docs/](https://github.com/huawei-csl/wfpy/tree/main/docs): the [dataflow model](https://github.com/huawei-csl/wfpy/blob/main/docs/dataflow-concepts.md)
+and the [sidecar](https://github.com/huawei-csl/wfpy/blob/main/docs/sidecar.md).
 
 ## Resource draft
 

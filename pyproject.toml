@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68.0", "wheel"]
+requires = ["setuptools>=77.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,12 +8,13 @@ version = "1.0.0"
 description = "A Pythonic framework for agentic workflows, built on actor-dataflow semantics"
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "Apache-2.0" }
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+keywords = ["workflow", "dataflow", "actors", "agents", "llm", "agentic", "mcp", "acp"]
 authors = [{ name = "wf-lang contributors" }]
 
 classifiers = [
     "Development Status :: 4 - Beta",
-    "License :: OSI Approved :: Apache Software License",
     "Intended Audience :: Developers",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
@@ -28,8 +29,11 @@ classifiers = [
 dependencies = ["libcst>=1.4", "tomli>=2.0; python_version < '3.11'"]
 
 [project.urls]
+Homepage = "https://github.com/huawei-csl/wfpy"
+Documentation = "https://github.com/huawei-csl/wfpy/tree/main/docs"
 Source = "https://github.com/huawei-csl/wfpy"
 Issues = "https://github.com/huawei-csl/wfpy/issues"
+Changelog = "https://github.com/huawei-csl/wfpy/releases"
 
 [project.optional-dependencies]
 # `agent` covers the @agent decorator runtimes: the HTTP API transport (httpx),
