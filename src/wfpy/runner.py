@@ -247,6 +247,12 @@ def _attach_agent_response_meta(
         opencode_session_id = response_debug_meta.get("opencodeSessionID")
         if isinstance(opencode_session_id, str) and opencode_session_id.strip():
             message["opencodeSessionID"] = opencode_session_id.strip()
+        # The agent's session -- id, connector, directory -- for opening it
+        # again in the agent's own CLI (`opencodeSessionID` is the older,
+        # OpenCode-named field, kept for readers of it).
+        agent_session = response_debug_meta.get("agentSession")
+        if isinstance(agent_session, dict) and agent_session.get("id"):
+            message["agentSession"] = dict(agent_session)
         return
 
 

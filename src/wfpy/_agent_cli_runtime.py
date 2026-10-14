@@ -599,6 +599,10 @@ def _parse_opencode_json_events(raw_stdout: str) -> tuple[str, dict[str, Any]]:
         debug_meta["opencodeMcpServers"] = sorted(mcp_server_names)
     if opencode_session_id:
         debug_meta["opencodeSessionID"] = opencode_session_id
+        # The CLI runs in this process's directory, as `opencode` would.
+        session = _agent_session_record(opencode_session_id, "opencode", os.getcwd())
+        if session is not None:
+            debug_meta["agentSession"] = session
 
     content = "\n".join(part for part in text_parts if part.strip()).strip()
     if not content and raw_stdout.strip():
@@ -828,6 +832,34 @@ def _acp_connector(spec: AgentSpec, options: dict[str, Any]) -> Any:
     return resolve_connector(name, load_connectors(options.get("source_path")))
 
 
+def _agent_session_record(
+    session_id: Any, connector_name: str | None, cwd: str
+) -> dict[str, Any] | None:
+    """Which agent session a firing talked to, so it can be opened again in
+    the agent's own CLI: its id (the agent's own -- the ACP adapters keep
+    it), the connector that ran it (None for an explicit command line) and
+    the directory it ran in (Claude Code looks its sessions up by it)."""
+    sid = str(session_id or "").strip()
+    if not sid:
+        return None
+    record: dict[str, Any] = {"id": sid, "cwd": os.path.abspath(cwd)}
+    if connector_name:
+        record["connector"] = connector_name
+    return record
+
+
+def _acp_connector_name(options: dict[str, Any], connector: Any) -> str | None:
+    """The connector an ACP firing ran: the one resolved, else the default
+    (OpenCode); None when an explicit command line was given instead."""
+    if str(options.get("agent_cli_acp_command", "") or "").strip():
+        return None
+    if connector is not None:
+        return str(connector.name)
+    from wfpy.connectors import DEFAULT_CONNECTOR
+
+    return DEFAULT_CONNECTOR
+
+
 def _acp_agent_argv(options: dict[str, Any], spec: AgentSpec | None = None) -> list[str]:
     """The ACP agent's command line: the `agent_cli_acp_command` option
     verbatim (any agent speaking ACP over stdio), else the connector the
@@ -1048,8 +1080,19 @@ def _invoke_agent_opencode_acp(
 
         # Extract response text
         response_text = response.get("text", "")
+        session = _agent_session_record(
+            response.get("session_id"), _acp_connector_name(options, connector), cwd
+        )
+        if session is not None:
+            debug_meta["agentSession"] = session
         if on_event is not None:
-            on_event({"type": "agent.message.end", "stopReason": response.get("stop_reason")})
+            end_event: dict[str, Any] = {
+                "type": "agent.message.end",
+                "stopReason": response.get("stop_reason"),
+            }
+            if session is not None:
+                end_event["session"] = session
+            on_event(end_event)
         debug_meta["acpSuccess"] = True
         debug_meta["acpApplied"] = response.get("applied")
         debug_meta["acpStopReason"] = response.get("stop_reason")
