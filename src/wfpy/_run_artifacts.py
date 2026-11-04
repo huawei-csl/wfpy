@@ -46,6 +46,21 @@ def _runtime_json_dumps_line(value: Any) -> str:
     return json.dumps(value, cls=_RuntimeJsonEncoder)
 
 
+def _write_text_atomic(path: Path, text: str) -> None:
+    """Write ``text`` to ``path`` so that a reader sees the old file or the new one, never half.
+
+    The IDE polls the live overlay every 400ms while a run writes it at every
+    firing; ``Path.write_text`` truncates the file first, so a read in between
+    found it empty or cut short and the run's state blinked off the diagram.
+    The text goes to a sibling file, renamed over ``path``, which is atomic on
+    every platform the run supports.
+    """
+
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text)
+    os.replace(tmp, path)
+
+
 def _materialize_edge_token(plan: Any, q: Any, value: Any) -> Any:
     """Convert runtime edge tokens into viewer-openable values when needed."""
 
@@ -311,7 +326,7 @@ class _ViewerOverlayWriter:
         self._running = running
         overlay = _build_viewer_overlay_v1(self._plan, self._base, active, running)
         try:
-            self._live_path.write_text(_runtime_json_dumps(overlay))
+            _write_text_atomic(self._live_path, _runtime_json_dumps(overlay))
         except OSError:
             pass
 
@@ -410,7 +425,7 @@ class _AgentContextWriter:
             self._source_path,
         )
         try:
-            self._live_path.write_text(_runtime_json_dumps(overlay))
+            _write_text_atomic(self._live_path, _runtime_json_dumps(overlay))
         except OSError:
             pass
 
@@ -490,7 +505,7 @@ class _ContextLiveWriter:
             self._source_path,
         )
         try:
-            self._live_path.write_text(_runtime_json_dumps(overlay))
+            _write_text_atomic(self._live_path, _runtime_json_dumps(overlay))
         except OSError:
             pass
 

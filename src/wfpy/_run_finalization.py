@@ -24,6 +24,7 @@ from wfpy._run_artifacts import (
     _rewrite_viewer_overlay_tokens,
     _ViewerOverlayBase,
     _ViewerOverlayWriter,
+    _write_text_atomic,
 )
 
 logger = logging.getLogger("wfpy")
@@ -220,7 +221,7 @@ def _persist_run_record(
 
     run_record_path = run_out_dir / "run.wf-run.json"
     try:
-        run_record_path.write_text(_runtime_json_dumps(run_record))
+        _write_text_atomic(run_record_path, _runtime_json_dumps(run_record))
     except OSError:
         pass
 
@@ -269,7 +270,7 @@ def _write_error_overlay(
     )
     try:
         viewer_path = run_out_dir / "run.wf-viewer.json"
-        viewer_path.write_text(_runtime_json_dumps(error_overlay))
+        _write_text_atomic(viewer_path, _runtime_json_dumps(error_overlay))
     except OSError:
         pass
 
@@ -285,7 +286,7 @@ def _write_queue_trace(
     if plan.queue_trace and plan.queue_trace.steps:
         trace_json = plan.queue_trace.build(finished_at.isoformat(), plan)
         qt_path = run_out_dir / "run.wf-queues.json"
-        qt_path.write_text(_runtime_json_dumps(trace_json))
+        _write_text_atomic(qt_path, _runtime_json_dumps(trace_json))
         if verbose:
             logger.info("Queue trace: %d steps → %s", len(plan.queue_trace.steps), qt_path)
 
@@ -319,7 +320,7 @@ def _finalize_run(
     )
     viewer_final_path = run_out_dir / "run.wf-viewer.json"
     try:
-        viewer_final_path.write_text(_runtime_json_dumps(final_overlay))
+        _write_text_atomic(viewer_final_path, _runtime_json_dumps(final_overlay))
     except OSError:
         pass
 
@@ -333,7 +334,7 @@ def _finalize_run(
         )
         agent_ctx_path = run_out_dir / "run.wf-agent-context.json"
         try:
-            agent_ctx_path.write_text(_runtime_json_dumps(agent_ctx))
+            _write_text_atomic(agent_ctx_path, _runtime_json_dumps(agent_ctx))
         except OSError:
             pass
 
@@ -347,7 +348,7 @@ def _finalize_run(
         context_path = run_out_dir / "run.wf-context.json"
         context_journal_path = run_out_dir / "run.wf-context-journal.jsonl"
         try:
-            context_path.write_text(_runtime_json_dumps(context_overlay))
+            _write_text_atomic(context_path, _runtime_json_dumps(context_overlay))
         except OSError:
             pass
         try:
