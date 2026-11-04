@@ -6,6 +6,18 @@ All notable changes to wfpy are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- The run's live files are written whole: `run.wf-viewer.live.json`, the
+  agent-context and context live files, and the final overlay, queue trace
+  and run record go to a sibling file renamed over the target, so a reader
+  polling them (the IDE, every 400ms) never finds one half written. Before,
+  `Path.write_text` truncated the file first, and a read in between found it
+  empty or cut short: the IDE took that for no run and showed the previous
+  one, so the running ring and the queue sizes blinked all through a run.
+- The live files go only after the run's record is in `run-log.jsonl`, on
+  success as on failure. They went before it, and in between a reader found
+  only the previous run.
+
 ## [1.1.0] — 2026-10-14
 
 First release published to [PyPI](https://pypi.org/project/wfpy/):
