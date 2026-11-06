@@ -932,6 +932,42 @@ def _acp_permission_handler(spec: AgentSpec, options: dict[str, Any]) -> Any:
     return None
 
 
+def _acp_stuck_policy(options: dict[str, Any], connector: Any) -> tuple[int, int]:
+    """How long the agent may go silent, and how many nudges it gets.
+
+    The same precedence as everything else about an ACP agent: the run's
+    explicit option wins, then the connector's own setting, then wfpy's
+    default. Returns ``(stuck_timeout_seconds, max_retries)``.
+
+    An agent that streams nothing while a tool call runs — OpenCode during a
+    long ``bash`` is the measured case — looks stuck to the detector. The
+    window has to be longer than the longest silent tool call, or the agent is
+    nudged mid-work and the nudge lands in the session as a second turn.
+    """
+    from wfpy.connectors import DEFAULT_STUCK_RETRIES, DEFAULT_STUCK_TIMEOUT_MS
+
+    def pick(option_key: str, connector_attr: str, fallback: int) -> int | None:
+        raw = options.get(option_key)
+        if raw is None or str(raw).strip() == "":
+            raw = getattr(connector, connector_attr, None) if connector is not None else None
+        if raw is None:
+            return fallback
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"{option_key} must be a positive integer, not {raw!r}"
+            ) from None
+        if value <= 0:
+            raise ValueError(f"{option_key} must be greater than 0, not {value}")
+        return value
+
+    timeout_ms = pick("acp_stuck_timeout_ms", "stuck_timeout_ms", DEFAULT_STUCK_TIMEOUT_MS)
+    retries = pick("acp_stuck_retries", "stuck_retries", DEFAULT_STUCK_RETRIES)
+    # A sub-second window would nudge continuously; floor it at one second.
+    return max(1, round((timeout_ms or 0) / 1000)), int(retries or DEFAULT_STUCK_RETRIES)
+
+
 def _invoke_agent_opencode_acp(
     spec: AgentSpec,
     payload_text: str,
@@ -1027,11 +1063,15 @@ def _invoke_agent_opencode_acp(
         acp_env["OPENCODE_CONFIG_CONTENT"] = json.dumps({"model": spec.model})
         logger.info(f"Setting model via OPENCODE_CONFIG_CONTENT: {spec.model}")
     
+    stuck_timeout_s, stuck_retries = _acp_stuck_policy(options, connector)
+
     debug_meta: dict[str, Any] = {
         "transport": "opencode-acp",
         "cliToolsMode": cli_tools_mode,
         "acpAgent": " ".join(agent_argv),
         "acpConnector": connector.name if connector is not None else None,
+        "acpStuckTimeoutMs": stuck_timeout_s * 1000,
+        "acpStuckRetries": stuck_retries,
     }
     # The human port: an agent with `ask_user` gets the `ask_user` tool over
     # MCP, served by this process for the firing, so it can put a question to
@@ -1059,8 +1099,8 @@ def _invoke_agent_opencode_acp(
             invoke_opencode_acp(
                 prompt=full_prompt,
                 cwd=cwd,
-                stuck_timeout=300,  # 5 minutes
-                max_retries=5,
+                stuck_timeout=stuck_timeout_s,
+                max_retries=stuck_retries,
                 opencode_command=opencode_command,
                 env=acp_env if acp_env else None,
                 # A stateful agent's recorded session id, resumed through
