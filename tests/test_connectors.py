@@ -103,3 +103,62 @@ class TestTheCommand:
         names = {r["name"]: r for r in data["connectors"]}
         assert names["mine"]["command"] == "my-agent" and names["mine"]["source"] == "user"
         assert "opencode" in names and data["user_file"].endswith("wfpy/connectors.toml")
+
+
+class TestTheWorkspaceFileReachesTheRun:
+    """A workflow checked into a repository names a connector without carrying
+    a path — that only works if the run resolves connectors from the workflow
+    file's own location, which means `source_path` has to reach the options the
+    agent runtime reads. It did not, so the workspace file was silently skipped.
+    """
+
+    def test_run_puts_the_source_path_in_the_options(self, tmp_path):
+        from wfpy import Port, agent, connect, run, workflow
+
+        @agent(prompt="hi", transport="mock", mock_outputs={"Out": "ok"})
+        class A:
+            class Ports:
+                In = Port[str](direction="in")
+                Out = Port[str](direction="out")
+
+        @workflow(inputs={"In": str}, outputs={"Out": str})
+        def wf() -> None:
+            a = A()
+            connect("In", a.In)
+            connect(a.Out, "Out")
+
+        seen = {}
+        import wfpy.runner as R
+        original = R.execute_plan
+
+        def capture(plan, *args, **kwargs):
+            seen["source_path"] = plan.options.get("source_path")
+            return original(plan, *args, **kwargs)
+
+        R.execute_plan = capture
+        try:
+            run(wf, inputs={"In": "x"}, out_dir=tmp_path / "out")
+        finally:
+            R.execute_plan = original
+
+        assert seen["source_path"], "the run must carry the workflow file's path"
+        assert seen["source_path"].endswith(".py")
+
+    def test_the_workspace_file_is_found_from_the_workflow_file(self, path_with, tmp_path):
+        """The resolution `_acp_connector` performs, with the real helpers."""
+        path_with("opencode")
+        project = tmp_path / "proj"
+        (project / ".wfpy").mkdir(parents=True)
+        (project / "pyproject.toml").write_text("")
+        (project / ".wfpy" / "connectors.toml").write_text(
+            '[connectors.opencode]\ncommand = "/opt/oc acp"\n'
+        )
+        source_path = str(project / "flow.py")
+        found = C.load_connectors(source_path, user=tmp_path / "none.toml")
+        assert found["opencode"].argv == ["/opt/oc", "acp"]
+        assert found["opencode"].source == "workspace"
+        # …and with no source path there is no workspace at all, which is what
+        # the run was passing, so the file was never read.
+        none = C.load_connectors(None, user=tmp_path / "none.toml")["opencode"]
+        assert none.source == "discovered"
+        assert none.argv == ["opencode", "acp"]
