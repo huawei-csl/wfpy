@@ -6,6 +6,13 @@ All notable changes to wfpy are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- The sidecar answers `pythonEnvironment` for a workflow file: the
+  interpreter running it, the import roots `wfpy plan` loads the file with,
+  and the folders its installed packages come from. An IDE configures its
+  Python language server from the answer, so a workflow that runs is not
+  drawn with its imports underlined because the editor looks elsewhere.
+
 ### Fixed
 - The run's live files are written whole: `run.wf-viewer.live.json`, the
   agent-context and context live files, and the final overlay, queue trace

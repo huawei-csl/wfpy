@@ -17,6 +17,7 @@ from typing import Any
 
 import libcst as cst
 
+from wfpy._python_environment import python_environment
 from wfpy._workflow_instance import discover_workflow_instances
 from wfpy.package_exports import apply_package_export, find_package_export
 from wfpy.rewrite import (
@@ -50,6 +51,9 @@ _QUERY_OPS: dict[str, Callable[[RewriteEngine, dict[str, Any]], dict[str, Any]]]
         "candidates": discover_workflow_instances(engine.file_path)
     },
     "exportWorkflowGraph": lambda engine, args: {"graph": _export_graph(engine, args)},
+    # Where this interpreter finds what the file imports: the IDE configures
+    # its Python language server from it (see `_python_environment`).
+    "pythonEnvironment": lambda engine, args: python_environment(engine.file_path),
 }
 
 
@@ -474,6 +478,17 @@ def _handle_request(payload: dict[str, Any]) -> SidecarResponse:
             revision="",
             message="Missing 'file' in request",
             diagnostic={"code": "parse_error"},
+        )
+
+    if op == "pythonEnvironment":
+        # Asked of the interpreter, not of the source: a file that does not
+        # parse yet is imported from the same places.
+        return SidecarResponse(
+            status="ok",
+            file=file_path,
+            revision=_current_revision(file_path),
+            message="ok",
+            diagnostic=python_environment(file_path),
         )
 
     try:
