@@ -2993,6 +2993,13 @@ def run(
         except (TypeError, OSError):
             pass
 
+    # The agent runtime resolves a run's ACP connectors from the workflow file's
+    # own location — the workspace's `.wfpy/connectors.toml` is the one at the
+    # project root above it. It reads the path out of the options, so it has to
+    # be in there; without it the workspace file is silently skipped and only
+    # the discovered connectors and the user file apply.
+    plan.options["source_path"] = plan.source_path
+
     # Load validator registry
     plan.validator_registry = load_validator_registry(
         plan.source_path,
