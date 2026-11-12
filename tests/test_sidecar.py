@@ -655,4 +655,7 @@ def test_python_environment_names_the_interpreter_and_the_files_import_roots(tmp
     assert os.path.realpath(sysconfig.get_paths()["stdlib"]) not in answer["libraryPaths"]
     assert all(os.path.isdir(entry) for entry in answer["libraryPaths"])
     assert not set(answer["roots"]) & set(answer["libraryPaths"])
+    # Not the folder this process was started in, nor the interpreter's own.
+    assert os.path.realpath(os.getcwd()) not in answer["libraryPaths"]
+    assert os.path.realpath(sys.prefix) not in answer["libraryPaths"]
     assert "pythonEnvironment" in SUPPORTED_OPS
