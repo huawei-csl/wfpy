@@ -659,3 +659,17 @@ def test_python_environment_names_the_interpreter_and_the_files_import_roots(tmp
     assert os.path.realpath(os.getcwd()) not in answer["libraryPaths"]
     assert os.path.realpath(sys.prefix) not in answer["libraryPaths"]
     assert "pythonEnvironment" in SUPPORTED_OPS
+
+
+def test_python_environment_that_fails_is_an_error_answer_not_a_crash(monkeypatch, tmp_path):
+    import wfpy.sidecar as sidecar
+
+    def broken(file_path):
+        raise RuntimeError("no interpreter today")
+
+    monkeypatch.setattr(sidecar, "python_environment", broken)
+    response = sidecar._handle_request({"op": "pythonEnvironment", "file": str(tmp_path / "w.py")})
+
+    assert response.status == "error"
+    assert response.diagnostic == {"code": "internal_error"}
+    assert "no interpreter today" in response.message

@@ -52,7 +52,9 @@ _QUERY_OPS: dict[str, Callable[[RewriteEngine, dict[str, Any]], dict[str, Any]]]
     },
     "exportWorkflowGraph": lambda engine, args: {"graph": _export_graph(engine, args)},
     # Where this interpreter finds what the file imports: the IDE configures
-    # its Python language server from it (see `_python_environment`).
+    # its Python language server from it (see `_python_environment`). Listed
+    # here to be advertised; `_handle_request` answers it before the file is
+    # parsed.
     "pythonEnvironment": lambda engine, args: python_environment(engine.file_path),
 }
 
@@ -483,12 +485,22 @@ def _handle_request(payload: dict[str, Any]) -> SidecarResponse:
     if op == "pythonEnvironment":
         # Asked of the interpreter, not of the source: a file that does not
         # parse yet is imported from the same places.
+        try:
+            environment = python_environment(file_path)
+        except Exception as exc:
+            return SidecarResponse(
+                status="error",
+                file=file_path,
+                revision=_current_revision(file_path),
+                message=f"Unhandled error: {exc}",
+                diagnostic={"code": "internal_error"},
+            )
         return SidecarResponse(
             status="ok",
             file=file_path,
             revision=_current_revision(file_path),
             message="ok",
-            diagnostic=python_environment(file_path),
+            diagnostic=environment,
         )
 
     try:

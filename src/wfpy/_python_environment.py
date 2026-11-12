@@ -38,16 +38,24 @@ def _library_paths(roots: list[Path]) -> list[Path]:
 
     def is_stdlib(path: Path) -> bool:
         # site-packages sits under the standard library's folder on most layouts.
-        return any(_within(path, root) for root in stdlib) and not any(_within(path, root) for root in site)
+        return any(_within(path, root) for root in stdlib) and not any(
+            _within(path, root) for root in site
+        )
 
     # Not where packages are: the folder of the script that started this
     # process and the folder it was started in (`sys.path[0]`), and the
     # interpreter's own folders (on Windows the prefix and its DLLs are on
     # `sys.path`).
     not_packages: list[Path] = []
+    try:
+        started_in = os.getcwd()
+    except OSError:  # the folder is gone
+        started_in = ""
     for entry in (
-        os.getcwd(),
-        os.path.dirname(os.path.abspath(sys.argv[0])) if sys.argv and sys.argv[0] else "",
+        started_in,
+        os.path.dirname(os.path.abspath(sys.argv[0]))
+        if started_in and sys.argv and sys.argv[0]
+        else "",
         sys.prefix,
         sys.base_prefix,
         sys.exec_prefix,
@@ -68,7 +76,13 @@ def _library_paths(roots: list[Path]) -> list[Path]:
             path = candidate.resolve()
         except OSError:
             continue
-        if not path.is_dir() or is_stdlib(path) or path in not_packages or path in found or path in roots:
+        if (
+            not path.is_dir()
+            or is_stdlib(path)
+            or path in not_packages
+            or path in found
+            or path in roots
+        ):
             continue
         found.append(path)
     # After the filter: an editable install is wherever its checkout is.
