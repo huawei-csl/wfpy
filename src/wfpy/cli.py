@@ -321,6 +321,8 @@ def cmd_run(args: argparse.Namespace) -> None:
         agent_cli_acp_command=getattr(args, "agent_cli_acp_command", None),
         agent_cli_acp_permissions=getattr(args, "agent_cli_acp_permissions", None),
         acp_connector=getattr(args, "acp_connector", None),
+        acp_stuck_timeout_ms=getattr(args, "acp_stuck_timeout_ms", None),
+        acp_stuck_retries=getattr(args, "acp_stuck_retries", None),
         elicit_socket=getattr(args, "elicit_socket", None),
         agent_cli_opencode_args=getattr(args, "agent_cli_opencode_args", None),
         agent_cli_opencode_agent=getattr(args, "agent_cli_opencode_agent", None),
@@ -358,7 +360,15 @@ def cmd_connectors(args: argparse.Namespace) -> None:
     """List the ACP connectors a run from the workspace would see."""
     import json as _json
 
-    from wfpy.connectors import describe_all, load_connectors, user_file, workspace_file, workspace_root
+    from wfpy.connectors import (
+        DEFAULT_STUCK_RETRIES,
+        DEFAULT_STUCK_TIMEOUT_MS,
+        describe_all,
+        load_connectors,
+        user_file,
+        workspace_file,
+        workspace_root,
+    )
 
     root = workspace_root(args.workspace)
     rows = describe_all(load_connectors(args.workspace))
@@ -367,10 +377,15 @@ def cmd_connectors(args: argparse.Namespace) -> None:
                            "workspace_file": str(workspace_file(root)) if root else None,
                            "connectors": rows}, indent=1))
         return
-    print(f"{'name':<10} {'available':<10} {'source':<11} {'model':<10} {'mode':<12} command")
+    print(f"{'name':<10} {'available':<10} {'source':<11} {'model':<10} {'mode':<12} "
+          f"{'stuck':<12} command")
     for r in rows:
+        # The silence window and nudge budget as one column: "300s x5", with a
+        # default shown as the default so the table never implies it is unset.
+        secs = round((r['stuck_timeout_ms'] or DEFAULT_STUCK_TIMEOUT_MS) / 1000)
+        stuck = f"{secs}s x{r['stuck_retries'] or DEFAULT_STUCK_RETRIES}"
         print(f"{r['name']:<10} {'yes' if r['available'] else 'no':<10} {r['source']:<11} "
-              f"{r['model'] or '-':<10} {r['mode'] or '-':<12} {r['command']}")
+              f"{r['model'] or '-':<10} {r['mode'] or '-':<12} {stuck:<12} {r['command']}")
     print(f"user file: {user_file()}" + (f"  workspace file: {workspace_file(root)}" if root else ""))
 
 
@@ -627,6 +642,23 @@ def main() -> None:
         default=None,
         help="The ACP connector an agent on the acp transport spawns when it names none "
         "(`wfpy connectors` lists them; default opencode)",
+    )
+    run_parser.add_argument(
+        "--acp-stuck-timeout-ms",
+        type=int,
+        default=None,
+        help="How long an ACP agent may stream nothing before it is nudged with a "
+        "'continue' message (default 300000). Raise it above the longest silent tool "
+        "call the agent makes: a compile or a device run that streams nothing looks "
+        "stuck, and the nudge lands in the session as a second turn. Overrides a "
+        "connector's stuck_timeout_ms",
+    )
+    run_parser.add_argument(
+        "--acp-stuck-retries",
+        type=int,
+        default=None,
+        help="How many nudges an ACP agent gets before the turn is cancelled "
+        "(default 5). Overrides a connector's stuck_retries",
     )
     run_parser.add_argument(
         "--elicit-socket",
