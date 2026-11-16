@@ -253,11 +253,12 @@ def _own_statements(body: list[ast.stmt]) -> list[ast.stmt]:
     return out
 
 
-def factory_signature(definition: dict[str, Any] | None) -> list[dict[str, str]] | None:
-    """The parameters, as written, of the function whose body defines the
-    workflow ``definition`` ({file, line} of its ``def``) names: each with its
-    ``name``, its annotation's text as ``type`` and its default's text as
-    ``defaultValue``, the last two only when written."""
+def _factory_function(
+    definition: dict[str, Any] | None,
+) -> tuple[str, ast.FunctionDef | ast.AsyncFunctionDef, bool] | None:
+    """The function whose body defines the workflow ``definition`` ({file,
+    line} of its ``def``) names, its file's text, and whether it is a method
+    (called on an instance or a class, which passes the first parameter)."""
     if not definition:
         return None
     found = parsed(definition.get("file"))
@@ -265,6 +266,14 @@ def factory_signature(definition: dict[str, Any] | None) -> list[dict[str, str]]
     if found is None or not isinstance(line, int):
         return None
     text, tree = found
+    methods: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef):
+            for stmt in node.body:
+                if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)) and not any(
+                    isinstance(d, ast.Name) and d.id == "staticmethod" for d in stmt.decorator_list
+                ):
+                    methods.add(id(stmt))
     for node in ast.walk(tree):
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
@@ -273,14 +282,40 @@ def factory_signature(definition: dict[str, Any] | None) -> list[dict[str, str]]
                 continue
             lines = [stmt.lineno, *(d.lineno for d in stmt.decorator_list)]
             if line in lines:
-                return signature_parameters(text, node)
+                return text, node, id(node) in methods
     return None
 
 
+def factory_signature(definition: dict[str, Any] | None) -> list[dict[str, str]] | None:
+    """The parameters, as written, of the function whose body defines the
+    workflow ``definition`` ({file, line} of its ``def``) names: each with its
+    ``name``, its annotation's text as ``type`` and its default's text as
+    ``defaultValue``, the last two only when written."""
+    found = _factory_function(definition)
+    if found is None:
+        return None
+    text, fn, method = found
+    return signature_parameters(text, fn, method=method)
+
+
+def factory_positional_names(definition: dict[str, Any] | None) -> list[str] | None:
+    """The names a call's positional arguments bind, in order, for the
+    factory of ``definition``: its positional parameters, up to a
+    ``*args`` (which takes the rest unnamed); never a keyword-only one."""
+    found = _factory_function(definition)
+    if found is None:
+        return None
+    _text, fn, method = found
+    names = [arg.arg for arg in [*fn.args.posonlyargs, *fn.args.args]]
+    return names[1:] if method else names
+
+
 def signature_parameters(
-    text: str, fn: ast.FunctionDef | ast.AsyncFunctionDef
+    text: str, fn: ast.FunctionDef | ast.AsyncFunctionDef, method: bool = False
 ) -> list[dict[str, str]]:
-    """A function's parameters as written: name, annotation, default."""
+    """A function's parameters as written: name, annotation, default. A
+    method's first parameter (its `self` / `cls`) is not one a caller
+    passes."""
     args = fn.args
     positional = [*args.posonlyargs, *args.args]
     defaults: list[ast.expr | None] = [None] * (len(positional) - len(args.defaults))
@@ -289,10 +324,10 @@ def signature_parameters(
         *zip(positional, defaults),
         *zip(args.kwonlyargs, args.kw_defaults),
     ]
+    if method and positional:
+        entries = entries[1:]
     found: list[dict[str, str]] = []
     for arg, default in entries:
-        if arg.arg in ("self", "cls"):
-            continue
         entry = {"name": arg.arg}
         annotation = segment(text, arg.annotation)
         if annotation:
@@ -302,7 +337,3 @@ def signature_parameters(
             entry["defaultValue"] = default_text
         found.append(entry)
     return found
-
-
-def positional_names(parameters: list[dict[str, str]] | None) -> list[str] | None:
-    return [p["name"] for p in parameters] if parameters is not None else None

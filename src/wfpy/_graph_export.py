@@ -189,7 +189,7 @@ def _factory_parameter_entries(
         _source_text.instantiation_call(
             getattr(rec.instance, "_wfpy_source", None), wf_def.factory_name, factory=True
         ),
-        _source_text.positional_names(signature),
+        _source_text.factory_positional_names(getattr(rec.instance, "_wfpy_definition", None)),
     )
     parameters: list[dict[str, Any]] = []
     definition_params: list[dict[str, Any]] = []

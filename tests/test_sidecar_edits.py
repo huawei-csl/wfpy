@@ -1051,3 +1051,21 @@ def test_a_save_that_fails_midway_puts_back_what_it_wrote(project: Path, monkeyp
     assert answer["diagnostic"]["changedFiles"] == []
     assert {name: _text(project, name) for name in names} == before
     assert not [p for p in project.rglob("tmp*") if p.is_file()]
+
+
+def test_a_factory_called_past_its_star_args(project: Path) -> None:
+    pair = project / "compile/workflows/pair.py"
+    pair.write_text(
+        _text(project, "compile/workflows/pair.py").replace(
+            "def pair(label: str, times: int = 2):", "def pair(label: str, *rest: int, times: int = 2):"
+        ),
+        encoding="utf-8",
+    )
+    flow = project / "compile/flow.py"
+    flow.write_text(
+        _text(project, "compile/flow.py").replace("pair(label=LABEL, times=3)()", "pair(LABEL, 7, 8)()"),
+        encoding="utf-8",
+    )
+    duo = _node(_plans(project, "compile/flow.py"), "duo")
+    expressions = {p["name"]: p.get("expression") for p in duo["meta"]["parameters"]}
+    assert expressions == {"label": "LABEL", "times": None}
