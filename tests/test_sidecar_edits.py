@@ -1002,3 +1002,52 @@ def test_a_factory_called_with_positional_arguments(project: Path) -> None:
     )
     duo = _node(_plans(project, "compile/flow.py"), "duo")
     assert [p.get("expression") for p in duo["meta"]["parameters"]] == ["LABEL", "3"]
+
+
+# ── A save across files ───────────────────────────────────────────────
+
+
+def test_a_save_across_files_is_all_or_none(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A companion changed under the edit: no file is written."""
+    from wfpy import rewrite
+
+    uses = _send(project / "compile/sources/text.py", "portUses", entity="Text")["diagnostic"]["usedIn"]
+    before = {name: _text(project, name) for name in ("compile/sources/text.py", "compile/flow.py", "compile/workflows/pair.py")}
+    original = rewrite.load_module
+
+    def load_then_touch(path: str) -> tuple:
+        loaded = original(path)
+        if path.endswith("pair.py"):
+            Path(path).write_text(Path(path).read_text(encoding="utf-8") + "# touched\n", encoding="utf-8")
+            before["compile/workflows/pair.py"] += "# touched\n"
+        return loaded
+
+    monkeypatch.setattr(rewrite, "load_module", load_then_touch)
+    answer = _send(project / "compile/sources/text.py", "renamePort",
+                   entity="Text", portDirection="output", portName="Out", newValue="Value", usedIn=uses)
+    assert answer["status"] == "error"
+    assert answer["diagnostic"]["code"] == "concurrent_source_modification"
+    assert {name: _text(project, name) for name in before} == before
+
+
+def test_a_save_that_fails_midway_puts_back_what_it_wrote(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    uses = _send(project / "compile/sources/text.py", "portUses", entity="Text")["diagnostic"]["usedIn"]
+    names = ("compile/sources/text.py", "compile/flow.py", "compile/workflows/pair.py")
+    before = {name: _text(project, name) for name in names}
+    original = Path.replace
+    calls: list[str] = []
+
+    def failing(self: Path, target: str | Path) -> Path:
+        calls.append(str(target))
+        if str(target).endswith("pair.py") and len(calls) <= 3:
+            raise OSError("disk full")
+        return original(self, target)
+
+    monkeypatch.setattr(Path, "replace", failing)
+    answer = _send(project / "compile/sources/text.py", "renamePort",
+                   entity="Text", portDirection="output", portName="Out", newValue="Value", usedIn=uses)
+    assert answer["status"] == "error"
+    assert answer["diagnostic"]["code"] == "write_failed"
+    assert answer["diagnostic"]["changedFiles"] == []
+    assert {name: _text(project, name) for name in names} == before
+    assert not [p for p in project.rglob("tmp*") if p.is_file()]

@@ -279,6 +279,19 @@ def _atomic_write_if_unchanged(file_path: str, *, expected_revision: str, text: 
     Path(temp_name).replace(path)
 
 
+def _staged_copy(file_path: str, text: str) -> str:
+    """`text` written to a new file beside `file_path`, to be put in its place."""
+    path = Path(file_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=str(path.parent), delete=False) as handle:
+        handle.write(text)
+    try:
+        Path(handle.name).chmod(path.stat().st_mode & 0o7777)  # keep the file's own mode
+    except OSError:
+        pass
+    return handle.name
+
+
 def load_module(file_path: str) -> tuple[cst.Module, str, str]:
     raw_source = open(file_path, "r", encoding="utf-8").read()
     issues = detect_dynamic_workflow_identity_issues(raw_source)
@@ -332,10 +345,15 @@ class RewriteEngine:
         self.revision = hashlib.sha256(source_text.encode("utf-8")).hexdigest()
 
     def save(self) -> None:
-        companions = self.changed_companions()
-        # Every other file is checked before any is written: one changed
-        # under the edit leaves them all as they were.
-        for engine in companions:
+        """Write this file and every other the op edited, all or none.
+
+        Each is checked unchanged on disk before any is written, and each
+        is written to a file beside it first; only then are they put in
+        place. Should putting one in place fail, those already in place get
+        their old text back, and the refusal names any it could not restore
+        (`changedFiles`), for the host to undo."""
+        engines = ([self] if self._updated else []) + [e for e in self.changed_companions() if e is not self]
+        for engine in engines:
             on_disk = _source_revision(Path(engine.file_path).read_text(encoding="utf-8"))
             if on_disk != engine.revision:
                 raise RewriteError(
@@ -347,12 +365,45 @@ class RewriteEngine:
                         "actualRevision": on_disk,
                     },
                 )
-        if self._updated:
-            new_source = self.module.code
-            _atomic_write_if_unchanged(self.file_path, expected_revision=self.revision, text=new_source)
-            self.revision = _source_revision(new_source)
-        for engine in companions:
-            engine.save()
+        staged: list[tuple[RewriteEngine, str, str]] = []
+        try:
+            for engine in engines:
+                text = engine.module.code
+                staged.append((engine, _staged_copy(engine.file_path, text), text))
+        except OSError as exc:
+            for _engine, temp, _text in staged:
+                Path(temp).unlink(missing_ok=True)
+            raise RewriteError(
+                message=f"the edit could not be written: {exc}",
+                diagnostic={"code": "write_failed", "file": self.file_path},
+            ) from None
+        placed: list[RewriteEngine] = []
+        for position, (engine, temp, _text) in enumerate(staged):
+            try:
+                Path(temp).replace(engine.file_path)
+            except OSError as exc:
+                for _later, later_temp, _later_text in staged[position:]:
+                    Path(later_temp).unlink(missing_ok=True)
+                unrestored = []
+                for done in placed:
+                    try:
+                        Path(_staged_copy(done.file_path, done.source_text)).replace(done.file_path)
+                    except OSError:
+                        unrestored.append(
+                            {"file": done.file_path, "revision": _source_revision(done.module.code)}
+                        )
+                raise RewriteError(
+                    message=f"{Path(engine.file_path).name} could not be written: {exc}",
+                    diagnostic={
+                        "code": "write_failed",
+                        "file": engine.file_path,
+                        "changedFiles": unrestored,
+                    },
+                ) from None
+            placed.append(engine)
+        for engine, _temp, text in staged:
+            engine.source_text = text
+            engine.revision = _source_revision(text)
 
     def _set_module(self, module: cst.Module) -> None:
         self.module = module
