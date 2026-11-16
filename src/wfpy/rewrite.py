@@ -7,9 +7,8 @@ import hashlib
 import keyword
 import sys
 import tempfile
-from typing import Any, Sequence
 from pathlib import Path
-from typing import Any, Iterable
+from typing import TYPE_CHECKING, Any, Iterable, Sequence
 
 import libcst as cst
 import libcst.matchers as m
@@ -18,6 +17,9 @@ from wfpy.workflow_identity import (
     detect_dynamic_workflow_identity_issues,
     format_dynamic_workflow_identity_error,
 )
+
+if TYPE_CHECKING:
+    from wfpy._project_index import ProjectIndex
 
 __all__ = [
     "RewriteError",
@@ -149,6 +151,170 @@ def _is_connect_call(node: cst.CSTNode) -> bool:
     return (isinstance(func, cst.Name) and func.value == "connect") or (
         isinstance(func, cst.Attribute) and func.attr.value == "connect"
     )
+
+
+def _block_statements(body: Sequence[cst.BaseStatement]) -> Iterable[cst.BaseStatement]:
+    """The statements of `body` and of the blocks of its compound
+    statements (`if`, `try`, `with`, loops), not of the functions and
+    classes it defines."""
+    for stmt in body:
+        if _is_main_guard(stmt):
+            continue  # run as a script only, never when the module is imported
+        yield stmt
+        if isinstance(stmt, (cst.FunctionDef, cst.ClassDef)):
+            continue
+        blocks: list[cst.BaseSuite] = []
+        for field in ("body", "orelse", "finalbody"):
+            value = getattr(stmt, field, None)
+            if isinstance(value, (cst.Else, cst.Finally)):
+                value = value.body
+            elif isinstance(value, cst.If):
+                yield from _block_statements([value])
+                continue
+            if isinstance(value, cst.BaseSuite):
+                blocks.append(value)
+        for handler in getattr(stmt, "handlers", ()) or ():
+            blocks.append(handler.body)
+        for block in blocks:
+            if isinstance(block, cst.IndentedBlock):
+                yield from _block_statements(block.body)
+            elif isinstance(block, cst.SimpleStatementSuite):
+                yield from _block_statements([cst.SimpleStatementLine(body=block.body)])
+
+
+def _is_main_guard(stmt: cst.CSTNode) -> bool:
+    """`if __name__ == "__main__":`"""
+    if not isinstance(stmt, cst.If) or not isinstance(stmt.test, cst.Comparison):
+        return False
+    test = stmt.test
+    if len(test.comparisons) != 1 or not isinstance(test.comparisons[0].operator, cst.Equal):
+        return False
+    sides = [test.left, test.comparisons[0].comparator]
+    return any(isinstance(x, cst.Name) and x.value == "__name__" for x in sides) and any(
+        _string_value(x) == "__main__" for x in sides
+    )
+
+
+def _target_names(target: cst.BaseExpression) -> list[str]:
+    if isinstance(target, cst.Name):
+        return [target.value]
+    if isinstance(target, (cst.Tuple, cst.List)):
+        return [n for element in target.elements for n in _target_names(element.value)]
+    if isinstance(target, cst.StarredElement):
+        return _target_names(target.value)
+    return []
+
+
+def _block_bindings(body: Sequence[cst.BaseStatement]) -> dict[str, tuple[str, cst.CSTNode]]:
+    """Each name `body` binds (its compound statements' blocks included):
+    what binds it -- "function", "class", "import", "assignment" -- and the
+    statement."""
+    names: dict[str, tuple[str, cst.CSTNode]] = {}
+    for stmt in _block_statements(body):
+        if isinstance(stmt, (cst.FunctionDef, cst.ClassDef)):
+            names.setdefault(stmt.name.value, ("function" if isinstance(stmt, cst.FunctionDef) else "class", stmt))
+        elif isinstance(stmt, cst.For):
+            for bound in _target_names(stmt.target):
+                names.setdefault(bound, ("assignment", stmt))
+        elif isinstance(stmt, cst.With):
+            for item in stmt.items:
+                if item.asname is not None:
+                    for bound in _target_names(item.asname.name):
+                        names.setdefault(bound, ("assignment", stmt))
+        elif isinstance(stmt, cst.SimpleStatementLine):
+            for small in stmt.body:
+                if isinstance(small, (cst.Import, cst.ImportFrom)) and not isinstance(small.names, cst.ImportStar):
+                    for alias in small.names:
+                        bound_name = alias.asname.name if alias.asname else alias.name
+                        head: cst.BaseExpression = bound_name
+                        if isinstance(small, cst.Import):
+                            while isinstance(head, cst.Attribute):
+                                head = head.value
+                        if isinstance(head, cst.Name):
+                            names.setdefault(head.value, ("import", stmt))
+                elif isinstance(small, cst.Assign):
+                    for target in small.targets:
+                        for bound in _target_names(target.target):
+                            names.setdefault(bound, ("assignment", stmt))
+                elif isinstance(small, (cst.AnnAssign, cst.AugAssign)):
+                    for bound in _target_names(small.target):
+                        names.setdefault(bound, ("assignment", stmt))
+    return names
+
+
+_EXTERNAL_EXPORTS: dict[str, frozenset[str] | None] = {}
+
+
+def _external_exports(module: str) -> frozenset[str] | None:
+    """The names `from module import *` binds, for a module outside the
+    project: from the module itself when it is already imported (wfpy), else
+    read from its source without running it -- its `__all__`, or its public
+    top-level names. None when it cannot be read."""
+    if module in _EXTERNAL_EXPORTS:
+        return _EXTERNAL_EXPORTS[module]
+    found: frozenset[str] | None = None
+    loaded = sys.modules.get(module)
+    if loaded is not None:
+        names = getattr(loaded, "__all__", None)
+        found = frozenset(str(n) for n in names) if names is not None else frozenset(
+            n for n in vars(loaded) if not n.startswith("_")
+        )
+    else:
+        source = _external_module_source(module)
+        if source is not None:
+            found = _static_exports(source)
+    _EXTERNAL_EXPORTS[module] = found
+    return found
+
+
+def _external_module_source(module: str) -> Path | None:
+    """The `.py` file of an installed module, found the way the import
+    system finds it, without importing it or its packages."""
+    import importlib.machinery
+
+    parts = [part for part in module.split(".") if part]
+    if not parts:
+        return None
+    search: list[str] | None = None
+    for position, part in enumerate(parts):
+        spec = importlib.machinery.PathFinder.find_spec(part, search)
+        if spec is None:
+            return None
+        if position == len(parts) - 1:
+            origin = spec.origin
+            return Path(origin) if origin and origin.endswith(".py") else None
+        locations = spec.submodule_search_locations
+        if not locations:
+            return None
+        search = list(locations)
+    return None
+
+
+def _static_exports(source: Path) -> frozenset[str] | None:
+    try:
+        tree = cst.parse_module(source.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, cst.ParserSyntaxError):
+        return None
+    for stmt in _block_statements(tree.body):
+        if isinstance(stmt, cst.SimpleStatementLine):
+            for small in stmt.body:
+                if (
+                    isinstance(small, cst.Assign)
+                    and any(isinstance(t.target, cst.Name) and t.target.value == "__all__" for t in small.targets)
+                    and isinstance(small.value, (cst.List, cst.Tuple))
+                ):
+                    values = [_string_value(element.value) for element in small.value.elements]
+                    if all(value is not None for value in values):
+                        return frozenset(str(value) for value in values)
+                    return None
+    if any(
+        isinstance(small, cst.ImportFrom) and isinstance(small.names, cst.ImportStar)
+        for stmt in _block_statements(tree.body)
+        if isinstance(stmt, cst.SimpleStatementLine)
+        for small in stmt.body
+    ):
+        return None  # its own star import is not followed
+    return frozenset(name for name in _block_bindings(tree.body) if not name.startswith("_"))
 
 
 class _ReplaceNode(cst.CSTTransformer):
@@ -1173,7 +1339,8 @@ class RewriteEngine:
             written.add(str(key))
         # Where the type comes from is settled before anything is written.
         import_from = str(importFrom).strip() if importFrom else ""
-        if not self._binds(type_name) and not import_from:
+        bound = self._binds(type_name, fn)
+        if not bound and not import_from:
             import_from = self._project_module_of(type_name)
         target_block = self._find_scope_block(body, scope_control, scope_branch)
         target_body = list(target_block.body)
@@ -1187,58 +1354,100 @@ class RewriteEngine:
         self._update_scope_body(fn, scope_control, scope_branch, new_block)
         # A type defined in another module, the way a workflow instance's is,
         # needs its import; one this file already binds does not.
-        if import_from and not self._binds(type_name):
+        if import_from and not bound:
             self._set_module(self._ensure_import(self.module, import_from, [type_name]))
 
     def _module_bindings(self) -> dict[str, tuple[str, cst.CSTNode]]:
         """Each name the top level of this file binds: what binds it (a
-        definition, an import, an assignment) and the statement."""
-        names: dict[str, tuple[str, cst.CSTNode]] = {}
-        for stmt in self.module.body:
-            if isinstance(stmt, (cst.FunctionDef, cst.ClassDef)):
-                names.setdefault(stmt.name.value, ("function" if isinstance(stmt, cst.FunctionDef) else "class", stmt))
-            elif isinstance(stmt, cst.SimpleStatementLine):
-                for small in stmt.body:
-                    if isinstance(small, (cst.Import, cst.ImportFrom)) and not isinstance(small.names, cst.ImportStar):
-                        for alias in small.names:
-                            bound = alias.asname.name if alias.asname else alias.name
-                            if isinstance(bound, cst.Name):
-                                names.setdefault(bound.value, ("import", stmt))
-                            elif isinstance(bound, cst.Attribute) and isinstance(small, cst.Import):
-                                head: cst.BaseExpression = bound
-                                while isinstance(head, cst.Attribute):
-                                    head = head.value
-                                if isinstance(head, cst.Name):
-                                    names.setdefault(head.value, ("import", stmt))
-                    elif isinstance(small, cst.Assign):
-                        for target in small.targets:
-                            if isinstance(target.target, cst.Name):
-                                names.setdefault(target.target.value, ("assignment", stmt))
-                    elif isinstance(small, cst.AnnAssign) and isinstance(small.target, cst.Name):
-                        names.setdefault(small.target.value, ("assignment", stmt))
-        return names
+        definition, an import, an assignment) and the statement -- one under
+        a top-level `try` / `if` (an optional import, `if TYPE_CHECKING:`)
+        included."""
+        return _block_bindings(self.module.body)
 
     def _module_level_names(self) -> set[str]:
         """Names a top-level definition, import or assignment binds in this file."""
         return set(self._module_bindings())
 
-    def _has_star_import(self) -> bool:
-        return any(
-            isinstance(small, cst.ImportFrom) and isinstance(small.names, cst.ImportStar)
-            for stmt in self.module.body
+    def _star_imports(self) -> list[cst.ImportFrom]:
+        return [
+            small
+            for stmt in _block_statements(self.module.body)
             if isinstance(stmt, cst.SimpleStatementLine)
             for small in stmt.body
-        )
+            if isinstance(small, cst.ImportFrom) and isinstance(small.names, cst.ImportStar)
+        ]
 
-    def _binds(self, name: str) -> bool:
-        """Whether `name` is in scope at the top level of this file."""
-        if name in self._module_level_names():
-            return True
-        if self._has_star_import():
+    def _has_star_import(self) -> bool:
+        return bool(self._star_imports())
+
+    def _index(self) -> "ProjectIndex":
+        """The project this file is in, read once per op (a create_node asks
+        it whether a star import binds the type, then where it is defined)."""
+        index = self.__dict__.get("_project_index")
+        if index is None:
             from wfpy._project_index import ProjectIndex
 
-            return ProjectIndex.for_file(self.file_path).binding(Path(self.file_path), name) is not None
+            index = ProjectIndex.for_file(self.file_path)
+            self.__dict__["_project_index"] = index
+        return index
+
+    def _scope_bindings(self, fn: cst.FunctionDef) -> set[str]:
+        """The names workflow `fn`'s body can read besides the module's: its
+        own locals, and the parameters and locals of the functions it is
+        nested in (a factory's `def make(Stage): @workflow def built(): ...`)."""
+        names: set[str] = set(_block_bindings(fn.body.body)) if isinstance(fn.body, cst.IndentedBlock) else set()
+        for outer in self._enclosing_functions(fn):
+            params = outer.params
+            every = [*params.posonly_params, *params.params, *params.kwonly_params]
+            if isinstance(params.star_arg, cst.Param):
+                every.append(params.star_arg)
+            if isinstance(params.star_kwarg, cst.Param):
+                every.append(params.star_kwarg)
+            names.update(p.name.value for p in every)
+            if isinstance(outer.body, cst.IndentedBlock):
+                names.update(_block_bindings(outer.body.body))
+        return names
+
+    def _binds(self, name: str, fn: cst.FunctionDef | None = None) -> bool:
+        """Whether `name` is in scope in this file: at its top level (a star
+        import's names included), a builtin, or -- with `fn`, a workflow --
+        in the functions `fn` is nested in or in `fn` itself."""
+        import builtins
+
+        if name in self._module_level_names() or hasattr(builtins, name):
+            return True
+        if fn is not None and name in self._scope_bindings(fn):
+            return True
+        for star in self._star_imports():
+            if self._star_binds(star, name):
+                return True
         return False
+
+    def _star_binds(self, star: cst.ImportFrom, name: str) -> bool:
+        """Whether `from module import *` binds `name`: for a module of the
+        project, by reading it; for one outside it, by its `__all__` or its
+        public names, read without running it (wfpy's from wfpy itself). A
+        module that cannot be read is taken to bind it, as before any of
+        this was checked."""
+        relative = len(star.relative)
+        module = _dotted_name(star.module) if star.module is not None else ""
+        index = self._index()
+        source: Path | None
+        if relative:
+            base = Path(self.file_path).resolve().parent
+            for _ in range(relative - 1):
+                base = base.parent
+            parts = [part for part in module.split(".") if part]
+            candidate = base.joinpath(*parts) if parts else base
+            source = candidate.with_suffix(".py") if parts and candidate.with_suffix(".py").is_file() else candidate / "__init__.py"
+            if not source.is_file():
+                return True
+        else:
+            source = index.module_file(module, near=Path(self.file_path))
+        if source is not None:
+            return index.binding(source, name) is not None
+        exported = _external_exports(module)
+        return exported is None or name in exported
 
     def _refuse_shadowing(self, fn: cst.FunctionDef, name: str, type_name: str) -> None:
         """Refuse an instance name the workflow's body would make local over
@@ -1304,9 +1513,7 @@ class RewriteEngine:
         """The module this file imports `type_name` from: where the project
         defines that task or workflow, by the shortest package re-exporting
         it, or one this file already imports from."""
-        from wfpy._project_index import ProjectIndex
-
-        index = ProjectIndex.for_file(self.file_path)
+        index = self._index()
         here = Path(self.file_path).resolve()
         found = [d for d in index.definitions_named(type_name) if d.file != here]
         if not found:

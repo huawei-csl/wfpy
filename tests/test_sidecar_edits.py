@@ -1069,3 +1069,107 @@ def test_a_factory_called_past_its_star_args(project: Path) -> None:
     duo = _node(_plans(project, "compile/flow.py"), "duo")
     expressions = {p["name"]: p.get("expression") for p in duo["meta"]["parameters"]}
     assert expressions == {"label": "LABEL", "times": None}
+
+
+# ── What a workflow's node can be made of ─────────────────────────────
+
+
+def _module(tmp_path: Path, text: str, name: str = "m.py") -> Path:
+    path = tmp_path / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+SCOPES = '''from typing import TYPE_CHECKING
+
+from wfpy import workflow
+
+try:
+    from stages import Fast
+except ImportError:
+    Fast = None
+
+if TYPE_CHECKING:
+    from stages import Typed
+
+
+def make(Stage):
+    Local = Stage
+
+    @workflow
+    def built():
+        pass
+
+    return built
+
+
+if __name__ == "__main__":
+    from stages import Script
+'''
+
+
+@pytest.mark.parametrize(
+    "type_name",
+    ["Stage", "Local", "Fast", "Typed"],
+)
+def test_create_node_of_a_type_the_workflows_scopes_bind(tmp_path: Path, type_name: str) -> None:
+    src = _module(tmp_path, SCOPES)
+    answer = _send(src, "createNode", workflow="built", type=type_name, name="node")
+    assert answer["status"] == "ok", answer
+    after = src.read_text(encoding="utf-8")
+    assert f"        node = {type_name}()\n" in after
+    assert after.count("import") == SCOPES.count("import")
+
+
+def test_a_name_bound_only_when_run_as_a_script_is_not_bound(tmp_path: Path) -> None:
+    src = _module(tmp_path, SCOPES)
+    answer = _send(src, "createNode", workflow="built", type="Script", name="node")
+    assert answer["status"] == "error"
+    assert answer["diagnostic"]["code"] == "type_not_found"
+
+
+STAR = '''from typing import Any
+
+from wfpy import *
+
+
+@workflow
+def flow():
+    pass
+'''
+
+
+def test_create_node_of_a_name_a_star_import_from_wfpy_binds(tmp_path: Path) -> None:
+    src = _module(tmp_path, STAR)
+    # The project has a class of the name too: the star import is what binds it here.
+    _module(tmp_path, "from wfpy import task\n\n\n@task\nclass File:\n    pass\n", "mine.py")
+    answer = _send(src, "createNode", workflow="flow", type="File", name="f")
+    assert answer["status"] == "ok", answer
+    after = src.read_text(encoding="utf-8")
+    assert "    f = File()\n" in after
+    assert "import File" not in after
+
+
+def test_create_node_of_a_name_a_star_import_from_wfpy_does_not_bind(tmp_path: Path) -> None:
+    src = _module(tmp_path, STAR)
+    answer = _send(src, "createNode", workflow="flow", type="Nowhere", name="n")
+    assert answer["diagnostic"]["code"] == "type_not_found"
+
+
+def test_create_node_reads_the_project_once(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from wfpy import _project_index
+
+    built: list[Path] = []
+    original = _project_index.ProjectIndex.__init__
+
+    def counting(self: _project_index.ProjectIndex, root: Path) -> None:
+        built.append(root)
+        original(self, root)
+
+    monkeypatch.setattr(_project_index.ProjectIndex, "__init__", counting)
+    flow = project / "compile/flow.py"
+    flow.write_text(_text(project, "compile/flow.py").replace("from wfpy import", "from os.path import *\nfrom wfpy import"), encoding="utf-8")
+    answer = _send(flow, "createNode", workflow="flow", type="Join", name="joined")
+    assert answer["status"] == "ok", answer
+    assert len(built) == 1
