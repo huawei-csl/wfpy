@@ -984,7 +984,7 @@ def test_a_nested_workflows_parameters_tell_a_value_from_a_default(project: Path
     assert child["graph"]["graph"]["meta"] == {
         "factoryName": "pair",
         "parameters": [
-            {"name": "label", "value": "hello", "type": "str"},
+            {"name": "label", "value": "hello", "type": "str", "required": True},
             {"name": "times", "value": 3, "type": "int", "defaultValue": "2"},
         ],
     }

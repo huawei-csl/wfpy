@@ -1029,7 +1029,9 @@ def _graph_factory_parameters(graph: Any) -> list[dict[str, Any]]:
     """The values the factory that built this workflow received ({name,
     value, type}), each with ``defaultValue``, the text of the default its
     signature declares, only where it declares one: a value is what this
-    instance was given, not a default."""
+    instance was given, not a default. One the signature declares with no
+    default says so (``required``): a reader cannot tell a parameter with
+    none from a producer that does not say."""
     builder = getattr(graph, "factory_builder", None)
     definition = None
     if builder is not None:
@@ -1041,10 +1043,13 @@ def _graph_factory_parameters(graph: Any) -> list[dict[str, Any]]:
             definition = None
     signature = _source_text.factory_signature(definition) or []
     defaults = {p["name"]: p["defaultValue"] for p in signature if "defaultValue" in p}
+    declared = {p["name"] for p in signature}
     entries: list[dict[str, Any]] = []
     for item in graph.factory_parameters:
         entry = dict(item)
         if entry.get("name") in defaults:
             entry["defaultValue"] = defaults[entry["name"]]
+        elif entry.get("name") in declared:
+            entry["required"] = True
         entries.append(entry)
     return entries
