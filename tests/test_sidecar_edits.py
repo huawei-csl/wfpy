@@ -1173,3 +1173,216 @@ def test_create_node_reads_the_project_once(project: Path, monkeypatch: pytest.M
     answer = _send(flow, "createNode", workflow="flow", type="Join", name="joined")
     assert answer["status"] == "ok", answer
     assert len(built) == 1
+
+
+# ── Port edits that find what they edit ───────────────────────────────
+
+
+TWO_A = '''from typing import Any
+
+from wfpy import Port, connect, task, workflow
+
+
+@task
+class A:
+    class Ports:
+        In = Port[Any](direction="in")
+        Out = Port[Any](direction="inout")
+        Typed: Port[Any] = Port[Any](direction="out")
+
+
+@workflow
+def flow():
+    a = A()
+    b = A()
+    connect(a.Out, b.In)
+    connect(a.Typed, b.In)
+'''
+
+
+@pytest.mark.parametrize("direction", ["output", "inout", ""])
+def test_rename_port_finds_the_declaration_by_its_name(tmp_path: Path, direction: str) -> None:
+    """An `inout` port renamed as the IDE's "output", or with no direction:
+    the declaration is renamed with its uses, never the uses alone."""
+    src = _module(tmp_path, TWO_A)
+    args = {"entity": "A", "portName": "Out", "newValue": "Res"}
+    if direction:
+        args["portDirection"] = direction
+    answer = _send(src, "renamePort", **args)
+    assert answer["status"] == "ok", answer
+    after = src.read_text(encoding="utf-8")
+    assert 'Res = Port[Any](direction="inout")' in after
+    assert "connect(a.Res, b.In)" in after
+    assert "Out" not in after
+
+
+def test_rename_port_written_with_an_annotation(tmp_path: Path) -> None:
+    src = _module(tmp_path, TWO_A)
+    answer = _send(src, "renamePort", entity="A", portDirection="output", portName="Typed", newValue="Shaped")
+    assert answer["status"] == "ok", answer
+    after = src.read_text(encoding="utf-8")
+    assert 'Shaped: Port[Any] = Port[Any](direction="out")' in after
+    assert "connect(a.Shaped, b.In)" in after
+
+
+def test_update_port_type_written_with_an_annotation(tmp_path: Path) -> None:
+    src = _module(tmp_path, TWO_A)
+    answer = _send(src, "updatePortType", entity="A", portDirection="output", portName="Typed", newValue="int")
+    assert answer["status"] == "ok", answer
+    assert 'Typed: Port[int] = Port[int](direction="out")' in src.read_text(encoding="utf-8")
+
+
+def test_rename_port_named_like_a_direction(tmp_path: Path) -> None:
+    """`direction="out"` is not a use of a port named `out`."""
+    src = _module(tmp_path, TWO_A.replace("Out", "out"))
+    answer = _send(src, "renamePort", entity="A", portDirection="output", portName="out", newValue="res")
+    assert answer["status"] == "ok", answer
+    after = src.read_text(encoding="utf-8")
+    assert 'res = Port[Any](direction="inout")' in after and "connect(a.res, b.In)" in after
+
+
+def test_rename_port_still_refuses_a_name_read_by_getattr(tmp_path: Path) -> None:
+    src = _module(
+        tmp_path,
+        TWO_A.replace(
+            "        Typed: Port[Any] = Port[Any](direction=\"out\")\n",
+            "        Typed: Port[Any] = Port[Any](direction=\"out\")\n\n"
+            "    def peek(self):\n"
+            "        return getattr(self, \"Out\")\n",
+        ),
+    )
+    before = src.read_text(encoding="utf-8")
+    answer = _send(src, "renamePort", entity="A", portDirection="output", portName="Out", newValue="Res")
+    assert answer["status"] == "error"
+    assert answer["diagnostic"]["code"] == "port_used_by_name"
+    assert src.read_text(encoding="utf-8") == before
+
+
+NESTED = '''from typing import Any
+
+from wfpy import File, Port, connect, task, workflow
+
+
+@task
+class A:
+    class Ports:
+        In = Port[Any](direction="in")
+        Out = Port[Any](direction="out")
+
+
+@workflow(
+    inputs={"x": Any},
+    outputs={"y": Any},
+)
+def inner():
+    """Reads x, writes y."""
+    a = A()
+    connect("x", a.In)
+    connect(a.Out, "y")
+
+
+def make(label):
+    @workflow(outputs={"path": Any})
+    def built():
+        a = A()
+        default = File(path="path")
+        connect(a.Out, "path")
+
+    return built
+
+
+@workflow
+def outer():
+    s = inner()
+    m = make("one")()
+    b = A()
+    connect(s.y, b.In)
+    connect(m.path, b.In)
+'''
+
+
+def test_rename_a_workflow_port_follows_this_files_workflows(tmp_path: Path) -> None:
+    src = _module(tmp_path, NESTED)
+    answer = _send(src, "renameNode", workflow="inner", old="y", new="z")
+    assert answer["status"] == "ok", answer
+    after = src.read_text(encoding="utf-8")
+    assert 'outputs={"z": Any},' in after and 'connect(a.Out, "z")' in after
+    assert "connect(s.z, b.In)" in after
+
+
+def test_rename_a_factory_workflow_port_past_a_string_that_is_not_it(tmp_path: Path) -> None:
+    """`File(path="path")` is a keyword's value, not the port `path`; the
+    instance of the factory's workflow in this file follows."""
+    src = _module(tmp_path, NESTED)
+    answer = _send(src, "renameNode", workflow="built", old="path", new="where")
+    assert answer["status"] == "ok", answer
+    after = src.read_text(encoding="utf-8")
+    assert '@workflow(outputs={"where": Any})' in after
+    assert 'default = File(path="path")' in after
+    assert "connect(m.where, b.In)" in after
+
+
+def test_delete_a_workflow_port_this_file_connects_is_refused(tmp_path: Path) -> None:
+    src = _module(tmp_path, NESTED)
+    before = src.read_text(encoding="utf-8")
+    answer = _send(src, "deletePort", workflow="inner", direction="output", portName="y")
+    assert answer["status"] == "error"
+    assert answer["message"] == "port 'y' of 's' is connected in workflow 'outer': delete its connections first"
+    assert src.read_text(encoding="utf-8") == before
+
+
+TWO_FACTORIES = '''from typing import Any
+
+from wfpy import Port, connect, task, workflow
+
+
+@task
+class A:
+    class Ports:
+        In = Port[Any](direction="in")
+        Out = Port[Any](direction="out")
+
+
+def first():
+    @workflow(outputs={"Y": Any})
+    def flow():
+        a = A()
+        connect(a.Out, "Y")
+
+    return flow
+
+
+def second():
+    @workflow(outputs={"Y": Any})
+    def flow():
+        a = A()
+        connect(a.Out, "Y")
+
+    return flow
+'''
+
+
+def test_rename_port_follows_each_workflow_of_a_shared_name(tmp_path: Path) -> None:
+    src = _module(tmp_path, TWO_FACTORIES)
+    answer = _send(src, "renamePort", entity="A", portDirection="output", portName="Out", newValue="Res")
+    assert answer["status"] == "ok", answer
+    after = src.read_text(encoding="utf-8")
+    assert after.count('connect(a.Res, "Y")') == 2 and "a.Out" not in after
+
+
+def test_rename_port_follows_usedIn_naming_a_shared_name(tmp_path: Path) -> None:
+    """The IDE names a workflow by its name only: every `@workflow def` of
+    the name in that file follows, each once."""
+    lib = _module(tmp_path, TWO_FACTORIES.split("\n\n\ndef first")[0] + "\n", "lib.py")
+    flows = _module(
+        tmp_path,
+        "from typing import Any\n\nfrom wfpy import connect, workflow\n\nfrom lib import A\n\n\ndef first"
+        + TWO_FACTORIES.split("\n\n\ndef first", 1)[1],
+        "flows.py",
+    )
+    uses = [{"file": str(flows), "workflow": "flow", "instances": ["a"]}]
+    answer = _send(lib, "renamePort", entity="A", portDirection="output", portName="Out", newValue="Res", usedIn=uses)
+    assert answer["status"] == "ok", answer
+    after = flows.read_text(encoding="utf-8")
+    assert after.count('connect(a.Res, "Y")') == 2 and "a.Out" not in after
+    assert 'Res = Port[Any](direction="out")' in lib.read_text(encoding="utf-8")

@@ -317,6 +317,60 @@ def _static_exports(source: Path) -> frozenset[str] | None:
     return frozenset(name for name in _block_bindings(tree.body) if not name.startswith("_"))
 
 
+def _port_name_strings(node: cst.CSTNode, name: str, everywhere: bool = False) -> list[cst.SimpleString]:
+    """The strings `"name"` under `node` used as a port's name: the second
+    argument of a `getattr`, a dict's key, a subscript's index, an item of
+    what a `for` loops over. With `everywhere`, `node` is an expression
+    that is itself a port's name, and each string in it counts but a
+    keyword's value. A keyword's value elsewhere (`direction="out"`) or a
+    docstring is not a port's name."""
+    found: list[cst.SimpleString] = []
+
+    def keep(expr: cst.CSTNode | None) -> None:
+        if isinstance(expr, cst.SimpleString) and _string_value(expr) == name:
+            found.append(expr)
+
+    def items(expr: cst.BaseExpression) -> None:
+        if isinstance(expr, (cst.Tuple, cst.List, cst.Set)):
+            for element in expr.elements:
+                keep(element.value)
+        else:
+            keep(expr)
+
+    class _Find(cst.CSTVisitor):
+        def visit_Arg(self, arg: cst.Arg) -> bool:
+            # In an expression that is a port's name, a keyword's value
+            # (`make(path="x")`) names something else.
+            return arg.keyword is None or not everywhere
+
+        def visit_SimpleString(self, string: cst.SimpleString) -> None:
+            if everywhere:
+                keep(string)
+
+        def visit_Call(self, call: cst.Call) -> None:
+            if not everywhere and isinstance(call.func, cst.Name) and call.func.value == "getattr" and len(call.args) >= 2:
+                keep(call.args[1].value)
+
+        def visit_DictElement(self, element: cst.DictElement) -> None:
+            if not everywhere:
+                keep(element.key)
+
+        def visit_SubscriptElement(self, element: cst.SubscriptElement) -> None:
+            if not everywhere and isinstance(element.slice, cst.Index):
+                keep(element.slice.value)
+
+        def visit_For(self, loop: cst.For) -> None:
+            if not everywhere:
+                items(loop.iter)
+
+    node.visit(_Find())
+    unique: list[cst.SimpleString] = []
+    for string in found:
+        if not any(string is seen for seen in unique):
+            unique.append(string)
+    return unique
+
+
 class _ReplaceNode(cst.CSTTransformer):
     """Puts `replacement` where `target` (that very node) is."""
 
@@ -500,6 +554,18 @@ class RewriteError(RuntimeError):
 
     def __str__(self) -> str:
         return self.message
+
+
+@dataclasses.dataclass
+class _Use:
+    """A workflow using a class or a workflow whose port an edit follows:
+    the engine of its file, its name, its instances of the edited type, and
+    which `@workflow def` of the name it is (None: every one of the name)."""
+
+    engine: "RewriteEngine"
+    workflow: str
+    instances: list[str]
+    ordinal: int | None = None
 
 
 class RewriteEngine:
@@ -1591,28 +1657,63 @@ class RewriteEngine:
     def _workflow_name_mentions(
         self, fn: cst.FunctionDef, name: str
     ) -> tuple[list[tuple[cst.Call, int]], list[cst.SimpleString]]:
-        """Where workflow `fn`'s body names its port `name` by a string: the
-        `connect(...)` ends that do (the call and which end), and every other
-        string `"name"` (a list a loop connects from, a `getattr`), which an
-        edit of the port cannot follow."""
+        """Where workflow `fn`'s own body names its port `name` by a string:
+        the `connect(...)` ends that do (the call and which end), which an
+        edit of the port follows, and the strings that reach a `connect` end
+        some other way it cannot follow -- a name a loop connects from
+        (`for name in ("Metrics", ...): connect(..., name)`), a variable a
+        connect reads, a string inside a connect's argument. A string that
+        names something else (`File(path="path")`, a docstring, a nested
+        helper's) is not one, nor a `getattr(x, "name")`: that names a port of
+        the instance `x`."""
         ends: list[tuple[cst.Call, int]] = []
-        end_strings: set[int] = set()
-        strings: list[cst.SimpleString] = []
+        others: list[cst.SimpleString] = []
+        end_names: set[str] = set()
+        loops: list[cst.For] = []
+        assigned: list[tuple[str, cst.BaseExpression]] = []
 
-        class _Mentions(cst.CSTVisitor):
+        class _Read(cst.CSTVisitor):
+            def __init__(self) -> None:
+                self._getattr = 0
+
+            def visit_FunctionDef(self, node: cst.FunctionDef) -> bool:
+                return node is fn
+
+            def visit_ClassDef(self, node: cst.ClassDef) -> bool:
+                return False
+
+            def visit_Lambda(self, node: cst.Lambda) -> bool:
+                return False
+
+            def visit_For(self, node: cst.For) -> None:
+                loops.append(node)
+
+            def visit_Assign(self, node: cst.Assign) -> None:
+                for target in node.targets:
+                    if isinstance(target.target, cst.Name):
+                        assigned.append((target.target.value, node.value))
+
             def visit_Call(self, node: cst.Call) -> None:
-                if _is_connect_call(node):
-                    for index, arg in enumerate(node.args[:2]):
-                        if arg.keyword is None and _string_value(arg.value) == name:
-                            ends.append((node, index))
-                            end_strings.add(id(arg.value))
+                if not _is_connect_call(node):
+                    return
+                for index, arg in enumerate(node.args):
+                    if arg.keyword is not None:
+                        continue
+                    if index < 2 and _string_value(arg.value) == name:
+                        ends.append((node, index))
+                    elif index < 2 and isinstance(arg.value, cst.Name):
+                        end_names.add(arg.value.value)
+                    elif not (index < 2 and isinstance(arg.value, cst.SimpleString)):
+                        others.extend(_port_name_strings(arg.value, name, everywhere=True))
 
-            def visit_SimpleString(self, node: cst.SimpleString) -> None:
-                if _string_value(node) == name:
-                    strings.append(node)
-
-        fn.body.visit(_Mentions())
-        return ends, [string for string in strings if id(string) not in end_strings]
+        fn.visit(_Read())
+        for loop in loops:
+            if isinstance(loop.target, cst.Name) and loop.target.value in end_names:
+                others.extend(_port_name_strings(loop.iter, name, everywhere=True))
+        for variable, value in assigned:
+            if variable in end_names:
+                others.extend(_port_name_strings(value, name, everywhere=True))
+        return ends, others
 
     def _refuse_by_name(self, fn: cst.FunctionDef, name: str, others: list[cst.SimpleString], doing: str, fix: str) -> None:
         if not others:
@@ -1797,23 +1898,6 @@ class RewriteEngine:
         renamed = edited.visit(_RenameEnds(edited))
         assert isinstance(renamed, cst.FunctionDef)
         self._replace_node(fn, renamed)
-
-    def _workflow_port_uses(self, fn: cst.FunctionDef, usedIn: Any) -> list[tuple["RewriteEngine", str, list[str]]]:
-        """The workflows the IDE names as using workflow `fn` (`usedIn`)."""
-        found: list[tuple[RewriteEngine, str, list[str]]] = []
-        here = str(Path(self.file_path).resolve())
-        for file, workflow, instances in self._port_uses(usedIn):
-            if str(Path(file).resolve()) == here and workflow == fn.name.value:
-                continue
-            try:
-                engine = self._companion(file)
-            except (OSError, cst.ParserSyntaxError) as exc:
-                raise RewriteError(
-                    message=f"{Path(file).name} cannot be read, so workflow '{workflow}' cannot be followed: {exc}",
-                    diagnostic={"code": "port_uses_unreadable", "file": file, "workflow": workflow},
-                ) from None
-            found.append((engine, workflow, instances))
-        return found
 
     def _is_workflow_port(self, fn: cst.FunctionDef, name: str) -> bool:
         declared = self._workflow_port_names(fn)
@@ -2449,25 +2533,9 @@ class RewriteEngine:
         if direction not in ("input", "output"):
             raise RewriteError(message=f"Invalid port direction: {direction}")
         fn, body = self._get_workflow_body(workflow)
-        # Refused while a workflow using this one (`usedIn`) still names it.
-        for engine, use_workflow, instances in self._workflow_port_uses(fn, usedIn):
-            connected, used = engine.instance_port_mentions(use_workflow, instances, portName)
-            if connected or used:
-                names = [*connected, *(n for n, _ in used if n not in connected)]
-                raise RewriteError(
-                    message=(
-                        f"port '{portName}' of {', '.join(repr(n) for n in names)} is "
-                        f"{'connected' if not used else 'used'} in workflow '{use_workflow}': "
-                        + ("delete its connections first" if not used else "take it out of the workflow first")
-                    ),
-                    diagnostic={
-                        "code": "port_in_use",
-                        "workflow": use_workflow,
-                        "file": engine.file_path,
-                        "portName": portName,
-                        "instances": names,
-                    },
-                )
+        # Refused while a workflow using this one -- of this file, or one the
+        # IDE names (`usedIn`) -- still names it.
+        self._refuse_port_in_use(self._workflow_port_uses(fn, usedIn), portName, entityType=fn.name.value)
         if self.delete_workflow_port_by_decorator(fn, direction, portName):
             return
         # The older form: `<workflow>.outputs = {...}` assigned beside it.
@@ -3053,17 +3121,36 @@ class RewriteEngine:
         self.module.visit(_Find())
         return found
 
-    def _local_instances(self, fn: cst.FunctionDef, type_name: str) -> list[str]:
-        """The names workflow `fn` binds instances of class `type_name` to."""
+    def _workflow_defs_named(self, name: str) -> list[cst.FunctionDef]:
+        """The `@workflow def name` of this file, in the order written (two
+        factories may each build a workflow of the same name)."""
+        return [fn for fn in self._workflow_defs_in_file() if fn.name.value == name]
+
+    def _local_instances(self, fn: cst.FunctionDef, type_name: str, factory: bool = False) -> list[str]:
+        """The names workflow `fn` binds instances of `type_name` to: `x =
+        type_name(...)`, or with `factory`, `x = type_name(...)()` (a node of
+        the workflow factory `type_name` builds)."""
         names: list[str] = []
+
+        def callee(call: cst.BaseExpression) -> str | None:
+            if not isinstance(call, cst.Call):
+                return None
+            func = call.func
+            if factory:
+                if call.args or not isinstance(func, cst.Call):
+                    return None
+                func = func.func
+            return func.value if isinstance(func, cst.Name) else None
 
         class _Find(cst.CSTVisitor):
             def visit_FunctionDef(self, node: cst.FunctionDef) -> bool:
                 return node is fn
 
+            def visit_ClassDef(self, node: cst.ClassDef) -> bool:
+                return False
+
             def visit_Assign(self, node: cst.Assign) -> None:
-                call = node.value
-                if isinstance(call, cst.Call) and isinstance(call.func, cst.Name) and call.func.value == type_name:
+                if callee(node.value) == type_name:
                     for target in node.targets:
                         if isinstance(target.target, cst.Name) and target.target.value not in names:
                             names.append(target.target.value)
@@ -3072,14 +3159,23 @@ class RewriteEngine:
         return names
 
     def instance_port_mentions(
-        self, workflow: str, instances: Iterable[str], port: str, new: str | None = None
+        self,
+        workflow: str,
+        instances: Iterable[str],
+        port: str,
+        new: str | None = None,
+        ordinal: int | None = None,
     ) -> tuple[list[str], list[tuple[str, int | None]]]:
-        """In workflow `workflow`, the mentions of port `port` of `instances`
-        (`x.Port`, `x.Ports.Port`, `getattr(x, "Port")`): the instances a
-        `connect` names it of, and those mentioning it otherwise (with the
-        line). With `new`, every mention is renamed to it."""
-        fn = self._resolve_workflow_def(workflow)
-        if not self._is_workflow_def(fn) or fn.name.value != workflow:
+        """In workflow `workflow` -- the `ordinal`-th `@workflow def` of the
+        name in this file, or every one of the name -- the mentions of port
+        `port` of `instances` (`x.Port`, `x.Ports.Port`, `getattr(x,
+        "Port")`): the instances a `connect` names it of, and those
+        mentioning it otherwise (with the line). With `new`, every mention
+        is renamed to it."""
+        targets = self._workflow_defs_named(workflow)
+        if ordinal is not None:
+            targets = targets[ordinal : ordinal + 1]
+        if not targets:
             raise RewriteError(
                 message=f"no workflow '{workflow}' in {Path(self.file_path).name}",
                 diagnostic={"code": "workflow_not_found", "workflow": workflow, "file": self.file_path},
@@ -3090,11 +3186,14 @@ class RewriteEngine:
         engine = self
 
         class _Mentions(_WorkflowBodyTransformer):
-            def __init__(self) -> None:
-                super().__init__(fn)
+            def __init__(self, root: cst.FunctionDef, rename: bool) -> None:
+                super().__init__(root)
                 self._connects = 0
+                self._rename = rename
 
             def _seen(self, name: str, node: cst.CSTNode) -> None:
+                if self._rename:
+                    return
                 if self._connects > 0:
                     if name not in connected:
                         connected.append(name)
@@ -3118,7 +3217,7 @@ class RewriteEngine:
                     and _string_value(args[1].value) == port
                 ):
                     self._seen(args[0].value.value, original_node)
-                    if new is not None and isinstance(updated_node.args[1].value, cst.SimpleString):
+                    if self._rename and new is not None and isinstance(updated_node.args[1].value, cst.SimpleString):
                         renamed = list(updated_node.args)
                         renamed[1] = renamed[1].with_changes(value=_quoted_like(updated_node.args[1].value, new))
                         return updated_node.with_changes(args=renamed)
@@ -3141,11 +3240,26 @@ class RewriteEngine:
                 if instance is None:
                     return updated_node
                 self._seen(instance, original_node)
-                return updated_node.with_changes(attr=cst.Name(new)) if new is not None else updated_node
+                if self._rename and new is not None:
+                    return updated_node.with_changes(attr=cst.Name(new))
+                return updated_node
 
-        updated = fn.visit(_Mentions())
-        if new is not None and (connected or used) and isinstance(updated, cst.FunctionDef):
-            self._replace_node(fn, updated)
+        # Read on the module as it is, so each mention has its line.
+        for target in targets:
+            target.visit(_Mentions(target, rename=False))
+        if new is not None and (connected or used):
+
+            class _Apply(cst.CSTTransformer):
+                def leave_FunctionDef(
+                    self, original_node: cst.FunctionDef, updated_node: cst.FunctionDef
+                ) -> cst.FunctionDef:
+                    if not any(original_node is target for target in targets):
+                        return updated_node
+                    renamed = updated_node.visit(_Mentions(updated_node, rename=True))
+                    assert isinstance(renamed, cst.FunctionDef)
+                    return renamed
+
+            self._set_module(self.module.visit(_Apply()))
         return connected, used
 
     def _companion(self, file_path: str) -> "RewriteEngine":
@@ -3176,37 +3290,101 @@ class RewriteEngine:
                 uses.append((file, workflow, instances))
         return uses
 
-    def _this_files_uses(self, entity: str) -> list[tuple[str, str, list[str]]]:
-        """This file's workflows with instances of its class `entity`."""
-        uses = []
+    def _this_files_uses(
+        self, type_name: str, factory: bool = False, skip: cst.FunctionDef | None = None
+    ) -> list[_Use]:
+        """This file's workflows with instances of `type_name` (a class, a
+        workflow, or with `factory` the workflow factory `type_name`
+        builds), each by its name and its place among those of the name."""
+        uses: list[_Use] = []
+        seen_names: dict[str, int] = {}
         for fn in self._workflow_defs_in_file():
-            names = self._local_instances(fn, entity)
+            ordinal = seen_names.get(fn.name.value, 0)
+            seen_names[fn.name.value] = ordinal + 1
+            if fn is skip:
+                continue
+            names = self._local_instances(fn, type_name, factory)
             if names:
-                uses.append((self.file_path, fn.name.value, names))
+                uses.append(_Use(self, fn.name.value, names, ordinal))
         return uses
 
-    def _all_port_uses(self, entity: str, usedIn: Any) -> list[tuple["RewriteEngine", str, list[str]]]:
-        """Every workflow an edit of a port of `entity` has to look into: this
-        file's, and those the IDE names (`usedIn`), each once."""
-        seen: dict[tuple[str, str], list[str]] = {}
-        order: list[tuple[str, str]] = []
-        for file, workflow, names in [*self._this_files_uses(entity), *self._port_uses(usedIn)]:
-            key = (str(Path(file).resolve()), workflow)
-            if key not in seen:
-                seen[key] = []
-                order.append(key)
-            seen[key].extend(n for n in names if n not in seen[key])
-        found: list[tuple[RewriteEngine, str, list[str]]] = []
-        for file, workflow in order:
+    def _merged_uses(
+        self, own: list[_Use], usedIn: Any, skip: tuple[str, str] | None = None
+    ) -> list[_Use]:
+        """This file's uses (`own`) and those the IDE names (`usedIn`), each
+        workflow once. `skip` is a (file, workflow) not to follow: the one
+        being edited."""
+        uses = list(own)
+        here = str(Path(self.file_path).resolve())
+        for file, workflow, names in self._port_uses(usedIn):
+            resolved = str(Path(file).resolve())
+            if skip is not None and (resolved, workflow) == (str(Path(skip[0]).resolve()), skip[1]):
+                continue
+            same = [
+                use for use in uses
+                if str(Path(use.engine.file_path).resolve()) == resolved and use.workflow == workflow
+            ]
+            if same:
+                for use in same:
+                    use.instances.extend(n for n in names if n not in use.instances)
+                continue
+            if resolved == here:
+                uses.append(_Use(self, workflow, list(names), None))
+                continue
             try:
                 engine = self._companion(file)
-            except (OSError, cst.ParserSyntaxError) as exc:
+            except (OSError, cst.ParserSyntaxError, RewriteError) as exc:
                 raise RewriteError(
-                    message=f"{Path(file).name} cannot be read, so the connections of workflow '{workflow}' cannot be followed: {exc}",
+                    message=f"{Path(file).name} cannot be read, so workflow '{workflow}' cannot be followed: {exc}",
                     diagnostic={"code": "port_uses_unreadable", "file": file, "workflow": workflow},
                 ) from None
-            found.append((engine, workflow, seen[(file, workflow)]))
-        return found
+            uses.append(_Use(engine, workflow, list(names), None))
+        return uses
+
+    def _all_port_uses(self, entity: str, usedIn: Any) -> list[_Use]:
+        """Every workflow an edit of a port of class `entity` has to look
+        into: this file's, and those the IDE names (`usedIn`), each once."""
+        return self._merged_uses(self._this_files_uses(entity), usedIn)
+
+    def _workflow_port_uses(self, fn: cst.FunctionDef, usedIn: Any) -> list[_Use]:
+        """Every workflow using workflow `fn`: this file's (`x = fn()`, or
+        `x = factory(...)()` for the workflow a factory builds), and those
+        the IDE names (`usedIn`)."""
+        enclosing = self._enclosing_functions(fn)
+        if enclosing:
+            own = self._this_files_uses(enclosing[0].name.value, factory=True, skip=fn)
+        else:
+            own = self._this_files_uses(fn.name.value, skip=fn)
+        return self._merged_uses(own, usedIn, skip=(self.file_path, fn.name.value))
+
+    def _refuse_port_in_use(self, uses: list[_Use], port: str, **diagnostic: Any) -> None:
+        """Refuse while a workflow of `uses` names port `port` of its instances."""
+        for use in uses:
+            connected, used = use.engine.instance_port_mentions(use.workflow, use.instances, port, ordinal=use.ordinal)
+            if not (connected or used):
+                continue
+            names = [*connected, *(n for n, _ in used if n not in connected)]
+            listed = ", ".join(repr(n) for n in names)
+            if used:
+                line = used[0][1]
+                where = f" (line {line} of {Path(use.engine.file_path).name})" if line else ""
+                message = (
+                    f"port '{port}' of {listed} is used in workflow '{use.workflow}'{where}: "
+                    "take it out of the workflow first"
+                )
+            else:
+                message = f"port '{port}' of {listed} is connected in workflow '{use.workflow}': delete its connections first"
+            raise RewriteError(
+                message=message,
+                diagnostic={
+                    "code": "port_in_use",
+                    **diagnostic,
+                    "portName": port,
+                    "workflow": use.workflow,
+                    "file": use.engine.file_path,
+                    "instances": names,
+                },
+            )
 
     def create_entity_port(
         self,
@@ -3286,31 +3464,7 @@ class RewriteEngine:
                 ),
                 diagnostic={"code": "port_in_use", "entityType": entityType, "portName": portName, "action": action_name},
             )
-        for engine, workflow, instances in self._all_port_uses(entityType, usedIn):
-            connected, used = engine.instance_port_mentions(workflow, instances, portName)
-            if connected or used:
-                names = [*connected, *(n for n, _ in used if n not in connected)]
-                listed = ", ".join(repr(n) for n in names)
-                if used:
-                    line = used[0][1]
-                    where = f" (line {line} of {Path(engine.file_path).name})" if line else ""
-                    message = (
-                        f"port '{portName}' of {listed} is used in workflow '{workflow}'{where}: "
-                        "take it out of the workflow first"
-                    )
-                else:
-                    message = f"port '{portName}' of {listed} is connected in workflow '{workflow}': delete its connections first"
-                raise RewriteError(
-                    message=message,
-                    diagnostic={
-                        "code": "port_in_use",
-                        "entityType": entityType,
-                        "portName": portName,
-                        "workflow": workflow,
-                        "file": engine.file_path,
-                        "instances": names,
-                    },
-                )
+        self._refuse_port_in_use(self._all_port_uses(entityType, usedIn), portName, entityType=entityType)
         ports_cls = self._ports_class(cls)
         assert ports_cls is not None
         kept: list[cst.BaseStatement] = []
@@ -3360,12 +3514,13 @@ class RewriteEngine:
             # The diagram draws a workflow's own port as a node of its own,
             # and renames it as one. The workflows that use this one
             # (`usedIn`: their instances of it) have their ends follow.
+            # The uses are found before the edit, on the module as it is;
+            # the rename refuses (port_exists, port_used_by_name) before it
+            # writes anything, and the uses follow only once it has.
             uses = self._workflow_port_uses(fn, usedIn)
-            for engine, use_workflow, instances in uses:
-                engine.instance_port_mentions(use_workflow, instances, old)
-            self.rename_workflow_port(self._resolve_workflow_def(fn.name.value), old, new)
-            for engine, use_workflow, instances in uses:
-                engine.instance_port_mentions(use_workflow, instances, old, new)
+            self.rename_workflow_port(fn, old, new)
+            for use in uses:
+                use.engine.instance_port_mentions(use.workflow, use.instances, old, new, ordinal=use.ordinal)
             return
 
         class _RenameNodeTransformer(_WorkflowBodyTransformer):
@@ -3467,11 +3622,7 @@ class RewriteEngine:
                 message=f"'{entity}' has a port '{new}' already",
                 diagnostic={"code": "port_exists", "entityType": entity, "port": new},
             )
-        # Every workflow is looked into before anything is renamed.
         uses = self._all_port_uses(entity, usedIn)
-        for engine, workflow, instances in uses:
-            _connected, used = engine.instance_port_mentions(workflow, instances, old)
-            del used  # each mention is one the rename follows
         class_strings = self._class_string_mentions(cls, old)
         if class_strings:
             line = self._line_of(class_strings[0])
@@ -3482,51 +3633,53 @@ class RewriteEngine:
                 ),
                 diagnostic={"code": "port_used_by_name", "entityType": entity, "port": old},
             )
-        transformer = _PortRenameTransformer(entity, direction, old, new)
-        self._set_module(self.module.visit(transformer))
-        for engine, workflow, instances in uses:
-            engine.instance_port_mentions(workflow, instances, old, new)
+        # The declaration first, found by its name (`direction` only tells
+        # two of the name apart): a use renamed without it would name a port
+        # the class no longer has.
+        transformer = _PortRenameTransformer(cls, direction, old, new)
+        renamed = self.module.visit(transformer)
+        if not transformer.found:
+            raise RewriteError(
+                message=f"port '{old}' of '{entity}' is not declared in its `class Ports`, so it cannot be renamed here",
+                diagnostic={"code": "port_not_found", "entityType": entity, "port": old},
+            )
+        self._set_module(renamed)
+        for use in uses:
+            use.engine.instance_port_mentions(use.workflow, use.instances, old, new, ordinal=use.ordinal)
 
     def _class_string_mentions(self, cls: cst.ClassDef, port: str) -> list[cst.SimpleString]:
-        """Strings `"port"` in class `cls` other than its actions' `consumes`
-        / `produces` keys and the keys of the dicts its actions return,
-        which a rename follows."""
+        """Strings `"port"` class `cls` uses as a port's name and a rename
+        does not follow: a `getattr(self, "port")`, a key of a dict or of a
+        subscript (`tokens["port"]`), a name a `for` loops over. Its
+        actions' `consumes` / `produces` keys and the keys of the dicts they
+        return are followed; a string that is not a port's name (the
+        `direction="out"` of a declaration, a docstring) is not one."""
         followed: set[int] = set()
-        strings: list[cst.SimpleString] = []
-
-        class _Find(cst.CSTVisitor):
-            def __init__(self) -> None:
-                self._returns = 0
-                self._in_action = 0
-
-            def visit_FunctionDef(self, node: cst.FunctionDef) -> None:
-                if any(_decorator_name(d) == "action" for d in node.decorators) or node.name.value == "action":
-                    self._in_action += 1
-
-            def leave_FunctionDef(self, original_node: cst.FunctionDef) -> None:
-                if any(_decorator_name(d) == "action" for d in original_node.decorators) or original_node.name.value == "action":
-                    self._in_action -= 1
-
-            def visit_Decorator(self, node: cst.Decorator) -> None:
-                if _decorator_name(node) == "action" and isinstance(node.decorator, cst.Call):
-                    for arg in node.decorator.args:
+        for stmt in cls.body.body:
+            if not isinstance(stmt, cst.FunctionDef):
+                continue
+            is_action = any(_decorator_name(d) == "action" for d in stmt.decorators)
+            for dec in stmt.decorators:
+                if _decorator_name(dec) == "action" and isinstance(dec.decorator, cst.Call):
+                    for arg in dec.decorator.args:
                         if arg.keyword is not None and arg.keyword.value in ("consumes", "produces") and isinstance(arg.value, cst.Dict):
-                            for element in arg.value.elements:
-                                if isinstance(element, cst.DictElement):
-                                    followed.add(id(element.key))
+                            followed.update(
+                                id(el.key) for el in arg.value.elements if isinstance(el, cst.DictElement)
+                            )
+            if is_action:
 
-            def visit_Return(self, node: cst.Return) -> None:
-                if self._in_action and isinstance(node.value, cst.Dict):
-                    for element in node.value.elements:
-                        if isinstance(element, cst.DictElement):
-                            followed.add(id(element.key))
+                class _Returns(cst.CSTVisitor):
+                    def visit_FunctionDef(self, node: cst.FunctionDef) -> bool:
+                        return node is stmt
 
-            def visit_SimpleString(self, node: cst.SimpleString) -> None:
-                if _string_value(node) == port:
-                    strings.append(node)
+                    def visit_Return(self, node: cst.Return) -> None:
+                        if isinstance(node.value, cst.Dict):
+                            followed.update(
+                                id(el.key) for el in node.value.elements if isinstance(el, cst.DictElement)
+                            )
 
-        cls.visit(_Find())
-        return [string for string in strings if id(string) not in followed]
+                stmt.visit(_Returns())
+        return [string for string in _port_name_strings(cls, port) if id(string) not in followed]
 
     def update_port_type(
         self,
@@ -3550,7 +3703,7 @@ class RewriteEngine:
                 message=f"'{entity}' has no port '{name}'",
                 diagnostic={"code": "port_not_found", "entityType": entity, "port": name},
             )
-        transformer = _PortTypeTransformer(entity, direction, name, value)
+        transformer = _PortTypeTransformer(cls, direction, name, value)
         updated = self.module.visit(transformer)
         if not transformer.found:
             raise RewriteError(
@@ -3738,32 +3891,66 @@ class RewriteEngine:
 
 
 class _PortBaseTransformer(cst.CSTTransformer):
-    def __init__(self, entity: str, direction: str, port_name: str) -> None:
-        self.entity = entity
-        self.direction = self._normalize_direction(direction)
+    """Edits the declaration of port `port_name` in the `class Ports` of the
+    class `target` (the node itself: a file may have two classes of the
+    name, each a factory's). The declaration is found by its name, as
+    `Name = Port[...](...)` or `Name: ... = ...`; `direction` only tells two
+    declarations of the name apart, and never skips the one there is."""
+
+    def __init__(self, target: cst.ClassDef, direction: str, port_name: str) -> None:
+        self.target = target
+        self.entity = target.name.value
+        self.direction = _PORT_DIRECTIONS.get(direction, direction) if direction else ""
         self.port_name = port_name
         self._in_entity = False
         self._in_ports_class = False
         self._action_depth = 0
         self.found = False
+        self._chosen = self._declarations()
 
-    def _normalize_direction(self, direction: str) -> str:
-        mapping = {
-            "input": "in",
-            "output": "out",
-            "inout": "inout",
-            "in": "in",
-            "out": "out",
-        }
-        return mapping.get(direction, direction)
+    def _declarations(self) -> set[int]:
+        """The declarations of the port: by name; by direction too where the
+        name is declared more than once."""
+        ports = next(
+            (stmt for stmt in self.target.body.body if isinstance(stmt, cst.ClassDef) and stmt.name.value == "Ports"),
+            None,
+        )
+        declared: list[cst.BaseSmallStatement] = []
+        for line in ports.body.body if ports is not None else []:
+            if isinstance(line, cst.SimpleStatementLine):
+                for small in line.body:
+                    if self._declares(small):
+                        declared.append(small)
+        if len(declared) > 1 and self.direction:
+            by_direction = [small for small in declared if self._direction_of(small) == self.direction]
+            if by_direction:
+                declared = by_direction
+        return {id(small) for small in declared}
+
+    def _declares(self, node: cst.CSTNode) -> bool:
+        if isinstance(node, cst.Assign):
+            targets = [t.target for t in node.targets]
+        elif isinstance(node, cst.AnnAssign):
+            targets = [node.target]
+        else:
+            return False
+        return any(isinstance(t, cst.Name) and t.value == self.port_name for t in targets)
+
+    @staticmethod
+    def _direction_of(node: cst.BaseSmallStatement) -> str:
+        value = getattr(node, "value", None)
+        if isinstance(value, cst.Call):
+            for arg in value.args:
+                if arg.keyword is not None and arg.keyword.value == "direction":
+                    return _string_value(arg.value) or ""
+        return "inout"
 
     def visit_ClassDef(self, node: cst.ClassDef) -> bool:
         if not self._in_entity:
-            if node.name.value == self.entity:
+            if node is self.target:
                 self._in_entity = True
                 return True
-            return False
-
+            return True  # the target may be nested (a factory's class)
         if node.name.value == "Ports":
             self._in_ports_class = True
             return True
@@ -3772,50 +3959,36 @@ class _PortBaseTransformer(cst.CSTTransformer):
     def leave_ClassDef(self, original_node: cst.ClassDef, updated_node: cst.ClassDef) -> cst.ClassDef:
         if original_node.name.value == "Ports" and self._in_ports_class:
             self._in_ports_class = False
-        if original_node.name.value == self.entity:
+        if original_node is self.target:
             self._in_entity = False
         return updated_node
 
-    def _matches_port_assign(self, node: cst.Assign) -> bool:
-        if not self._in_ports_class:
-            return False
-        if not node.targets:
-            return False
-        target = node.targets[0].target
-        if not isinstance(target, cst.Name):
-            return False
-        if target.value != self.port_name:
-            return False
-        value = node.value
-        if not isinstance(value, cst.Call):
-            return False
-        if not isinstance(value.func, cst.Subscript):
-            return False
-        if not isinstance(value.func.value, cst.Name):
-            return False
-        if value.func.value.value != "Port":
-            return False
-        # direction filter if explicitly provided
-        for arg in value.args:
-            if arg.keyword and arg.keyword.value == "direction":
-                if isinstance(arg.value, cst.SimpleString):
-                    if arg.value.evaluated_value != self.direction:
-                        return False
-        return True
+    def _matches_port_assign(self, node: cst.CSTNode) -> bool:
+        return self._in_ports_class and id(node) in self._chosen
 
 
 class _PortRenameTransformer(_PortBaseTransformer):
-    def __init__(self, entity: str, direction: str, port_name: str, new_name: str) -> None:
-        super().__init__(entity, direction, port_name)
+    def __init__(self, target: cst.ClassDef, direction: str, port_name: str, new_name: str) -> None:
+        super().__init__(target, direction, port_name)
         self.new_name = new_name
 
     def leave_Assign(self, original_node: cst.Assign, updated_node: cst.Assign) -> cst.Assign:
-        if not self._matches_port_assign(updated_node):
+        if not self._matches_port_assign(original_node):
             return updated_node
         self.found = True
-        return updated_node.with_changes(
-            targets=[cst.AssignTarget(target=cst.Name(self.new_name))]
-        )
+        targets = [
+            t.with_changes(target=cst.Name(self.new_name))
+            if isinstance(t.target, cst.Name) and t.target.value == self.port_name
+            else t
+            for t in updated_node.targets
+        ]
+        return updated_node.with_changes(targets=targets)
+
+    def leave_AnnAssign(self, original_node: cst.AnnAssign, updated_node: cst.AnnAssign) -> cst.AnnAssign:
+        if not self._matches_port_assign(original_node):
+            return updated_node
+        self.found = True
+        return updated_node.with_changes(target=cst.Name(self.new_name))
 
     def visit_FunctionDef(self, node: cst.FunctionDef) -> bool:
         if self._in_entity and not self._in_ports_class and (
@@ -3864,6 +4037,7 @@ class _PortRenameTransformer(_PortBaseTransformer):
         return mapping.with_changes(elements=elements)
 
     def leave_Attribute(self, original_node: cst.Attribute, updated_node: cst.Attribute) -> cst.Attribute:
+        """`Entity.Old`, read off the class."""
         if isinstance(original_node.value, cst.Name):
             if original_node.value.value == self.entity and original_node.attr.value == self.port_name:
                 return updated_node.with_changes(attr=cst.Name(self.new_name))
@@ -3871,20 +4045,35 @@ class _PortRenameTransformer(_PortBaseTransformer):
 
 
 class _PortTypeTransformer(_PortBaseTransformer):
-    def __init__(self, entity: str, direction: str, port_name: str, new_type: str) -> None:
-        super().__init__(entity, direction, port_name)
+    def __init__(self, target: cst.ClassDef, direction: str, port_name: str, new_type: str) -> None:
+        super().__init__(target, direction, port_name)
         self.new_type = new_type
 
-    def leave_Assign(self, original_node: cst.Assign, updated_node: cst.Assign) -> cst.Assign:
-        if not self._matches_port_assign(updated_node):
-            return updated_node
-        value = updated_node.value
-        if not isinstance(value, cst.Call):
-            return updated_node
-        if not isinstance(value.func, cst.Subscript):
-            return updated_node
-        new_func = value.func.with_changes(
+    def _retyped(self, node: cst.BaseExpression | None) -> cst.BaseExpression | None:
+        """`Port[T](...)` (or the annotation `Port[T]`) with the new type."""
+        func = node.func if isinstance(node, cst.Call) else node
+        if not isinstance(func, cst.Subscript) or _dotted_name(func.value).rsplit(".", 1)[-1] != "Port":
+            return None
+        new_func = func.with_changes(
             slice=[cst.SubscriptElement(slice=cst.Index(value=_parse_user_expression(self.new_type, f"the type of port '{self.port_name}'")))]
         )
         self.found = True
-        return updated_node.with_changes(value=value.with_changes(func=new_func))
+        return node.with_changes(func=new_func) if isinstance(node, cst.Call) else new_func
+
+    def leave_Assign(self, original_node: cst.Assign, updated_node: cst.Assign) -> cst.Assign:
+        if not self._matches_port_assign(original_node):
+            return updated_node
+        value = self._retyped(updated_node.value)
+        return updated_node.with_changes(value=value) if value is not None else updated_node
+
+    def leave_AnnAssign(self, original_node: cst.AnnAssign, updated_node: cst.AnnAssign) -> cst.AnnAssign:
+        if not self._matches_port_assign(original_node):
+            return updated_node
+        annotation = self._retyped(updated_node.annotation.annotation)
+        value = self._retyped(updated_node.value)
+        changes: dict[str, Any] = {}
+        if annotation is not None:
+            changes["annotation"] = updated_node.annotation.with_changes(annotation=annotation)
+        if value is not None:
+            changes["value"] = value
+        return updated_node.with_changes(**changes) if changes else updated_node
