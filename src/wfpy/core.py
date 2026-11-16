@@ -1690,6 +1690,7 @@ def _process_workflow_function(
         if _graph_context._current_graph is not None:
             if wf_def.factory_name:
                 _graph_context._current_graph.factory_name = wf_def.factory_name
+                _graph_context._current_graph.factory_builder = wf_def.builder_fn
             if wf_def.factory_parameters:
                 _graph_context._current_graph.factory_parameters = copy.deepcopy(wf_def.factory_parameters)
 

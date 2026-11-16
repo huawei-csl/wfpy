@@ -27,6 +27,8 @@ import os
 from pathlib import Path
 from typing import Iterator
 
+from wfpy._source_text import signature_parameters
+
 # Folders that hold no project source: environments, caches, build output.
 _SKIP_DIRS = {
     "__pycache__",
@@ -513,32 +515,6 @@ def _class_parameters(
     return found
 
 
-def _signature_parameters(text: str, fn: ast.FunctionDef) -> list[dict[str, str]]:
-    """A function's parameters as written: name, annotation, default."""
-    args = fn.args
-    positional = [*args.posonlyargs, *args.args]
-    defaults: list[ast.expr | None] = [None] * (len(positional) - len(args.defaults)) + list(
-        args.defaults
-    )
-    entries: list[tuple[ast.arg, ast.expr | None]] = [
-        *zip(positional, defaults),
-        *zip(args.kwonlyargs, args.kw_defaults),
-    ]
-    found: list[dict[str, str]] = []
-    for arg, default in entries:
-        if arg.arg in ("self", "cls"):
-            continue
-        entry = {"name": arg.arg}
-        annotation = _segment(text, arg.annotation)
-        if annotation:
-            entry["type"] = annotation
-        default_text = _segment(text, default)
-        if default_text is not None:
-            entry["defaultValue"] = default_text
-        found.append(entry)
-    return found
-
-
 def resolve_type(file_path: str, type_name: str) -> tuple[ProjectIndex, Definition, ast.stmt]:
     """The task or workflow ``type_name`` names in ``file_path``: the one the
     module binds, else the one the project defines (one, or a refusal)."""
@@ -601,7 +577,7 @@ def type_parameters(file_path: str, type_name: str) -> dict[str, object]:
             if factory_workflow(node)
             else "function"
         )
-        parameters = _signature_parameters(text, node)
+        parameters = signature_parameters(text, node)
     else:
         raise RewriteError(
             message=f"'{type_name}' is not a task or a workflow",

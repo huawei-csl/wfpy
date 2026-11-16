@@ -12,6 +12,20 @@ All notable changes to wfpy are documented here. The format follows
   and the folders its installed packages come from. An IDE configures its
   Python language server from the answer, so a workflow that runs is not
   drawn with its imports underlined because the editor looks elsewhere.
+- The graph export says what the source wrote beside what it evaluated to.
+  A node's parameter carries `expression`, the text of its keyword in the
+  call that made the node (`File(path=TESTBENCH)`, not the `File(...)` it
+  built); a node of a workflow a factory builds (`x = factory(...)()`) has
+  the factory's parameters, with the call's text, and the factory's
+  signature as `definitionParams` (`defaultValue` only where it declares
+  one). A nested workflow's `graph.meta.parameters` add `defaultValue` the
+  same way: `value` is what this instance was given, not a default.
+- An annotation argument's `value` is a Python expression, the decorator's
+  own text where it writes the argument (`network=NETWORK`), and an
+  annotation or argument wfpy works out (the `viewer` a source or a
+  StreamBlocks class gets, a source's `port`, a viewer's default `action`)
+  is marked `"derived": true`, so writing it back does not add what the
+  class never said.
 
 ### Fixed
 - The run's live files are written whole: `run.wf-viewer.live.json`, the

@@ -163,11 +163,13 @@ def _send(file: Path, op: str, **args: object) -> dict:
     }
 
 
-def _plans(root: Path, file: str, workflow: str | None = None) -> dict:
+def _plans(root: Path, file: str, workflow: str | None = None, hierarchy: bool = False) -> dict:
     """`wfpy plan <file> --format graph`, as the IDE runs it, in a fresh interpreter."""
     command = [sys.executable, "-m", "wfpy.cli", "plan", file, "--format", "graph"]
     if workflow:
         command += ["--workflow", workflow]
+    if hierarchy:
+        command += ["--hierarchy"]
     env = {**os.environ, "PYTHONPATH": str(REPO / "src")}
     done = subprocess.run(command, cwd=root, capture_output=True, text=True, env=env, check=False)
     assert done.returncode == 0, done.stderr[-2000:]
@@ -857,3 +859,146 @@ def test_delete_a_workflow_port_a_parent_connects_is_refused(project: Path) -> N
     assert answer["status"] == "error"
     assert answer["message"] == "port 'In' of 'duo' is connected in workflow 'flow': delete its connections first"
     assert _text(project, "compile/workflows/pair.py") == before
+
+
+# ── S12-S14 what the export says the source wrote ─────────────────────
+
+NET = """from wfpy import File, Port, source, streamblocks, viewer
+
+NETWORK = "designs/top.py"
+
+
+@streamblocks(facade="instance", network=NETWORK)
+class Net:
+    class Ports:
+        In = Port[str](direction="in")
+        Out = Port[str](direction="out")
+
+
+@source(viewType="vscode.markdown.preview.editor")
+class Doc:
+    path: File
+
+    class Ports:
+        Out = Port[File](direction="out")
+
+
+@viewer(inputs=["In"])
+class Show:
+    class Ports:
+        In = Port[str](direction="in")
+"""
+
+NET_FLOW = """from wfpy import File, connect, workflow
+
+from compile.sources.net import Doc, Net, Show
+
+README = "README.md"
+
+
+@workflow(inputs={"In": str})
+def net_flow():
+    doc = Doc(path=File(path=README))
+    net = Net()
+    show = Show()
+    connect("In", net.In)
+    connect(net.Out, show.In)
+"""
+
+
+def _node(exported: dict, label: str) -> dict:
+    return next(n for n in exported["graph"]["nodes"] if n["label"] == label)
+
+
+def _annotation(node: dict, name: str) -> dict:
+    return next(a for a in node["meta"]["definitionAnnotations"] if a["name"] == name)
+
+
+def test_annotation_values_are_python_and_say_what_wfpy_works_out(project: Path) -> None:
+    (project / "compile/sources/net.py").write_text(NET, encoding="utf-8")
+    (project / "compile/net_flow.py").write_text(NET_FLOW, encoding="utf-8")
+    (project / "README.md").write_text("hi\n", encoding="utf-8")
+    exported = _plans(project, "compile/net_flow.py")
+
+    net = _node(exported, "net")
+    # As the decorator writes them: `NETWORK`, not its value; "instance" quoted.
+    assert _annotation(net, "streamblocks") == {
+        "name": "streamblocks",
+        "arguments": [{"name": "facade", "value": '"instance"'}, {"name": "network", "value": "NETWORK"}],
+    }
+    # The opener a streamblocks class gets, which the class does not write.
+    assert _annotation(net, "viewer")["derived"] is True
+
+    doc = _node(exported, "doc")
+    assert _annotation(doc, "viewer")["derived"] is True
+    assert _annotation(doc, "source") == {
+        "name": "source",
+        "arguments": [{"name": "port", "value": '"Out"', "derived": True}],
+    }
+
+    show = _annotation(_node(exported, "show"), "viewer")
+    assert "derived" not in show
+    assert show["arguments"] == [
+        {"name": "action", "value": '"open"', "derived": True},
+        {"name": "inputs", "value": '["In"]'},
+    ]
+
+
+def test_a_parameter_carries_the_text_the_call_wrote(project: Path) -> None:
+    (project / "compile/sources/net.py").write_text(NET, encoding="utf-8")
+    (project / "compile/net_flow.py").write_text(NET_FLOW, encoding="utf-8")
+    exported = _plans(project, "compile/net_flow.py")
+    (path,) = _node(exported, "doc")["meta"]["parameters"]
+    assert path["expression"] == "File(path=README)"
+    assert path["value"].startswith("File(path='README.md'")
+
+    front = _node(_plans(project, "compile/flow.py"), "front")
+    assert front["meta"]["parameters"] == [
+        {"name": "text", "kind": "value", "type": "str", "value": "'hello'", "expression": "LABEL"},
+    ]
+
+
+def test_a_node_of_a_factory_made_workflow_carries_the_factory_call(project: Path) -> None:
+    duo = _node(_plans(project, "compile/flow.py"), "duo")
+    assert duo["meta"]["parameters"] == [
+        # What the factory received, and the text of the call.
+        {"name": "label", "kind": "value", "type": "str", "value": "'hello'", "expression": "LABEL"},
+        # `times` is not read by the workflow, so wfpy has no value for it.
+        {"name": "times", "kind": "value", "type": "int", "expression": "3"},
+    ]
+    assert duo["meta"]["definitionParams"] == [
+        {"name": "label", "kind": "value", "type": "str"},
+        {"name": "times", "kind": "value", "type": "int", "defaultValue": "2"},
+    ]
+
+
+def test_a_nested_workflows_parameters_tell_a_value_from_a_default(project: Path) -> None:
+    pair = project / "compile/workflows/pair.py"
+    pair.write_text(
+        _text(project, "compile/workflows/pair.py").replace("Text(text=label)", "Text(text=label * times)"),
+        encoding="utf-8",
+    )
+    exported = _plans(project, "compile/flow.py", hierarchy=True)
+    (child,) = exported["hierarchy"]["children"]
+    assert child["path"] == ["duo"]
+    assert child["graph"]["graph"]["meta"] == {
+        "factoryName": "pair",
+        "parameters": [
+            {"name": "label", "value": "hello", "type": "str"},
+            {"name": "times", "value": 3, "type": "int", "defaultValue": "2"},
+        ],
+    }
+    first = _node(child["graph"], "first")
+    assert first["meta"]["parameters"][0]["expression"] == "label * times"
+    positional = _plans(project, "compile/flow.py")
+    assert _node(positional, "duo")["meta"]["parameters"][1]["value"] == "3"
+
+
+def test_a_factory_called_with_positional_arguments(project: Path) -> None:
+    flow = project / "compile/flow.py"
+    flow.write_text(
+        _text(project, "compile/flow.py").replace("pair(label=LABEL, times=3)()", "pair(LABEL, 3)()"),
+        encoding="utf-8",
+    )
+    duo = _node(_plans(project, "compile/flow.py"), "duo")
+    assert [p.get("expression") for p in duo["meta"]["parameters"]] == ["LABEL", "3"]

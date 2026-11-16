@@ -798,6 +798,8 @@ def _build_workflow_graph(wf_def: WorkflowDef) -> WorkflowGraph:
     """Execute a @workflow builder function to produce its WorkflowGraph."""
     graph = WorkflowGraph(name=wf_def.name)
     graph.factory_name = wf_def.factory_name
+    if wf_def.factory_name:
+        graph.factory_builder = wf_def.builder_fn
     if wf_def.factory_parameters:
         graph.factory_parameters = copy.deepcopy(wf_def.factory_parameters)
     graph.input_names = dict(wf_def.input_names)
