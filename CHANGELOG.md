@@ -26,8 +26,27 @@ All notable changes to wfpy are documented here. The format follows
   StreamBlocks class gets, a source's `port`, a viewer's default `action`)
   is marked `"derived": true`, so writing it back does not add what the
   class never said.
+- The sidecar answers `portUses {entity}`: the project's workflows that
+  instantiate a class (or the workflow a factory builds), found by its
+  definition, read without running anything; `renamePort`,
+  `deleteEntityPort`, `deletePort` and a workflow port's rename take that
+  `usedIn` and follow or refuse every file (features `portUsesAcrossFiles`,
+  `portUsesQuery`). `typeParameters {type}` answers the parameters a type
+  takes. `createNode` takes `expressions`, written verbatim.
 
 ### Fixed
+- Diagram edits leave the project importable. `createPort` adds the port
+  to `@workflow(inputs=, outputs=)` (it replaced the module with the
+  workflow's body); `deletePort` and renaming a workflow's own port edit
+  that dict and its connects, and refuse, naming the line, a port used by
+  name elsewhere. `renamePort` / `updatePortType` take the IDE's arguments.
+  `deleteEntityPort` refuses a port an action or a workflow uses. Ports are
+  written with their direction. An op on a workflow a factory builds edits
+  the inner `@workflow`. `createNode` imports a type the module does not,
+  from the package that re-exports it, and refuses a name that would hide
+  another. A class task's new parameter is an annotated field, never an
+  `__init__`; an annotation edit imports its decorator. A value that is not
+  Python is refused as `invalid_expression`.
 - The run's live files are written whole: `run.wf-viewer.live.json`, the
   agent-context and context live files, and the final overlay, queue trace
   and run record go to a sibling file renamed over the target, so a reader
