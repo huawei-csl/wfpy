@@ -1,0 +1,859 @@
+"""Diagram edits on a project laid out as real ones are.
+
+A package of task classes re-exported from its `__init__.py`, a workflow
+factory (`def pair(...): @workflow def pair(): ...; return pair`), and a flow
+that imports both: what the IDE edits every day. Each test sends the request
+the IDE sends, reads the file the sidecar wrote, and checks it still plans.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+from wfpy.sidecar import FEATURES, SUPPORTED_OPS, _handle_request
+
+REPO = Path(__file__).resolve().parents[1]
+
+FILES = {
+    "compile/__init__.py": "",
+    "compile/agentic/__init__.py": "",
+    "compile/workflows/__init__.py": "",
+    "compile/other/__init__.py": "",
+    "compile/sources/__init__.py": (
+        'from .text import Text\nfrom .join import Join\n\n__all__ = ["Join", "Text"]\n'
+    ),
+    "compile/sources/text.py": '''from wfpy import Port, action, guard, task
+
+
+@task
+class Text:
+    """A string, emitted once."""
+
+    text: str              # parameter
+    emitted: bool = False  # state
+
+    class Ports:
+        Out = Port[str](direction="out")
+
+    @action(consumes={}, produces={"Out": 1})
+    @guard(lambda self: not self.emitted)
+    def emit(self) -> dict:
+        self.emitted = True
+        return {"Out": self.text}
+''',
+    "compile/sources/join.py": """from wfpy import Port, action, task
+
+
+@task
+class Join:
+    class Ports:
+        Left = Port[str](direction="in")
+        Right = Port[str](direction="in")
+        Out = Port[str](direction="out")
+
+    @action(consumes={"Left": 1, "Right": 1}, produces={"Out": 1})
+    def join(self, left, right) -> dict:
+        return {"Out": left + right}
+""",
+    "compile/other/text.py": '''from wfpy import Port, connect, task, workflow
+
+
+@task
+class Text:
+    """Another class of the same name."""
+
+    class Ports:
+        Out = Port[str](direction="out")
+
+
+@workflow(outputs={"Out": str})
+def other():
+    t = Text()
+    connect(t.Out, "Out")
+''',
+    "compile/agentic/gate.py": """from wfpy import Port, action, task
+
+
+@task
+class Gate:
+    class Ports:
+        In = Port[str](direction="in")
+
+    @action(consumes={"In": 1}, produces={})
+    def hold(self, value) -> None:
+        pass
+""",
+    "compile/workflows/pair.py": '''"""A workflow factory."""
+from wfpy import connect, workflow
+
+from compile.sources import Join, Text
+
+
+def pair(label: str, times: int = 2):
+    """Builds `pair` for a label."""
+
+    @workflow(
+        inputs={"In": str},
+        outputs={"Out": str},
+    )
+    def pair():
+        """The inner workflow."""
+        first = Text(text=label)
+        joined = Join()
+
+        connect("In", joined.Left)
+        connect(first.Out, joined.Right)
+        connect(joined.Out, "Out")
+
+    return pair
+''',
+    "compile/flow.py": '''"""A flow, run by hand."""
+
+import os
+
+from wfpy import connect, workflow
+
+from compile.sources import Text
+from compile.workflows.pair import pair
+
+LABEL = os.environ.get("LABEL", "hello")
+
+
+@workflow(outputs={"Out": str, "Log": str,
+                   "Extra": str})
+def flow():
+    """The flow."""
+    front = Text(text=LABEL)
+    back = Text(text="tail")
+    spare = Text(text="spare")
+    duo = pair(label=LABEL, times=3)()
+
+    connect(front.Out, duo.In)
+    connect(duo.Out, "Out")
+    connect(back.Out, "Log")
+    for name in ("Extra",):
+        connect(spare.Out, name)
+''',
+}
+
+
+@pytest.fixture
+def project(tmp_path: Path) -> Path:
+    root = tmp_path / "proj"
+    for name, text in FILES.items():
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    return root
+
+
+def _send(file: Path, op: str, **args: object) -> dict:
+    response = _handle_request({"file": str(file), "op": f"wfpy.{op}", "args": args})
+    return {
+        "status": response.status,
+        "message": response.message,
+        "diagnostic": response.diagnostic or {},
+        "changedFiles": response.changedFiles,
+    }
+
+
+def _plans(root: Path, file: str, workflow: str | None = None) -> dict:
+    """`wfpy plan <file> --format graph`, as the IDE runs it, in a fresh interpreter."""
+    command = [sys.executable, "-m", "wfpy.cli", "plan", file, "--format", "graph"]
+    if workflow:
+        command += ["--workflow", workflow]
+    env = {**os.environ, "PYTHONPATH": str(REPO / "src")}
+    done = subprocess.run(command, cwd=root, capture_output=True, text=True, env=env, check=False)
+    assert done.returncode == 0, done.stderr[-2000:]
+    return json.loads(done.stdout)
+
+
+def _text(root: Path, name: str) -> str:
+    return (root / name).read_text(encoding="utf-8")
+
+
+def test_the_project_plans_as_written(project: Path) -> None:
+    _plans(project, "compile/flow.py")
+    _plans(project, "compile/other/text.py")
+
+
+# ── S1 createPort ──────────────────────────────────────────────────────
+
+
+def test_create_port_adds_to_the_decorator_and_nothing_else(project: Path) -> None:
+    before = _text(project, "compile/flow.py")
+    answer = _send(
+        project / "compile/flow.py",
+        "createPort",
+        workflow="flow",
+        direction="input",
+        portName="Program",
+        portType="str",
+    )
+    assert answer["status"] == "ok", answer
+    after = _text(project, "compile/flow.py")
+    assert '@workflow(inputs={"Program": str}, outputs={"Out": str, "Log": str,' in after
+    # The rest of the module is as it was.
+    assert after.replace('inputs={"Program": str}, ', "") == before
+    _plans(project, "compile/flow.py")
+
+
+def test_create_port_keeps_a_dict_written_one_per_line(project: Path) -> None:
+    answer = _send(
+        project / "compile/workflows/pair.py",
+        "createPort",
+        workflow="pair",
+        direction="output",
+        portName="Count",
+        portType="int",
+    )
+    assert answer["status"] == "ok", answer
+    after = _text(project, "compile/workflows/pair.py")
+    assert 'outputs={"Out": str, "Count": int},' in after
+    assert "    def pair():" in after and "return pair" in after
+    _plans(project, "compile/flow.py")
+
+
+def test_create_port_refuses_a_name_already_declared(project: Path) -> None:
+    answer = _send(
+        project / "compile/flow.py",
+        "createPort",
+        workflow="flow",
+        direction="output",
+        portName="Log",
+        portType="str",
+    )
+    assert answer["status"] == "error"
+    assert answer["diagnostic"]["code"] == "port_exists"
+
+
+# ── S2 deletePort ──────────────────────────────────────────────────────
+
+
+def test_delete_port_takes_it_and_its_connections_out(project: Path) -> None:
+    answer = _send(
+        project / "compile/flow.py",
+        "deletePort",
+        workflow="flow",
+        direction="output",
+        portName="Log",
+    )
+    assert answer["status"] == "ok", answer
+    after = _text(project, "compile/flow.py")
+    assert '"Log"' not in after
+    assert 'connect(back.Out, "Log")' not in after
+    assert '@workflow(outputs={"Out": str, "Extra": str})' in after
+    _plans(project, "compile/flow.py")
+
+
+def test_delete_port_refuses_a_port_used_by_name(project: Path) -> None:
+    before = _text(project, "compile/flow.py")
+    answer = _send(
+        project / "compile/flow.py",
+        "deletePort",
+        workflow="flow",
+        direction="output",
+        portName="Extra",
+    )
+    assert answer["status"] == "error"
+    assert answer["diagnostic"]["code"] == "port_used_by_name"
+    assert "line 25" in answer["message"]
+    assert _text(project, "compile/flow.py") == before
+
+
+def test_delete_port_still_knows_the_assigned_form(tmp_path: Path) -> None:
+    src = tmp_path / "wf.py"
+    src.write_text(
+        "from wfpy import workflow\n\n\n"
+        "@workflow\n"
+        "def demo():\n"
+        "    pass\n\n\n"
+        'demo.outputs = {"A": int, "B": int}\n',
+        encoding="utf-8",
+    )
+    answer = _send(src, "deletePort", workflow="demo", direction="output", portName="A")
+    assert answer["status"] == "ok", answer
+    assert 'demo.outputs = {"B": int}' in src.read_text(encoding="utf-8")
+
+
+# ── S3 renaming a workflow's own port (sent as renameNode) ────────────
+
+
+def test_rename_a_workflow_port_follows_its_connections(project: Path) -> None:
+    answer = _send(
+        project / "compile/workflows/pair.py", "renameNode", workflow="pair", old="In", new="Feed"
+    )
+    assert answer["status"] == "ok", answer
+    after = _text(project, "compile/workflows/pair.py")
+    assert 'inputs={"Feed": str},' in after
+    assert 'connect("Feed", joined.Left)' in after
+    assert '"In"' not in after
+
+
+def test_rename_a_workflow_port_used_by_name_is_refused_whole(project: Path) -> None:
+    before = _text(project, "compile/flow.py")
+    answer = _send(
+        project / "compile/flow.py", "renameNode", workflow="flow", old="Extra", new="More"
+    )
+    assert answer["status"] == "error"
+    assert answer["diagnostic"]["code"] == "port_used_by_name"
+    assert (
+        "is used by name at line 25, which this rename cannot follow: rename it there"
+        in answer["message"]
+    )
+    assert _text(project, "compile/flow.py") == before
+
+
+def test_rename_an_instance_still_renames_the_instance(project: Path) -> None:
+    answer = _send(
+        project / "compile/flow.py", "renameNode", workflow="flow", old="back", new="rear"
+    )
+    assert answer["status"] == "ok", answer
+    after = _text(project, "compile/flow.py")
+    assert 'rear = Text(text="tail")' in after and 'connect(rear.Out, "Log")' in after
+    _plans(project, "compile/flow.py")
+
+
+# ── S4 renamePort / updatePortType with the IDE's arguments ───────────
+
+
+def test_update_port_type_takes_the_ides_arguments(project: Path) -> None:
+    answer = _send(
+        project / "compile/sources/join.py",
+        "updatePortType",
+        entity="Join",
+        portDirection="output",
+        portName="Out",
+        newValue="int",
+    )
+    assert answer["status"] == "ok", answer
+    assert 'Out = Port[int](direction="out")' in _text(project, "compile/sources/join.py")
+
+
+def test_rename_port_takes_the_ides_arguments_and_follows_the_class(project: Path) -> None:
+    answer = _send(
+        project / "compile/sources/text.py",
+        "renamePort",
+        entity="Text",
+        portDirection="output",
+        portName="Out",
+        newValue="Value",
+    )
+    assert answer["status"] == "ok", answer
+    after = _text(project, "compile/sources/text.py")
+    assert 'Value = Port[str](direction="out")' in after
+    assert 'produces={"Value": 1}' in after
+    assert 'return {"Value": self.text}' in after
+
+
+def test_rename_port_to_a_name_taken_is_refused(project: Path) -> None:
+    answer = _send(
+        project / "compile/sources/join.py",
+        "renamePort",
+        entity="Join",
+        portDirection="input",
+        portName="Left",
+        newValue="Right",
+    )
+    assert answer["status"] == "error"
+    assert answer["diagnostic"]["code"] == "port_exists"
+
+
+# ── S5 ports that say their direction ─────────────────────────────────
+
+
+def test_create_entity_port_input_says_in(project: Path) -> None:
+    answer = _send(
+        project / "compile/sources/join.py",
+        "createEntityPort",
+        entityType="Join",
+        portDirection="input",
+        portName="Extra",
+        portType="str",
+    )
+    assert answer["status"] == "ok", answer
+    assert 'Extra = Port[str](direction="in")' in _text(project, "compile/sources/join.py")
+
+
+def test_create_task_type_says_each_ports_direction(project: Path) -> None:
+    answer = _send(project / "compile/flow.py", "createTaskType", kind="task", name="Splitter")
+    assert answer["status"] == "ok", answer
+    after = _text(project, "compile/flow.py")
+    assert 'In = Port[Any](direction="in")' in after
+    assert 'Out = Port[Any](direction="out")' in after
+    assert "\n\n\n@task\nclass Splitter:\n" in after
+    assert '        Out = Port[Any](direction="out")\n\n\n@workflow(' in after
+    # The imports where imports are: `typing` beside `os`, after the docstring's blank line.
+    assert after.startswith(
+        '"""A flow, run by hand."""\n\nimport os\nfrom typing import Any\n\nfrom wfpy import Port, connect, task, workflow\n'
+    )
+    _plans(project, "compile/flow.py")
+
+
+# ── S6 / S7 the uses of a class's port across the project ─────────────
+
+
+def test_port_uses_finds_the_classs_instances_by_definition(project: Path) -> None:
+    assert "portUses" in SUPPORTED_OPS
+    assert FEATURES["portUsesAcrossFiles"] is True and FEATURES["portUsesQuery"] is True
+    answer = _send(project / "compile/sources/text.py", "portUses", entity="Text")
+    assert answer["status"] == "ok", answer
+    used_in = answer["diagnostic"]["usedIn"]
+    assert used_in == [
+        {
+            "file": str((project / "compile/flow.py").resolve()),
+            "workflow": "flow",
+            "instances": ["front", "back", "spare"],
+        },
+        {
+            "file": str((project / "compile/workflows/pair.py").resolve()),
+            "workflow": "pair",
+            "instances": ["first"],
+        },
+    ]
+    # compile/other/text.py's own `Text` is another class.
+    assert answer["diagnostic"]["unchecked"] == []
+
+
+def test_port_uses_tells_a_file_that_does_not_parse(project: Path) -> None:
+    (project / "compile/broken.py").write_text(
+        "from wfpy import workflow\nText(\n", encoding="utf-8"
+    )
+    answer = _send(project / "compile/sources/text.py", "portUses", entity="Text")
+    assert [entry["file"] for entry in answer["diagnostic"]["unchecked"]] == [
+        str(project / "compile/broken.py")
+    ]
+    assert answer["diagnostic"]["unchecked"][0]["message"]
+
+
+def _uses(project: Path) -> list[dict]:
+    return _send(project / "compile/sources/text.py", "portUses", entity="Text")["diagnostic"][
+        "usedIn"
+    ]
+
+
+def test_rename_port_follows_every_file_it_is_told(project: Path) -> None:
+    answer = _send(
+        project / "compile/sources/text.py",
+        "renamePort",
+        entity="Text",
+        portDirection="output",
+        portName="Out",
+        newValue="Value",
+        usedIn=_uses(project),
+    )
+    assert answer["status"] == "ok", answer
+    assert "connect(front.Value, duo.In)" in _text(project, "compile/flow.py")
+    assert "connect(spare.Value, name)" in _text(project, "compile/flow.py")
+    assert "connect(first.Value, joined.Right)" in _text(project, "compile/workflows/pair.py")
+    # Another class's port of the same name is its own.
+    assert "connect(t.Out" in _text(project, "compile/other/text.py")
+    assert sorted(Path(entry["file"]).name for entry in answer["changedFiles"]) == [
+        "flow.py",
+        "pair.py",
+    ]
+    _plans(project, "compile/flow.py")
+
+
+def test_delete_entity_port_refuses_a_connected_port(project: Path) -> None:
+    before = _text(project, "compile/sources/join.py")
+    uses = [
+        {
+            "file": str(project / "compile/workflows/pair.py"),
+            "workflow": "pair",
+            "instances": ["joined"],
+        }
+    ]
+    answer = _send(
+        project / "compile/sources/join.py",
+        "deleteEntityPort",
+        entityType="Join",
+        portDirection="output",
+        portName="Out",
+        usedIn=uses,
+    )
+    assert answer["status"] == "error"
+    assert answer["diagnostic"]["code"] == "port_in_use"
+    assert _text(project, "compile/sources/join.py") == before
+
+
+def test_delete_entity_port_refuses_a_port_an_action_reads(project: Path) -> None:
+    answer = _send(
+        project / "compile/sources/join.py",
+        "deleteEntityPort",
+        entityType="Join",
+        portDirection="input",
+        portName="Left",
+    )
+    assert answer["status"] == "error"
+    assert answer["diagnostic"]["code"] == "port_in_use"
+    assert "read by action 'join'" in answer["message"]
+
+
+def test_delete_entity_port_names_the_workflow_that_connects_it(project: Path) -> None:
+    (project / "compile/sources/join.py").write_text(
+        _text(project, "compile/sources/join.py").replace(
+            '        Out = Port[str](direction="out")\n',
+            '        Out = Port[str](direction="out")\n        Spare = Port[str](direction="out")\n',
+        ),
+        encoding="utf-8",
+    )
+    (project / "compile/workflows/pair.py").write_text(
+        _text(project, "compile/workflows/pair.py").replace(
+            '        connect(joined.Out, "Out")\n',
+            '        connect(joined.Out, "Out")\n        connect(joined.Spare, "Out")\n',
+        ),
+        encoding="utf-8",
+    )
+    uses = [
+        {
+            "file": str(project / "compile/workflows/pair.py"),
+            "workflow": "pair",
+            "instances": ["joined"],
+        }
+    ]
+    answer = _send(
+        project / "compile/sources/join.py",
+        "deleteEntityPort",
+        entityType="Join",
+        portDirection="output",
+        portName="Spare",
+        usedIn=uses,
+    )
+    assert answer["status"] == "error"
+    assert (
+        answer["message"]
+        == "port 'Spare' of 'joined' is connected in workflow 'pair': delete its connections first"
+    )
+
+
+def test_delete_entity_port_that_nothing_uses(project: Path) -> None:
+    _send(
+        project / "compile/sources/join.py",
+        "createEntityPort",
+        entityType="Join",
+        portDirection="input",
+        portName="Extra",
+        portType="str",
+    )
+    answer = _send(
+        project / "compile/sources/join.py",
+        "deleteEntityPort",
+        entityType="Join",
+        portDirection="input",
+        portName="Extra",
+        usedIn=[],
+    )
+    assert answer["status"] == "ok", answer
+    assert "Extra" not in _text(project, "compile/sources/join.py")
+
+
+# ── S8 createNode of a type the module does not import ────────────────
+
+
+def test_create_node_imports_from_the_package_that_re_exports_it(project: Path) -> None:
+    flow = project / "compile/flow.py"
+    flow.write_text(
+        _text(project, "compile/flow.py").replace(
+            "from compile.sources import Text\n", "from compile.sources import Text\n"
+        ),
+        encoding="utf-8",
+    )
+    answer = _send(flow, "createNode", workflow="flow", type="Join", name="joined")
+    assert answer["status"] == "ok", answer
+    after = _text(project, "compile/flow.py")
+    assert "from compile.sources import Join, Text\n" in after
+    assert "    joined = Join()\n" in after
+    _plans(project, "compile/flow.py")
+
+
+def test_create_node_imports_from_the_defining_module(project: Path) -> None:
+    answer = _send(
+        project / "compile/flow.py", "createNode", workflow="flow", type="Gate", name="gate"
+    )
+    assert answer["status"] == "ok", answer
+    after = _text(project, "compile/flow.py")
+    assert (
+        "from compile.workflows.pair import pair\nfrom compile.agentic.gate import Gate\n" in after
+    )
+    _plans(project, "compile/flow.py")
+
+
+def test_create_node_refuses_a_type_the_project_does_not_have(project: Path) -> None:
+    answer = _send(
+        project / "compile/flow.py", "createNode", workflow="flow", type="Nowhere", name="n"
+    )
+    assert answer["status"] == "error"
+    assert answer["diagnostic"]["code"] == "type_not_found"
+
+
+def test_create_node_refuses_a_type_defined_twice(project: Path) -> None:
+    answer = _send(project / "compile/workflows/__init__.py", "createWorkflowType", name="holder")
+    assert answer["status"] == "ok"
+    answer = _send(
+        project / "compile/workflows/__init__.py",
+        "createNode",
+        workflow="holder",
+        type="Text",
+        name="t",
+    )
+    assert answer["status"] == "error"
+    assert answer["diagnostic"]["code"] == "type_ambiguous"
+
+
+# ── S9 the workflow a factory builds ──────────────────────────────────
+
+
+def test_rename_node_in_a_factory_workflow(project: Path) -> None:
+    answer = _send(
+        project / "compile/workflows/pair.py",
+        "renameNode",
+        workflow="pair",
+        old="first",
+        new="head",
+    )
+    assert answer["status"] == "ok", answer
+    after = _text(project, "compile/workflows/pair.py")
+    assert "        head = Text(text=label)\n" in after
+    assert "connect(head.Out, joined.Right)" in after
+    _plans(project, "compile/flow.py")
+
+
+def test_delete_node_in_a_factory_workflow(project: Path) -> None:
+    answer = _send(
+        project / "compile/workflows/pair.py", "deleteNode", workflow="pair", name="first"
+    )
+    assert answer["status"] == "ok", answer
+    after = _text(project, "compile/workflows/pair.py")
+    assert "first" not in after
+    assert "    return pair\n" in after
+
+
+def test_create_node_and_connect_in_a_factory_workflow(project: Path) -> None:
+    pair = project / "compile/workflows/pair.py"
+    assert (
+        _send(
+            pair,
+            "createNode",
+            workflow="pair",
+            type="Text",
+            name="second",
+            expressions={"text": "label"},
+        )["status"]
+        == "ok"
+    )
+    answer = _send(pair, "connect", workflow="pair", from_expr="second.Out", to_expr='"Out"')
+    assert answer["status"] == "ok", answer
+    after = _text(project, "compile/workflows/pair.py")
+    inner = after.split("    def pair():", 1)[1]
+    assert "        second = Text(text=label)\n" in inner
+    assert '        connect(second.Out, "Out")\n' in inner
+    assert after.split("    def pair():", 1)[0].count("second") == 0
+
+
+def test_update_node_parameter_of_a_factory_made_instance(project: Path) -> None:
+    answer = _send(
+        project / "compile/flow.py",
+        "updateNodeParameter",
+        workflow="flow",
+        entity="duo",
+        parameterName="times",
+        newValue="4",
+    )
+    assert answer["status"] == "ok", answer
+    assert "duo = pair(label=LABEL, times=4)()" in _text(project, "compile/flow.py")
+    _plans(project, "compile/flow.py")
+
+
+# ── S10 a class task's parameter is a field without a default ─────────
+
+
+def test_definition_parameter_of_a_class_task_is_a_field(project: Path) -> None:
+    answer = _send(
+        project / "compile/sources/text.py",
+        "updateDefinitionParameter",
+        entityType="Text",
+        parameterName="prefix",
+        parameterText="prefix: str",
+    )
+    assert answer["status"] == "ok", answer
+    after = _text(project, "compile/sources/text.py")
+    assert (
+        "    text: str              # parameter\n    prefix: str  # parameter\n    emitted: bool = False"
+        in after
+    )
+    assert "__init__" not in after
+
+
+def test_definition_parameter_of_a_class_task_refuses_a_default(project: Path) -> None:
+    before = _text(project, "compile/sources/text.py")
+    answer = _send(
+        project / "compile/sources/text.py",
+        "updateDefinitionParameter",
+        entityType="Text",
+        parameterName="prefix",
+        parameterText="prefix: str = ''",
+    )
+    assert answer["status"] == "error"
+    assert answer["diagnostic"]["code"] == "parameter_has_default"
+    assert _text(project, "compile/sources/text.py") == before
+
+
+def test_definition_parameter_retypes_an_existing_field(project: Path) -> None:
+    answer = _send(
+        project / "compile/sources/text.py",
+        "updateDefinitionParameter",
+        entityType="Text",
+        parameterName="text",
+        parameterText="text: bytes",
+    )
+    assert answer["status"] == "ok", answer
+    assert "    text: bytes              # parameter\n" in _text(project, "compile/sources/text.py")
+
+
+# ── S11 a decorator the module does not import ────────────────────────
+
+
+def test_update_definition_annotation_imports_a_wfpy_decorator(project: Path) -> None:
+    answer = _send(
+        project / "compile/sources/join.py",
+        "updateDefinitionAnnotation",
+        entityType="Join",
+        annotationName="tool",
+        annotationText='@tool(\n    cmd="bash",\n    inheritStdio=True\n)',
+    )
+    assert answer["status"] == "ok", answer
+    after = _text(project, "compile/sources/join.py")
+    assert after.startswith("from wfpy import Port, action, task, tool\n")
+
+
+# ── S15 a value that is not Python ────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "op, args",
+    [
+        (
+            "updateNodeParameter",
+            {"workflow": "flow", "entity": "front", "parameterName": "text", "newValue": "td=on'"},
+        ),
+        (
+            "createPort",
+            {"workflow": "flow", "direction": "input", "portName": "P", "portType": "list["},
+        ),
+        (
+            "createNode",
+            {"workflow": "flow", "type": "Text", "name": "t2", "expressions": {"text": "'a"}},
+        ),
+        (
+            "updateDefinitionAnnotation",
+            {"entityType": "Text", "annotationName": "tool", "annotationText": "@tool(cmd=)"},
+        ),
+    ],
+)
+def test_a_value_that_is_not_python_is_refused_by_name(project: Path, op: str, args: dict) -> None:
+    before = _text(project, "compile/flow.py")
+    answer = _send(project / "compile/flow.py", op, **args)
+    assert answer["status"] == "error"
+    assert answer["diagnostic"]["code"] == "invalid_expression", answer
+    assert "is not a Python expression" in answer["message"]
+    assert _text(project, "compile/flow.py") == before
+
+
+# ── A1 typeParameters / A2 createNode expressions and names ───────────
+
+
+def test_type_parameters_of_a_class_task(project: Path) -> None:
+    assert "typeParameters" in SUPPORTED_OPS and FEATURES["typeParameters"] is True
+    answer = _send(project / "compile/flow.py", "typeParameters", type="Text")
+    assert answer["status"] == "ok", answer
+    assert answer["diagnostic"]["parameters"] == [{"name": "text", "type": "str"}]
+    assert answer["diagnostic"]["kind"] == "task"
+
+
+def test_type_parameters_of_a_factory(project: Path) -> None:
+    answer = _send(project / "compile/flow.py", "typeParameters", type="pair")
+    assert answer["diagnostic"]["kind"] == "factory"
+    assert answer["diagnostic"]["parameters"] == [
+        {"name": "label", "type": "str"},
+        {"name": "times", "type": "int", "defaultValue": "2"},
+    ]
+
+
+def test_type_parameters_of_an_unknown_type(project: Path) -> None:
+    answer = _send(project / "compile/flow.py", "typeParameters", type="Nowhere")
+    assert answer["status"] == "error"
+    assert answer["diagnostic"]["code"] == "type_not_found"
+
+
+def test_create_node_writes_expressions_verbatim_after_params(project: Path) -> None:
+    assert FEATURES["createNodeExpressions"] is True
+    answer = _send(
+        project / "compile/flow.py",
+        "createNode",
+        workflow="flow",
+        type="Text",
+        name="again",
+        expressions={"text": "LABEL"},
+    )
+    assert answer["status"] == "ok", answer
+    assert "    again = Text(text=LABEL)\n" in _text(project, "compile/flow.py")
+    _plans(project, "compile/flow.py")
+
+
+@pytest.mark.parametrize("name", ["Text", "LABEL", "os", "pair", "flow"])
+def test_create_node_refuses_a_name_that_shadows(project: Path, name: str) -> None:
+    answer = _send(
+        project / "compile/flow.py", "createNode", workflow="flow", type="Text", name=name
+    )
+    assert answer["status"] == "error"
+    assert answer["diagnostic"]["code"] == "name_shadows", answer
+
+
+def test_create_node_refuses_a_name_a_factory_parameter_has(project: Path) -> None:
+    answer = _send(
+        project / "compile/workflows/pair.py",
+        "createNode",
+        workflow="pair",
+        type="Text",
+        name="label",
+    )
+    assert answer["status"] == "error"
+    assert answer["diagnostic"]["code"] == "name_shadows"
+
+
+# ── A workflow's own port, used by the workflows that instantiate it ──
+
+
+def test_port_uses_of_a_factory_workflow(project: Path) -> None:
+    answer = _send(project / "compile/workflows/pair.py", "portUses", entity="pair")
+    assert answer["status"] == "ok", answer
+    assert answer["diagnostic"]["usedIn"] == [
+        {"file": str((project / "compile/flow.py").resolve()), "workflow": "flow", "instances": ["duo"]},
+    ]
+
+
+def test_rename_a_workflow_port_follows_the_workflows_using_it(project: Path) -> None:
+    uses = _send(project / "compile/workflows/pair.py", "portUses", entity="pair")["diagnostic"]["usedIn"]
+    answer = _send(project / "compile/workflows/pair.py", "renameNode",
+                   workflow="pair", old="In", new="Feed", usedIn=uses)
+    assert answer["status"] == "ok", answer
+    assert "connect(front.Out, duo.Feed)" in _text(project, "compile/flow.py")
+    assert [Path(entry["file"]).name for entry in answer["changedFiles"]] == ["flow.py"]
+    _plans(project, "compile/flow.py")
+
+
+def test_delete_a_workflow_port_a_parent_connects_is_refused(project: Path) -> None:
+    uses = _send(project / "compile/workflows/pair.py", "portUses", entity="pair")["diagnostic"]["usedIn"]
+    before = _text(project, "compile/workflows/pair.py")
+    answer = _send(project / "compile/workflows/pair.py", "deletePort",
+                   workflow="pair", direction="input", portName="In", usedIn=uses)
+    assert answer["status"] == "error"
+    assert answer["message"] == "port 'In' of 'duo' is connected in workflow 'flow': delete its connections first"
+    assert _text(project, "compile/workflows/pair.py") == before

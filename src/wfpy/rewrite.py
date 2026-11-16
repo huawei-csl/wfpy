@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import keyword
+import sys
 import tempfile
 from typing import Any, Sequence
 from pathlib import Path
@@ -38,6 +39,151 @@ def _dotted_name(node: cst.BaseExpression) -> str:
     if isinstance(node, cst.Attribute):
         return f"{_dotted_name(node.value)}.{node.attr.value}"
     return ""
+
+
+def _parse_user_expression(text: Any, what: str) -> cst.BaseExpression:
+    """`text` parsed as a Python expression, or a refusal naming it.
+
+    Everything the IDE hands over as source — a parameter's value, a port's
+    type, an annotation's argument — goes through here, so a value that is
+    not Python is told as that (`invalid_expression`) rather than surfacing
+    as the parser's crash.
+    """
+    source = str(text if text is not None else "").strip()
+    try:
+        if not source:
+            raise ValueError("empty")
+        return cst.parse_expression(source)
+    except (cst.ParserSyntaxError, ValueError) as exc:
+        detail = str(exc).strip().splitlines()
+        raise RewriteError(
+            message=f"{what} is not a Python expression: {source!r}",
+            diagnostic={
+                "code": "invalid_expression",
+                "expression": source,
+                **({"details": detail[0]} if detail and detail[0] != "empty" else {}),
+            },
+        ) from None
+
+
+def _keyword_arg(name: str, value: cst.BaseExpression) -> cst.Arg:
+    """`name=value`, as a keyword argument is written by hand."""
+    return cst.Arg(
+        keyword=cst.Name(name),
+        value=value,
+        equal=cst.AssignEqual(
+            whitespace_before=cst.SimpleWhitespace(""),
+            whitespace_after=cst.SimpleWhitespace(""),
+        ),
+    )
+
+
+def _with_inserted(items: list[Any], at: int, new: Any, opening: Any) -> list[Any]:
+    """`items` (call arguments or dict elements, each carrying its comma) with
+    `new` at index `at`, the commas laid out as the neighbours' are: one per
+    line in a list written one per line, `, ` in one written on a line.
+    `opening` is the whitespace after the opening bracket, which tells a
+    one-item list's layout."""
+    items = list(items)
+    if not items:
+        return [new.with_changes(comma=cst.MaybeSentinel.DEFAULT)]
+    if len(items) >= 2:
+        separator = items[min(max(at - 1, 0), len(items) - 2)].comma
+        if not isinstance(separator, cst.Comma):
+            separator = cst.Comma(whitespace_after=cst.SimpleWhitespace(" "))
+    elif isinstance(opening, cst.ParenthesizedWhitespace):
+        separator = cst.Comma(whitespace_after=opening.deep_clone())
+    else:
+        separator = cst.Comma(whitespace_after=cst.SimpleWhitespace(" "))
+    if at >= len(items):
+        trailing = items[-1].comma
+        items[-1] = items[-1].with_changes(comma=separator.deep_clone())
+        items.append(new.with_changes(comma=trailing))
+    else:
+        items.insert(at, new.with_changes(comma=separator.deep_clone()))
+    return items
+
+
+def _with_removed(items: list[Any], at: int) -> list[Any]:
+    """`items` without the one at `at`; the last keeps what the list ended with."""
+    items = list(items)
+    removed = items.pop(at)
+    if items and at == len(items):
+        items[-1] = items[-1].with_changes(comma=removed.comma)
+    return items
+
+
+def _string_value(node: cst.CSTNode | None) -> str | None:
+    """The value of a plain string literal (`"x"`, `'x'`), else None."""
+    if isinstance(node, cst.SimpleString):
+        value = node.evaluated_value
+        return value if isinstance(value, str) else None
+    return None
+
+
+def _quoted_like(original: cst.SimpleString, value: str) -> cst.SimpleString:
+    """A string literal of `value` in the quotes `original` is written in."""
+    quote = original.quote
+    prefix = original.prefix
+    if quote in value or "\\" in value:
+        return cst.SimpleString(repr(value))
+    return cst.SimpleString(f"{prefix}{quote}{value}{quote}")
+
+
+def _decorator_name(dec: cst.Decorator) -> str | None:
+    """`task` for `@task`, `@task(...)`, `@wfpy.task` and `@wfpy.task(...)`."""
+    target = dec.decorator
+    if isinstance(target, cst.Call):
+        target = target.func
+    if isinstance(target, cst.Name):
+        return target.value
+    if isinstance(target, cst.Attribute):
+        return target.attr.value
+    return None
+
+
+def _is_connect_call(node: cst.CSTNode) -> bool:
+    if not isinstance(node, cst.Call):
+        return False
+    func = node.func
+    return (isinstance(func, cst.Name) and func.value == "connect") or (
+        isinstance(func, cst.Attribute) and func.attr.value == "connect"
+    )
+
+
+class _ReplaceNode(cst.CSTTransformer):
+    """Puts `replacement` where `target` (that very node) is."""
+
+    def __init__(self, target: cst.CSTNode, replacement: cst.CSTNode) -> None:
+        super().__init__()
+        self._target = target
+        self._replacement = replacement
+        self.done = False
+
+    def on_visit(self, node: cst.CSTNode) -> bool:
+        return not self.done
+
+    def on_leave(self, original_node: cst.CSTNode, updated_node: cst.CSTNode) -> Any:
+        if original_node is self._target:
+            self.done = True
+            return self._replacement
+        return updated_node
+
+
+class _WorkflowBodyTransformer(cst.CSTTransformer):
+    """A transformer run on one workflow def: it edits that def's own body
+    and never a function or class defined inside it (a helper's locals are
+    not the workflow's nodes)."""
+
+    def __init__(self, root: cst.FunctionDef) -> None:
+        super().__init__()
+        self._root = root
+
+    def visit_FunctionDef(self, node: cst.FunctionDef) -> bool:
+        return node is self._root
+
+    def visit_ClassDef(self, node: cst.ClassDef) -> bool:
+        return False
 
 
 def _source_revision(text: str) -> str:
@@ -158,6 +304,15 @@ def load_module(file_path: str) -> tuple[cst.Module, str, str]:
 # one matcher serve every kind.
 TASK_TYPE_KINDS = ("task", "tool", "agent", "viewer", "streamblocks", "source")
 
+# The IDE's names of a port's direction → what `Port(direction=...)` takes.
+_PORT_DIRECTIONS = {
+    "input": "in",
+    "output": "out",
+    "inout": "inout",
+    "in": "in",
+    "out": "out",
+}
+
 
 @dataclasses.dataclass
 class RewriteError(RuntimeError):
@@ -177,11 +332,27 @@ class RewriteEngine:
         self.revision = hashlib.sha256(source_text.encode("utf-8")).hexdigest()
 
     def save(self) -> None:
-        if not self._updated:
-            return
-        new_source = self.module.code
-        _atomic_write_if_unchanged(self.file_path, expected_revision=self.revision, text=new_source)
-        self.revision = _source_revision(new_source)
+        companions = self.changed_companions()
+        # Every other file is checked before any is written: one changed
+        # under the edit leaves them all as they were.
+        for engine in companions:
+            on_disk = _source_revision(Path(engine.file_path).read_text(encoding="utf-8"))
+            if on_disk != engine.revision:
+                raise RewriteError(
+                    message="source changed during rewrite",
+                    diagnostic={
+                        "code": "concurrent_source_modification",
+                        "file": engine.file_path,
+                        "expectedRevision": engine.revision,
+                        "actualRevision": on_disk,
+                    },
+                )
+        if self._updated:
+            new_source = self.module.code
+            _atomic_write_if_unchanged(self.file_path, expected_revision=self.revision, text=new_source)
+            self.revision = _source_revision(new_source)
+        for engine in companions:
+            engine.save()
 
     def _set_module(self, module: cst.Module) -> None:
         self.module = module
@@ -455,24 +626,59 @@ class RewriteEngine:
             )
         return parameters
 
-    def _get_workflow_body(self, workflow_name: str | None) -> tuple[cst.FunctionDef, cst.IndentedBlock]:
-        candidates: list[cst.FunctionDef] = []
-        for stmt in self.module.body:
-            if isinstance(stmt, cst.FunctionDef):
-                if workflow_name is None or stmt.name.value == workflow_name:
-                    candidates.append(stmt)
-        if not candidates:
-            raise RewriteError(
-                message="Workflow function not found",
-                diagnostic={"file": self.file_path},
-            )
+    def _nested_workflow_defs(self, workflow_name: str) -> list[cst.FunctionDef]:
+        """Every `@workflow def <workflow_name>` inside a function: what a
+        factory (`def make(...): @workflow def name(): ...; return name`)
+        builds, in source order."""
+        found: list[cst.FunctionDef] = []
+
+        def visit(block: Sequence[cst.BaseStatement], depth: int) -> None:
+            for stmt in block:
+                if isinstance(stmt, cst.FunctionDef):
+                    if depth > 0 and stmt.name.value == workflow_name and self._is_workflow_def(stmt):
+                        found.append(stmt)
+                    if isinstance(stmt.body, cst.IndentedBlock):
+                        visit(stmt.body.body, depth + 1)
+                    continue
+                for child in self._child_blocks(stmt):
+                    visit(child.body, depth)
+
+        visit(self.module.body, 0)
+        return found
+
+    def _resolve_workflow_def(self, workflow_name: str | None) -> cst.FunctionDef:
+        """The def an op addressed to workflow `workflow_name` edits.
+
+        A module-level `@workflow def` of that name first; else the
+        `@workflow def` of that name a factory defines (the module-level
+        function of the same name is then the factory, whose own body holds
+        no nodes); else, as before, a module-level function of that name.
+        With no name, the first module-level `@workflow def`.
+        """
+        top_level = [stmt for stmt in self.module.body if isinstance(stmt, cst.FunctionDef)]
         if workflow_name is None:
-            for fn in candidates:
+            for fn in top_level:
                 if self._is_workflow_def(fn):
-                    body = fn.body
-                    if isinstance(body, cst.IndentedBlock):
-                        return fn, body
-        fn = candidates[0]
+                    return fn
+            if top_level:
+                return top_level[0]
+        else:
+            for fn in top_level:
+                if fn.name.value == workflow_name and self._is_workflow_def(fn):
+                    return fn
+            nested = self._nested_workflow_defs(workflow_name)
+            if nested:
+                return nested[0]
+            for fn in top_level:
+                if fn.name.value == workflow_name:
+                    return fn
+        raise RewriteError(
+            message="Workflow function not found",
+            diagnostic={"file": self.file_path, **({"workflow": workflow_name} if workflow_name else {})},
+        )
+
+    def _get_workflow_body(self, workflow_name: str | None) -> tuple[cst.FunctionDef, cst.IndentedBlock]:
+        fn = self._resolve_workflow_def(workflow_name)
         body = fn.body
         if isinstance(body, cst.IndentedBlock):
             return fn, body
@@ -480,6 +686,35 @@ class RewriteEngine:
             message="Workflow function body not found",
             diagnostic={"file": self.file_path},
         )
+
+    def _replace_node(self, target: cst.CSTNode, replacement: cst.CSTNode) -> None:
+        """Put `replacement` where `target`, a node of this module, is."""
+        if target is replacement:
+            return
+        replacer = _ReplaceNode(target, replacement)
+        updated = self.module.visit(replacer)
+        if not replacer.done:
+            raise RewriteError(
+                message="internal: the edited definition is no longer in the module",
+                diagnostic={"file": self.file_path, "code": "internal_error"},
+            )
+        self._set_module(updated)
+
+    def _edit_workflow(self, fn: cst.FunctionDef, transformer: cst.CSTTransformer) -> None:
+        """Run `transformer` on workflow def `fn` (that node) and put the result back."""
+        updated = fn.visit(transformer)
+        if not isinstance(updated, cst.FunctionDef):
+            raise RewriteError(message="internal: a workflow edit removed the workflow")
+        self._replace_node(fn, updated)
+
+    def _positions_of(self, node: cst.CSTNode) -> Any:
+        """Code range of `node` (a node of this module), or None."""
+        positions = self._source_positions()
+        return positions.get(node) if positions else None
+
+    def _line_of(self, node: cst.CSTNode) -> int | None:
+        found = self._positions_of(node)
+        return int(found.start.line) if found is not None else None
 
     def _get_local_function(self, function_name: str) -> cst.FunctionDef | None:
         for stmt in self.module.body:
@@ -752,17 +987,18 @@ class RewriteEngine:
 
     def _update_scope_body(
         self,
-        fn_name: str,
+        fn: cst.FunctionDef,
         scope_control: str | None,
         scope_branch: str | None,
         new_block: cst.IndentedBlock,
     ) -> None:
         if not scope_control:
-            self._update_function_body(fn_name, new_block)
+            self._update_function_body(fn, new_block)
             return
 
-        class _ScopeRewriter(cst.CSTTransformer):
+        class _ScopeRewriter(_WorkflowBodyTransformer):
             def __init__(self, matcher: RewriteEngine, control: str, branch: str | None, body: cst.IndentedBlock) -> None:
+                super().__init__(fn)
                 self._matcher = matcher
                 self._control = control
                 self._branch = branch
@@ -778,13 +1014,13 @@ class RewriteEngine:
                 return updated_node
 
         rewriter = _ScopeRewriter(self, scope_control, scope_branch, new_block)
-        updated = self.module.visit(rewriter)
-        if not rewriter.updated:
+        updated = fn.visit(rewriter)
+        if not rewriter.updated or not isinstance(updated, cst.FunctionDef):
             raise RewriteError(
                 message="Scope not found",
                 diagnostic={"file": self.file_path, "scope": scope_control},
             )
-        self._set_module(updated)
+        self._replace_node(fn, updated)
 
     def _collect_assigned_names(self, fn: cst.FunctionDef) -> set[str]:
         names: set[str] = set()
@@ -810,19 +1046,10 @@ class RewriteEngine:
             idx += 1
         return f"{base}_{idx}"
 
-    def _update_function_body(self, fn_name: str, new_body: cst.IndentedBlock) -> None:
-        class _BodyRewriter(cst.CSTTransformer):
-            def __init__(self, name: str, body: cst.IndentedBlock) -> None:
-                self._name = name
-                self._body = body
-
-            def leave_FunctionDef(self, original_node: cst.FunctionDef, updated_node: cst.FunctionDef) -> cst.FunctionDef:
-                if original_node.name.value == self._name:
-                    return updated_node.with_changes(body=self._body)
-                return updated_node
-
-        updated = self.module.visit(_BodyRewriter(fn_name, new_body))
-        self._set_module(updated)
+    def _update_function_body(self, fn: cst.FunctionDef, new_body: cst.IndentedBlock) -> None:
+        """Give workflow def `fn` (that node, not every def of its name: a
+        factory and the workflow it builds are often named alike) `new_body`."""
+        self._replace_node(fn, fn.with_changes(body=new_body))
 
     def _port_expr_from_spec(self, spec: Any) -> str:
         if isinstance(spec, str):
@@ -861,59 +1088,291 @@ class RewriteEngine:
         type: str,
         name: str,
         params: dict[str, Any] | None = None,
+        expressions: dict[str, Any] | None = None,
         scope_control: str | None = None,
         scope_branch: str | None = None,
         importFrom: str | None = None,
     ) -> None:
+        """`name = type(...)` in the workflow: `params` as literals of their
+        values, then `expressions` as written (`text=FRONT_OPTIONS`), in the
+        order given. A type this file does not bind is imported: from
+        `importFrom` when given, else from where the project defines it."""
         self._ensure_identifier(name)
+        type_name = str(type).strip()
+        if not type_name.isidentifier() or keyword.iskeyword(type_name):
+            raise RewriteError(message=f"Invalid type name: {type_name}", diagnostic={"code": "invalid_type"})
         fn, body = self._get_workflow_body(workflow)
+        self._refuse_shadowing(fn, name, type_name)
+        args: list[cst.Arg] = []
+        written: set[str] = set()
+        for key, value in (params or {}).items():
+            if not str(key).isidentifier() or keyword.iskeyword(str(key)):
+                raise RewriteError(message=f"Invalid parameter name: {key}", diagnostic={"code": "invalid_parameter_name"})
+            args.append(_keyword_arg(str(key), cst.parse_expression(repr(value))))
+            written.add(str(key))
+        for key, text in (expressions or {}).items():
+            if not str(key).isidentifier() or keyword.iskeyword(str(key)):
+                raise RewriteError(message=f"Invalid parameter name: {key}", diagnostic={"code": "invalid_parameter_name"})
+            if str(key) in written:
+                raise RewriteError(
+                    message=f"parameter '{key}' is given twice, as a value and as an expression",
+                    diagnostic={"code": "invalid_parameter_name"},
+                )
+            args.append(_keyword_arg(str(key), _parse_user_expression(text, f"the value of {name}.{key}")))
+            written.add(str(key))
+        # Where the type comes from is settled before anything is written.
+        import_from = str(importFrom).strip() if importFrom else ""
+        if not self._binds(type_name) and not import_from:
+            import_from = self._project_module_of(type_name)
         target_block = self._find_scope_block(body, scope_control, scope_branch)
         target_body = list(target_block.body)
-        params = params or {}
-        args = []
-        for key, value in params.items():
-            if not str(key).isidentifier():
-                raise RewriteError(message=f"Invalid parameter name: {key}")
-            args.append(
-                cst.Arg(
-                    keyword=cst.Name(str(key)),
-                    value=cst.parse_expression(repr(value)),
-                    # `name=value`, as a keyword argument is written by hand.
-                    equal=cst.AssignEqual(
-                        whitespace_before=cst.SimpleWhitespace(""),
-                        whitespace_after=cst.SimpleWhitespace(""),
-                    ),
-                )
-            )
         assign = cst.Assign(
             targets=[cst.AssignTarget(target=cst.Name(name))],
-            value=cst.Call(func=cst.Name(type), args=args),
+            value=cst.Call(func=cst.Name(type_name), args=args),
         )
         stmt = cst.SimpleStatementLine([assign])
         new_stmt_body = self._insert_statement(target_body, stmt, "node")
         new_block = target_block.with_changes(body=new_stmt_body)
-        self._update_scope_body(fn.name.value, scope_control, scope_branch, new_block)
+        self._update_scope_body(fn, scope_control, scope_branch, new_block)
         # A type defined in another module, the way a workflow instance's is,
         # needs its import; one this file already binds does not.
-        if importFrom and type not in self._module_level_names():
-            self._set_module(self._ensure_import(self.module, importFrom, [type]))
+        if import_from and not self._binds(type_name):
+            self._set_module(self._ensure_import(self.module, import_from, [type_name]))
 
-    def _module_level_names(self) -> set[str]:
-        """Names a top-level definition or import binds in this file."""
-        names: set[str] = set()
+    def _module_bindings(self) -> dict[str, tuple[str, cst.CSTNode]]:
+        """Each name the top level of this file binds: what binds it (a
+        definition, an import, an assignment) and the statement."""
+        names: dict[str, tuple[str, cst.CSTNode]] = {}
         for stmt in self.module.body:
             if isinstance(stmt, (cst.FunctionDef, cst.ClassDef)):
-                names.add(stmt.name.value)
+                names.setdefault(stmt.name.value, ("function" if isinstance(stmt, cst.FunctionDef) else "class", stmt))
             elif isinstance(stmt, cst.SimpleStatementLine):
                 for small in stmt.body:
-                    if isinstance(small, (cst.Import, cst.ImportFrom)) and not isinstance(
-                        small.names, cst.ImportStar
-                    ):
+                    if isinstance(small, (cst.Import, cst.ImportFrom)) and not isinstance(small.names, cst.ImportStar):
                         for alias in small.names:
                             bound = alias.asname.name if alias.asname else alias.name
                             if isinstance(bound, cst.Name):
-                                names.add(bound.value)
+                                names.setdefault(bound.value, ("import", stmt))
+                            elif isinstance(bound, cst.Attribute) and isinstance(small, cst.Import):
+                                head: cst.BaseExpression = bound
+                                while isinstance(head, cst.Attribute):
+                                    head = head.value
+                                if isinstance(head, cst.Name):
+                                    names.setdefault(head.value, ("import", stmt))
+                    elif isinstance(small, cst.Assign):
+                        for target in small.targets:
+                            if isinstance(target.target, cst.Name):
+                                names.setdefault(target.target.value, ("assignment", stmt))
+                    elif isinstance(small, cst.AnnAssign) and isinstance(small.target, cst.Name):
+                        names.setdefault(small.target.value, ("assignment", stmt))
         return names
+
+    def _module_level_names(self) -> set[str]:
+        """Names a top-level definition, import or assignment binds in this file."""
+        return set(self._module_bindings())
+
+    def _has_star_import(self) -> bool:
+        return any(
+            isinstance(small, cst.ImportFrom) and isinstance(small.names, cst.ImportStar)
+            for stmt in self.module.body
+            if isinstance(stmt, cst.SimpleStatementLine)
+            for small in stmt.body
+        )
+
+    def _binds(self, name: str) -> bool:
+        """Whether `name` is in scope at the top level of this file."""
+        if name in self._module_level_names():
+            return True
+        if self._has_star_import():
+            from wfpy._project_index import ProjectIndex
+
+            return ProjectIndex.for_file(self.file_path).binding(Path(self.file_path), name) is not None
+        return False
+
+    def _refuse_shadowing(self, fn: cst.FunctionDef, name: str, type_name: str) -> None:
+        """Refuse an instance name the workflow's body would make local over
+        something it reads: the type it instantiates (`av1_refdec =
+        av1_refdec()` reads the local before it is bound), a name the module
+        binds, or a parameter of the factory around the workflow."""
+        what: str | None = None
+        line: int | None = None
+        if name == type_name:
+            what = f"the type '{type_name}' it instantiates: `{name} = {type_name}()` would read the local '{name}' before it is bound"
+        else:
+            bound = self._module_bindings().get(name)
+            if bound is not None:
+                kind, stmt = bound
+                line = self._line_of(stmt)
+                what = {
+                    "function": f"the function '{name}' of this file",
+                    "class": f"the class '{name}' of this file",
+                    "import": f"the imported '{name}'",
+                    "assignment": f"the module-level '{name}'",
+                }[kind]
+                if line is not None:
+                    what += f" (line {line})"
+            else:
+                for outer in self._enclosing_functions(fn):
+                    params = outer.params
+                    every = [*params.posonly_params, *params.params, *params.kwonly_params]
+                    if isinstance(params.star_arg, cst.Param):
+                        every.append(params.star_arg)
+                    if isinstance(params.star_kwarg, cst.Param):
+                        every.append(params.star_kwarg)
+                    if any(p.name.value == name for p in every):
+                        what = f"the parameter '{name}' of '{outer.name.value}', which the workflow reads"
+                        break
+        if what is not None:
+            raise RewriteError(
+                message=f"a node named '{name}' would hide {what}: choose another name",
+                diagnostic={"code": "name_shadows", "name": name, **({"line": line} if line is not None else {})},
+            )
+
+    def _enclosing_functions(self, fn: cst.FunctionDef) -> list[cst.FunctionDef]:
+        """The defs `fn` is nested in, innermost first (a factory's)."""
+        chain: list[cst.FunctionDef] = []
+
+        def visit(block: Sequence[cst.BaseStatement], parents: list[cst.FunctionDef]) -> bool:
+            for stmt in block:
+                if stmt is fn:
+                    chain.extend(reversed(parents))
+                    return True
+                if isinstance(stmt, cst.FunctionDef) and isinstance(stmt.body, cst.IndentedBlock):
+                    if visit(stmt.body.body, [*parents, stmt]):
+                        return True
+                    continue
+                for child in self._child_blocks(stmt):
+                    if visit(child.body, parents):
+                        return True
+            return False
+
+        visit(self.module.body, [])
+        return chain
+
+    def _project_module_of(self, type_name: str) -> str:
+        """The module this file imports `type_name` from: where the project
+        defines that task or workflow, by the shortest package re-exporting
+        it, or one this file already imports from."""
+        from wfpy._project_index import ProjectIndex
+
+        index = ProjectIndex.for_file(self.file_path)
+        here = Path(self.file_path).resolve()
+        found = [d for d in index.definitions_named(type_name) if d.file != here]
+        if not found:
+            raise RewriteError(
+                message=(
+                    f"'{type_name}' is not bound in {here.name}, and no task or workflow of that "
+                    f"name is defined in the project ({index.root}): import it first"
+                ),
+                diagnostic={"code": "type_not_found", "type": type_name, "root": str(index.root)},
+            )
+        if len(found) > 1:
+            where = ", ".join(str(d.file.relative_to(index.root)) for d in found)
+            raise RewriteError(
+                message=f"'{type_name}' is defined more than once in the project ({where}): import the one meant first",
+                diagnostic={"code": "type_ambiguous", "type": type_name, "files": [str(d.file) for d in found]},
+            )
+        modules = index.import_modules(found[0])
+        if not modules:
+            raise RewriteError(
+                message=f"'{type_name}' is defined in {found[0].file}, which is not importable from {index.root}",
+                diagnostic={"code": "type_not_importable", "type": type_name, "file": str(found[0].file)},
+            )
+        already = self._imported_from_modules()
+        for module in modules:
+            if module in already:
+                return module
+        return modules[0]
+
+    def _imported_from_modules(self) -> set[str]:
+        modules: set[str] = set()
+        for stmt in self.module.body:
+            if isinstance(stmt, cst.SimpleStatementLine):
+                for small in stmt.body:
+                    if isinstance(small, cst.ImportFrom) and small.module is not None and not small.relative:
+                        modules.add(_dotted_name(small.module))
+        return modules
+
+    # ── A workflow's own ports: `@workflow(inputs={...}, outputs={...})` ──
+
+    def _workflow_decorator(self, fn: cst.FunctionDef) -> tuple[int, cst.Decorator] | None:
+        for index, dec in enumerate(fn.decorators):
+            if _decorator_name(dec) == "workflow":
+                return index, dec
+        return None
+
+    def _workflow_port_dict(self, fn: cst.FunctionDef, ports_kw: str) -> cst.Dict | None:
+        """The `inputs=` / `outputs=` dict literal of `fn`'s `@workflow(...)`."""
+        found = self._workflow_decorator(fn)
+        if found is None or not isinstance(found[1].decorator, cst.Call):
+            return None
+        for arg in found[1].decorator.args:
+            if arg.keyword is not None and arg.keyword.value == ports_kw and isinstance(arg.value, cst.Dict):
+                return arg.value
+        return None
+
+    def _workflow_port_names(self, fn: cst.FunctionDef) -> dict[str, list[str]]:
+        """The names `fn`'s decorator declares, by keyword (`inputs`, `outputs`)."""
+        names: dict[str, list[str]] = {"inputs": [], "outputs": []}
+        for ports_kw in names:
+            mapping = self._workflow_port_dict(fn, ports_kw)
+            for element in mapping.elements if mapping is not None else []:
+                if isinstance(element, cst.DictElement):
+                    key = _string_value(element.key)
+                    if key is not None:
+                        names[ports_kw].append(key)
+        return names
+
+    def _with_workflow_decorator(self, fn: cst.FunctionDef, decorator: cst.BaseExpression) -> cst.FunctionDef:
+        found = self._workflow_decorator(fn)
+        assert found is not None
+        decorators = list(fn.decorators)
+        decorators[found[0]] = found[1].with_changes(decorator=decorator)
+        return fn.with_changes(decorators=decorators)
+
+    def _workflow_name_mentions(
+        self, fn: cst.FunctionDef, name: str
+    ) -> tuple[list[tuple[cst.Call, int]], list[cst.SimpleString]]:
+        """Where workflow `fn`'s body names its port `name` by a string: the
+        `connect(...)` ends that do (the call and which end), and every other
+        string `"name"` (a list a loop connects from, a `getattr`), which an
+        edit of the port cannot follow."""
+        ends: list[tuple[cst.Call, int]] = []
+        end_strings: set[int] = set()
+        strings: list[cst.SimpleString] = []
+
+        class _Mentions(cst.CSTVisitor):
+            def visit_Call(self, node: cst.Call) -> None:
+                if _is_connect_call(node):
+                    for index, arg in enumerate(node.args[:2]):
+                        if arg.keyword is None and _string_value(arg.value) == name:
+                            ends.append((node, index))
+                            end_strings.add(id(arg.value))
+
+            def visit_SimpleString(self, node: cst.SimpleString) -> None:
+                if _string_value(node) == name:
+                    strings.append(node)
+
+        fn.body.visit(_Mentions())
+        return ends, [string for string in strings if id(string) not in end_strings]
+
+    def _refuse_by_name(self, fn: cst.FunctionDef, name: str, others: list[cst.SimpleString], doing: str, fix: str) -> None:
+        if not others:
+            return
+        line = self._line_of(others[0])
+        where = f" at line {line}" if line is not None else ""
+        raise RewriteError(
+            message=(
+                f"port '{name}' of workflow '{fn.name.value}' is used by name{where}, "
+                f"which this {doing} cannot follow: {fix}"
+            ),
+            diagnostic={
+                "code": "port_used_by_name",
+                "workflow": fn.name.value,
+                "port": name,
+                **({"line": line} if line is not None else {}),
+            },
+        )
 
     def create_port(
         self,
@@ -923,46 +1382,187 @@ class RewriteEngine:
         portName: str,
         portType: str,
     ) -> None:
+        """Declare a port on the workflow: `"Name": type` in its decorator's
+        `inputs=` / `outputs=` dict, the keyword written when it is not
+        there yet. Nothing else of the module changes."""
         if direction not in ("input", "output"):
             raise RewriteError(message=f"Invalid port direction: {direction}")
         self._ensure_identifier(portName)
-        fn, body = self._get_workflow_body(workflow)
-        target_body = list(body.body)
-        ports_attr = "inputs" if direction == "input" else "outputs"
-        port_expr = cst.parse_expression(portType)
-        dict_entry = cst.DictElement(key=cst.SimpleString(f"\"{portName}\""), value=port_expr)
-        assign_stmt = cst.SimpleStatementLine([
-            cst.Assign(
-                targets=[cst.AssignTarget(target=cst.Name("ports"))],
-                value=cst.Call(func=cst.Name("getattr"), args=[
-                    cst.Arg(value=cst.Name(fn.name.value)),
-                    cst.Arg(value=cst.SimpleString(f"\"{ports_attr}\"")),
-                    cst.Arg(value=cst.Dict(elements=[]))
-                ])
+        port_type = _parse_user_expression(portType, f"the type of port '{portName}'")
+        fn, _body = self._get_workflow_body(workflow)
+        found = self._workflow_decorator(fn)
+        if found is None:
+            raise RewriteError(
+                message=f"'{fn.name.value}' has no @workflow decorator to declare port '{portName}' on",
+                diagnostic={"code": "workflow_not_found", "workflow": fn.name.value},
             )
-        ])
-        update_stmt = cst.SimpleStatementLine([
-            cst.Expr(
-                cst.Call(
-                    func=cst.Attribute(value=cst.Name("ports"), attr=cst.Name("update")),
-                    args=[cst.Arg(value=cst.Dict(elements=[dict_entry]))]
-                )
+        declared = self._workflow_port_names(fn)
+        if portName in declared["inputs"] or portName in declared["outputs"]:
+            raise RewriteError(
+                message=f"workflow '{fn.name.value}' has a port '{portName}' already",
+                diagnostic={"code": "port_exists", "workflow": fn.name.value, "port": portName},
             )
-        ])
-        assign_back_stmt = cst.SimpleStatementLine([
-            cst.Assign(
-                targets=[cst.AssignTarget(target=cst.Attribute(value=cst.Name(fn.name.value), attr=cst.Name(ports_attr)))],
-                value=cst.Name("ports")
+        ports_kw = "inputs" if direction == "input" else "outputs"
+        element = cst.DictElement(key=cst.SimpleString(f'"{portName}"'), value=port_type)
+        decorator = found[1].decorator
+        call = decorator if isinstance(decorator, cst.Call) else cst.Call(func=decorator, args=[])
+        args = list(call.args)
+        at = next(
+            (i for i, arg in enumerate(args) if arg.keyword is not None and arg.keyword.value == ports_kw),
+            None,
+        )
+        if at is not None and not isinstance(args[at].value, cst.Dict):
+            raise RewriteError(
+                message=(
+                    f"the {ports_kw}= of workflow '{fn.name.value}' is not written as a dict, "
+                    f"so port '{portName}' cannot be added to it here"
+                ),
+                diagnostic={"code": "unsupported_ports_form", "workflow": fn.name.value},
             )
-        ])
-        new_stmt_body = self._insert_statement(target_body, assign_stmt, "node")
-        new_stmt_body = self._insert_statement(new_stmt_body, update_stmt, "node")
-        new_stmt_body = self._insert_statement(new_stmt_body, assign_back_stmt, "node")
-        new_block = body.with_changes(body=new_stmt_body)
-        updated = self.module.with_changes(body=new_block.body)
+        if at is not None:
+            mapping = args[at].value
+            assert isinstance(mapping, cst.Dict)
+            elements = _with_inserted(list(mapping.elements), len(mapping.elements), element, mapping.lbrace.whitespace_after)
+            args[at] = args[at].with_changes(value=mapping.with_changes(elements=elements))
+        else:
+            # Inputs before outputs, as they are read.
+            outputs_at = next(
+                (i for i, arg in enumerate(args) if arg.keyword is not None and arg.keyword.value == "outputs"),
+                None,
+            )
+            position = outputs_at if ports_kw == "inputs" and outputs_at is not None else len(args)
+            new_arg = _keyword_arg(ports_kw, cst.Dict(elements=[element]))
+            args = _with_inserted(args, position, new_arg, call.whitespace_before_args)
+        self._replace_node(fn, self._with_workflow_decorator(fn, call.with_changes(args=args)))
         if "Any" in portType:
-            updated = self._ensure_any_import(updated)
-        self._set_module(updated)
+            self._set_module(self._ensure_any_import(self.module))
+
+    def delete_workflow_port_by_decorator(self, fn: cst.FunctionDef, direction: str, portName: str) -> bool:
+        """Take port `portName` out of `fn`'s decorator dict and the
+        `connect(...)` ends naming it (as a deleted node's connections go).
+        False when the decorator does not declare it."""
+        ports_kw = "inputs" if direction == "input" else "outputs"
+        mapping = self._workflow_port_dict(fn, ports_kw)
+        if mapping is None or portName not in self._workflow_port_names(fn)[ports_kw]:
+            return False
+        _ends, others = self._workflow_name_mentions(fn, portName)
+        self._refuse_by_name(fn, portName, others, "delete", "take it out there first")
+        found = self._workflow_decorator(fn)
+        assert found is not None and isinstance(found[1].decorator, cst.Call)
+        call = found[1].decorator
+        args = list(call.args)
+        at = next(i for i, arg in enumerate(args) if arg.keyword is not None and arg.keyword.value == ports_kw)
+        index = next(
+            i for i, el in enumerate(mapping.elements)
+            if isinstance(el, cst.DictElement) and _string_value(el.key) == portName
+        )
+        elements = _with_removed(list(mapping.elements), index)
+        if elements:
+            args[at] = args[at].with_changes(value=mapping.with_changes(elements=elements))
+        else:
+            args = _with_removed(args, at)
+        decorator: cst.BaseExpression = call.with_changes(args=args) if args else call.func
+        end_index = 0 if direction == "input" else 1
+
+        class _DropConnects(_WorkflowBodyTransformer):
+            def leave_SimpleStatementLine(
+                self, original_node: cst.SimpleStatementLine, updated_node: cst.SimpleStatementLine
+            ) -> cst.SimpleStatementLine | cst.RemovalSentinel:
+                kept = [
+                    small for small in updated_node.body
+                    if not (
+                        isinstance(small, cst.Expr)
+                        and _is_connect_call(small.value)
+                        and isinstance(small.value, cst.Call)
+                        and len(small.value.args) > end_index
+                        and _string_value(small.value.args[end_index].value) == portName
+                    )
+                ]
+                if len(kept) == len(updated_node.body):
+                    return updated_node
+                return updated_node.with_changes(body=kept) if kept else cst.RemovalSentinel.REMOVE
+
+            def leave_IndentedBlock(
+                self, original_node: cst.IndentedBlock, updated_node: cst.IndentedBlock
+            ) -> cst.IndentedBlock:
+                # A loop or a branch whose only statement was a connect taken out.
+                if original_node.body and not updated_node.body:
+                    return updated_node.with_changes(body=[cst.SimpleStatementLine([cst.Pass()])])
+                return updated_node
+
+        edited = self._with_workflow_decorator(fn, decorator)
+        edited_fn = edited.visit(_DropConnects(edited))
+        assert isinstance(edited_fn, cst.FunctionDef)
+        self._replace_node(fn, edited_fn)
+        return True
+
+    def rename_workflow_port(self, fn: cst.FunctionDef, old: str, new: str) -> None:
+        """Rename workflow `fn`'s own port `old`: its decorator key and every
+        `connect(...)` end naming it, or nothing at all when it is named
+        some other way the rename cannot follow."""
+        declared = self._workflow_port_names(fn)
+        if new in declared["inputs"] or new in declared["outputs"]:
+            raise RewriteError(
+                message=f"workflow '{fn.name.value}' has a port '{new}' already",
+                diagnostic={"code": "port_exists", "workflow": fn.name.value, "port": new},
+            )
+        _ends, others = self._workflow_name_mentions(fn, old)
+        self._refuse_by_name(fn, old, others, "rename", "rename it there")
+
+        class _RenameKeys(cst.CSTTransformer):
+            def leave_DictElement(self, original_node: cst.DictElement, updated_node: cst.DictElement) -> cst.DictElement:
+                if isinstance(updated_node.key, cst.SimpleString) and _string_value(updated_node.key) == old:
+                    return updated_node.with_changes(key=_quoted_like(updated_node.key, new))
+                return updated_node
+
+        class _RenameEnds(_WorkflowBodyTransformer):
+            def leave_Call(self, original_node: cst.Call, updated_node: cst.Call) -> cst.Call:
+                if not _is_connect_call(original_node):
+                    return updated_node
+                args = list(updated_node.args)
+                for index, arg in enumerate(args[:2]):
+                    if arg.keyword is None and isinstance(arg.value, cst.SimpleString) and _string_value(arg.value) == old:
+                        args[index] = arg.with_changes(value=_quoted_like(arg.value, new))
+                return updated_node.with_changes(args=args)
+
+        edited = fn
+        found = self._workflow_decorator(fn)
+        if found is not None and isinstance(found[1].decorator, cst.Call):
+            call = found[1].decorator
+            args = [
+                arg.with_changes(value=arg.value.visit(_RenameKeys()))
+                if arg.keyword is not None and arg.keyword.value in ("inputs", "outputs") and isinstance(arg.value, cst.Dict)
+                else arg
+                for arg in call.args
+            ]
+            edited = self._with_workflow_decorator(fn, call.with_changes(args=args))
+        renamed = edited.visit(_RenameEnds(edited))
+        assert isinstance(renamed, cst.FunctionDef)
+        self._replace_node(fn, renamed)
+
+    def _workflow_port_uses(self, fn: cst.FunctionDef, usedIn: Any) -> list[tuple["RewriteEngine", str, list[str]]]:
+        """The workflows the IDE names as using workflow `fn` (`usedIn`)."""
+        found: list[tuple[RewriteEngine, str, list[str]]] = []
+        here = str(Path(self.file_path).resolve())
+        for file, workflow, instances in self._port_uses(usedIn):
+            if str(Path(file).resolve()) == here and workflow == fn.name.value:
+                continue
+            try:
+                engine = self._companion(file)
+            except (OSError, cst.ParserSyntaxError) as exc:
+                raise RewriteError(
+                    message=f"{Path(file).name} cannot be read, so workflow '{workflow}' cannot be followed: {exc}",
+                    diagnostic={"code": "port_uses_unreadable", "file": file, "workflow": workflow},
+                ) from None
+            found.append((engine, workflow, instances))
+        return found
+
+    def _is_workflow_port(self, fn: cst.FunctionDef, name: str) -> bool:
+        declared = self._workflow_port_names(fn)
+        if name in declared["inputs"] or name in declared["outputs"]:
+            return True
+        ends, _others = self._workflow_name_mentions(fn, name)
+        return bool(ends)
 
     def list_task_types(self, *, kind: str) -> list[str]:
         """Every class in this file declared with the given kind's decorator.
@@ -1050,12 +1650,17 @@ class RewriteEngine:
     def _source_positions(self) -> Any | None:
         """Resolve libcst PositionProvider metadata for self.module (node → CodeRange),
         so graph elements can carry source `location`. Best-effort; None on failure."""
+        cached = getattr(self, "_positions_cache", None)
+        if cached is not None and cached[0] is self.module:
+            return cached[1]
         try:
             from libcst.metadata import MetadataWrapper, PositionProvider
 
-            return MetadataWrapper(self.module, unsafe_skip_copy=True).resolve(PositionProvider)
+            positions = MetadataWrapper(self.module, unsafe_skip_copy=True).resolve(PositionProvider)
         except Exception:
             return None
+        self._positions_cache = (self.module, positions)
+        return positions
 
     def export_workflow_graph(
         self,
@@ -1165,12 +1770,12 @@ class RewriteEngine:
         if kind == "tool":
             decorator: cst.BaseExpression = cst.Call(
                 func=cst.Name("tool"),
-                args=[cst.Arg(keyword=cst.Name("cmd"), value=cst.SimpleString('"echo"'))]
+                args=[_keyword_arg("cmd", cst.SimpleString('"echo"'))]
             )
         elif kind == "agent":
             decorator = cst.Call(
                 func=cst.Name("agent"),
-                args=[cst.Arg(keyword=cst.Name("prompt"), value=cst.SimpleString('"TODO"'))]
+                args=[_keyword_arg("prompt", cst.SimpleString('"TODO"'))]
             )
         elif kind == "viewer":
             decorator = cst.Name("viewer")
@@ -1181,88 +1786,45 @@ class RewriteEngine:
             # the file and letting import time report it would be a poor way to
             # find out.
             sb_args = [
-                cst.Arg(keyword=cst.Name("facade"), value=cst.SimpleString(f'"{facade}"'))
+                _keyword_arg("facade", cst.SimpleString(f'"{facade}"'))
             ]
             if (network or "").strip():
                 sb_args.append(
-                    cst.Arg(
-                        keyword=cst.Name("network"),
-                        value=cst.SimpleString(f'"{network}"'),
-                    )
+                    _keyword_arg("network", cst.SimpleString(f'"{network}"'))
                 )
             decorator = cst.Call(func=cst.Name("streamblocks"), args=sb_args)
         elif kind == "source" and isinstance(viewType, str) and viewType.strip():
             decorator = cst.Call(
                 func=cst.Name("source"),
-                args=[cst.Arg(
-                    keyword=cst.Name("viewType"),
-                    value=cst.SimpleString(f'"{viewType.strip()}"'),
-                )],
+                args=[_keyword_arg("viewType", cst.SimpleString(f'"{viewType.strip()}"'))],
             )
         else:
             # An empty viewType is not the same as none: it would ask the IDE
             # to open with an editor named "". No editor means the default one.
             decorator = cst.Name(kind)
-        ensure_import = False
+        def port(name: str, type_name: str, direction: str) -> cst.SimpleStatementLine:
+            # The direction is said, not left to `Port`'s default ("inout").
+            return cst.SimpleStatementLine([
+                cst.Assign(
+                    targets=[cst.AssignTarget(target=cst.Name(name))],
+                    value=cst.Call(
+                        func=cst.Subscript(
+                            value=cst.Name("Port"),
+                            slice=[cst.SubscriptElement(slice=cst.Index(value=cst.Name(type_name)))],
+                        ),
+                        args=[_keyword_arg("direction", cst.SimpleString(f'"{direction}"'))],
+                    ),
+                )
+            ])
+
         # A source is the mirror of a viewer: one output, no input. Writing the
         # default In + Out would produce a class the decorator refuses to load.
         if kind == "source":
-            ports_body = [
-                cst.SimpleStatementLine([
-                    cst.Assign(
-                        targets=[cst.AssignTarget(target=cst.Name("Out"))],
-                        value=cst.Call(
-                            func=cst.Subscript(
-                                value=cst.Name("Port"),
-                                slice=[cst.SubscriptElement(slice=cst.Index(value=cst.Name("File")))]
-                            ),
-                            args=[cst.Arg(keyword=cst.Name("direction"), value=cst.SimpleString('"out"'))]
-                        )
-                    )
-                ])
-            ]
+            ports_body = [port("Out", "File", "out")]
         elif kind == "viewer":
-            ports_body = [
-                cst.SimpleStatementLine([
-                    cst.Assign(
-                        targets=[cst.AssignTarget(target=cst.Name("In"))],
-                        value=cst.Call(
-                            func=cst.Subscript(
-                                value=cst.Name("Port"),
-                                slice=[cst.SubscriptElement(slice=cst.Index(value=cst.Name("Any")))]
-                            ),
-                            args=[]
-                        )
-                    )
-                ])
-            ]
+            ports_body = [port("In", "Any", "in")]
         else:
-            ports_body = [
-                cst.SimpleStatementLine([
-                    cst.Assign(
-                        targets=[cst.AssignTarget(target=cst.Name("In"))],
-                        value=cst.Call(
-                            func=cst.Subscript(
-                                value=cst.Name("Port"),
-                                slice=[cst.SubscriptElement(slice=cst.Index(value=cst.Name("Any")))]
-                            ),
-                            args=[]
-                        )
-                    )
-                ]),
-                cst.SimpleStatementLine([
-                    cst.Assign(
-                        targets=[cst.AssignTarget(target=cst.Name("Out"))],
-                        value=cst.Call(
-                            func=cst.Subscript(
-                                value=cst.Name("Port"),
-                                slice=[cst.SubscriptElement(slice=cst.Index(value=cst.Name("Any")))]
-                            ),
-                            args=[cst.Arg(keyword=cst.Name("direction"), value=cst.SimpleString('"out"'))]
-                        )
-                    )
-                ])
-            ]
+            ports_body = [port("In", "Any", "in"), port("Out", "Any", "out")]
         ensure_import = True
         ports_class = cst.ClassDef(
             name=cst.Name("Ports"),
@@ -1280,10 +1842,14 @@ class RewriteEngine:
                     value=None,
                 )
             ]))
+            ports_class = ports_class.with_changes(leading_lines=[cst.EmptyLine(indent=False)])
+            class_body[1] = ports_class
         class_def = cst.ClassDef(
             name=cst.Name(name),
             decorators=[cst.Decorator(decorator=decorator)],
-            body=cst.IndentedBlock(body=class_body)
+            body=cst.IndentedBlock(body=class_body),
+            # Two blank lines around a top-level definition.
+            leading_lines=[cst.EmptyLine(), cst.EmptyLine()],
         )
         body = list(self.module.body)
         insert_at = len(body)
@@ -1291,6 +1857,17 @@ class RewriteEngine:
             if isinstance(stmt, cst.FunctionDef) and self._is_workflow_def(stmt):
                 insert_at = idx
                 break
+        if insert_at < len(body):
+            following = body[insert_at]
+            blank = 0
+            for line in following.leading_lines:
+                if line.comment is not None:
+                    break
+                blank += 1
+            if blank < 2:
+                body[insert_at] = following.with_changes(
+                    leading_lines=[*[cst.EmptyLine()] * (2 - blank), *following.leading_lines]
+                )
         new_body = body[:insert_at] + [class_def] + body[insert_at:]
         updated = self.module.with_changes(body=new_body)
         if ensure_import:
@@ -1401,30 +1978,80 @@ class RewriteEngine:
                 names=[cst.ImportAlias(name=cst.Name(name)) for name in sorted(wanted)],
             )
         ])
-        insert_at = 0
+        return module.with_changes(body=self._placed_import(list(body), new_import, package))
+
+    def _import_group(self, package: str, relative: bool = False) -> int:
+        """0 the standard library, 1 an installed package, 2 the project's own."""
+        if relative:
+            return 2
+        top = package.split(".", 1)[0]
+        if top in getattr(sys, "stdlib_module_names", ()) or top == "__future__":
+            return 0
+        from wfpy._project_index import project_root
+
+        root = project_root(self.file_path)
+        if (root / top).is_dir() or (root / f"{top}.py").is_file():
+            return 2
+        return 1
+
+    def _placed_import(
+        self, body: list[cst.BaseStatement], new_import: cst.SimpleStatementLine, package: str
+    ) -> list[cst.BaseStatement]:
+        """`body` with `new_import` among the file's imports, as they are
+        grouped: after the last import of its group (the standard library,
+        installed packages, the project's own), else between the groups
+        around it; after the docstring, one blank line on each side, when the
+        file imports nothing yet."""
+        start = 0
         if body:
             first = body[0]
             if isinstance(first, cst.SimpleStatementLine) and len(first.body) == 1:
                 expr = first.body[0]
                 if isinstance(expr, cst.Expr) and isinstance(expr.value, cst.SimpleString):
                     # Keep a module docstring first.
-                    insert_at = 1
-        # And `from __future__` imports, which must precede every other line.
-        while insert_at < len(body):
-            line = body[insert_at]
+                    start = 1
+        # The leading import block (`from __future__` included).
+        imports: list[tuple[int, int]] = []  # (index, group)
+        index = start
+        while index < len(body):
+            line = body[index]
             if not (
                 isinstance(line, cst.SimpleStatementLine)
-                and all(
-                    isinstance(stmt, cst.ImportFrom)
-                    and stmt.module is not None
-                    and _dotted_name(stmt.module) == "__future__"
-                    for stmt in line.body
-                )
+                and line.body
+                and all(isinstance(stmt, (cst.Import, cst.ImportFrom)) for stmt in line.body)
             ):
                 break
-            insert_at += 1
-        new_body = body[:insert_at] + [new_import] + body[insert_at:]
-        return module.with_changes(body=new_body)
+            stmt = line.body[0]
+            if isinstance(stmt, cst.ImportFrom):
+                name = _dotted_name(stmt.module) if stmt.module is not None else ""
+                group = -1 if name == "__future__" else self._import_group(name, bool(stmt.relative))
+            elif isinstance(stmt, cst.Import):
+                group = self._import_group(_dotted_name(stmt.names[0].name))
+            else:
+                group = 1
+            imports.append((index, group))
+            index += 1
+        group = self._import_group(package)
+        if not imports:
+            placed = new_import.with_changes(leading_lines=[cst.EmptyLine()] if start else [])
+            rest = body[start:]
+            if rest and not getattr(rest[0], "leading_lines", True):
+                rest = [rest[0].with_changes(leading_lines=[cst.EmptyLine()]), *rest[1:]]
+            return [*body[:start], placed, *rest]
+        same = [i for i, g in imports if g == group]
+        if same:
+            at = same[-1] + 1
+            return [*body[:at], new_import.with_changes(leading_lines=[]), *body[at:]]
+        earlier = [i for i, g in imports if g < group]
+        if earlier:
+            at = earlier[-1] + 1
+            return [*body[:at], new_import.with_changes(leading_lines=[cst.EmptyLine()]), *body[at:]]
+        # Before the first import of a later group, which keeps its own lines
+        # above the new one and gets a blank line between the two groups.
+        at = imports[0][0]
+        following = body[at]
+        placed = new_import.with_changes(leading_lines=getattr(following, "leading_lines", []))
+        return [*body[:at], placed, following.with_changes(leading_lines=[cst.EmptyLine()]), *body[at + 1:]]
 
     def connect(
         self,
@@ -1447,37 +2074,24 @@ class RewriteEngine:
         call = cst.Call(
             func=cst.Name("connect"),
             args=[
-                cst.Arg(value=cst.parse_expression(from_expr)),
-                cst.Arg(value=cst.parse_expression(to_expr)),
+                cst.Arg(value=_parse_user_expression(from_expr, "the connection's source")),
+                cst.Arg(value=_parse_user_expression(to_expr, "the connection's target")),
             ],
         )
         stmt = cst.SimpleStatementLine([cst.Expr(call)])
         new_stmt_body = self._insert_statement(target_body, stmt, "connect")
         new_block = target_block.with_changes(body=new_stmt_body)
-        self._update_scope_body(fn.name.value, scope_control, scope_branch, new_block)
+        self._update_scope_body(fn, scope_control, scope_branch, new_block)
 
     def delete_node(self, *, workflow: str | None = None, name: str) -> None:
         fn, _ = self._get_workflow_body(workflow)
 
-        class _RemoveNode(cst.CSTTransformer):
-            def __init__(self, fn_name: str, node_name: str) -> None:
-                self._fn_name = fn_name
+        class _RemoveNode(_WorkflowBodyTransformer):
+            def __init__(self, fn_node: cst.FunctionDef, node_name: str) -> None:
+                super().__init__(fn_node)
                 self._node_name = node_name
-                self._in_target_fn = False
+                self._in_target_fn = True
                 self.removed = False
-
-            def visit_FunctionDef(self, node: cst.FunctionDef) -> bool:
-                if self._in_target_fn:
-                    return False
-                if node.name.value == self._fn_name:
-                    self._in_target_fn = True
-                    return True
-                return False
-
-            def leave_FunctionDef(self, original_node: cst.FunctionDef, updated_node: cst.FunctionDef) -> cst.FunctionDef:
-                if original_node.name.value == self._fn_name:
-                    self._in_target_fn = False
-                return updated_node
 
             def _is_incident_edge_expr(self, expr: cst.BaseExpression) -> bool:
                 code = _expr_to_code(expr)
@@ -1524,33 +2138,20 @@ class RewriteEngine:
                     return cst.RemovalSentinel.REMOVE
                 return updated_node.with_changes(body=kept)
 
-        transformer = _RemoveNode(fn.name.value, name)
-        updated = self.module.visit(transformer)
-        if not transformer.removed:
-            raise RewriteError(message=f"Node not found: {name}")
-        self._set_module(updated)
+        transformer = _RemoveNode(fn, name)
+        updated = fn.visit(transformer)
+        if not transformer.removed or not isinstance(updated, cst.FunctionDef):
+            raise RewriteError(message=f"Node not found: {name}", diagnostic={"code": "node_not_found"})
+        self._replace_node(fn, updated)
 
     def delete_edge(self, *, workflow: str | None = None, from_expr: str, to_expr: str) -> None:
         fn, _ = self._get_workflow_body(workflow)
 
-        class _RemoveEdge(cst.CSTTransformer):
-            def __init__(self, fn_name: str) -> None:
-                self._fn_name = fn_name
-                self._in_target_fn = False
+        class _RemoveEdge(_WorkflowBodyTransformer):
+            def __init__(self, fn_node: cst.FunctionDef) -> None:
+                super().__init__(fn_node)
+                self._in_target_fn = True
                 self.removed = False
-
-            def visit_FunctionDef(self, node: cst.FunctionDef) -> bool:
-                if self._in_target_fn:
-                    return False
-                if node.name.value == self._fn_name:
-                    self._in_target_fn = True
-                    return True
-                return False
-
-            def leave_FunctionDef(self, original_node: cst.FunctionDef, updated_node: cst.FunctionDef) -> cst.FunctionDef:
-                if original_node.name.value == self._fn_name:
-                    self._in_target_fn = False
-                return updated_node
 
             def leave_SimpleStatementLine(
                 self,
@@ -1578,16 +2179,40 @@ class RewriteEngine:
                         return cst.RemovalSentinel.REMOVE
                 return updated_node
 
-        transformer = _RemoveEdge(fn.name.value)
-        updated = self.module.visit(transformer)
-        if not transformer.removed:
-            raise RewriteError(message="Edge not found")
-        self._set_module(updated)
+        transformer = _RemoveEdge(fn)
+        updated = fn.visit(transformer)
+        if not transformer.removed or not isinstance(updated, cst.FunctionDef):
+            raise RewriteError(message="Edge not found", diagnostic={"code": "edge_not_found"})
+        self._replace_node(fn, updated)
 
-    def delete_port(self, *, workflow: str | None = None, direction: str, portName: str) -> None:
+    def delete_port(
+        self, *, workflow: str | None = None, direction: str, portName: str, usedIn: Any = None
+    ) -> None:
         if direction not in ("input", "output"):
             raise RewriteError(message=f"Invalid port direction: {direction}")
         fn, body = self._get_workflow_body(workflow)
+        # Refused while a workflow using this one (`usedIn`) still names it.
+        for engine, use_workflow, instances in self._workflow_port_uses(fn, usedIn):
+            connected, used = engine.instance_port_mentions(use_workflow, instances, portName)
+            if connected or used:
+                names = [*connected, *(n for n, _ in used if n not in connected)]
+                raise RewriteError(
+                    message=(
+                        f"port '{portName}' of {', '.join(repr(n) for n in names)} is "
+                        f"{'connected' if not used else 'used'} in workflow '{use_workflow}': "
+                        + ("delete its connections first" if not used else "take it out of the workflow first")
+                    ),
+                    diagnostic={
+                        "code": "port_in_use",
+                        "workflow": use_workflow,
+                        "file": engine.file_path,
+                        "portName": portName,
+                        "instances": names,
+                    },
+                )
+        if self.delete_workflow_port_by_decorator(fn, direction, portName):
+            return
+        # The older form: `<workflow>.outputs = {...}` assigned beside it.
         ports_attr = "inputs" if direction == "input" else "outputs"
 
         class _RemovePort(cst.CSTTransformer):
@@ -1632,7 +2257,10 @@ class RewriteEngine:
         transformer = _RemovePort()
         updated = self.module.visit(transformer)
         if not transformer.removed:
-            raise RewriteError(message=f"Port not found: {portName}")
+            raise RewriteError(
+                message=f"Port not found: {portName}",
+                diagnostic={"code": "port_not_found", "workflow": fn.name.value, "port": portName},
+            )
         self._set_module(updated)
 
     def update_node_parameter(
@@ -1643,47 +2271,52 @@ class RewriteEngine:
         parameterName: str,
         newValue: str,
     ) -> None:
+        """Set keyword `parameterName` of the call that makes instance
+        `entity` of the workflow: `Cls(...)`, or the factory call of a
+        workflow a factory makes (`flow = factory(...)()`)."""
+        if not str(parameterName).isidentifier() or keyword.iskeyword(str(parameterName)):
+            raise RewriteError(
+                message=f"invalid parameter name: {parameterName}",
+                diagnostic={"code": "invalid_parameter_name"},
+            )
+        value = _parse_user_expression(newValue, f"the value of {entity}.{parameterName}")
         fn, body = self._get_workflow_body(workflow)
 
-        class _UpdateParam(cst.CSTTransformer):
+        class _UpdateParam(_WorkflowBodyTransformer):
             def __init__(self) -> None:
+                super().__init__(fn)
                 self.updated = False
 
-            def leave_SimpleStatementLine(
-                self,
-                original_node: cst.SimpleStatementLine,
-                updated_node: cst.SimpleStatementLine,
-            ) -> cst.SimpleStatementLine:
-                if self.updated:
+            def _set(self, call: cst.Call) -> cst.Call:
+                args = list(call.args)
+                for idx, arg in enumerate(args):
+                    if arg.keyword and arg.keyword.value == parameterName:
+                        args[idx] = arg.with_changes(value=value)
+                        return call.with_changes(args=args)
+                args = _with_inserted(args, len(args), _keyword_arg(parameterName, value), call.whitespace_before_args)
+                return call.with_changes(args=args)
+
+            def leave_Assign(self, original_node: cst.Assign, updated_node: cst.Assign) -> cst.Assign:
+                if self.updated or len(updated_node.targets) != 1:
                     return updated_node
-                new_body: list[cst.BaseSmallStatement] = []
-                changed = False
-                for stmt in updated_node.body:
-                    if isinstance(stmt, cst.Assign) and len(stmt.targets) == 1:
-                        target = stmt.targets[0].target
-                        if isinstance(target, cst.Name) and target.value == entity and isinstance(stmt.value, cst.Call):
-                            args = list(stmt.value.args)
-                            found = False
-                            for idx, arg in enumerate(args):
-                                if arg.keyword and arg.keyword.value == parameterName:
-                                    args[idx] = arg.with_changes(value=cst.parse_expression(newValue))
-                                    found = True
-                                    changed = True
-                                    self.updated = True
-                                    break
-                            if not found:
-                                args.append(cst.Arg(keyword=cst.Name(parameterName), value=cst.parse_expression(newValue)))
-                                changed = True
-                                self.updated = True
-                            stmt = stmt.with_changes(value=stmt.value.with_changes(args=args))
-                    new_body.append(stmt)
-                return updated_node.with_changes(body=new_body) if changed else updated_node
+                target = updated_node.targets[0].target
+                call = updated_node.value
+                if not (isinstance(target, cst.Name) and target.value == entity and isinstance(call, cst.Call)):
+                    return updated_node
+                self.updated = True
+                if isinstance(call.func, cst.Call) and not call.args:
+                    # `factory(...)()`: the parameters are the factory's.
+                    return updated_node.with_changes(value=call.with_changes(func=self._set(call.func)))
+                return updated_node.with_changes(value=self._set(call))
 
         transformer = _UpdateParam()
-        updated = self.module.visit(transformer)
-        if not transformer.updated:
-            raise RewriteError(message=f"Entity parameter not found: {entity}.{parameterName}")
-        self._set_module(updated)
+        updated = fn.visit(transformer)
+        if not transformer.updated or not isinstance(updated, cst.FunctionDef):
+            raise RewriteError(
+                message=f"Entity parameter not found: {entity}.{parameterName}",
+                diagnostic={"code": "node_not_found"},
+            )
+        self._replace_node(fn, updated)
 
     def update_definition_annotation(
         self,
@@ -1702,7 +2335,7 @@ class RewriteEngine:
                     return cst.Name("None")
             return value
 
-        parsed_decorator = cst.parse_expression(annotationText.lstrip('@'))
+        parsed_decorator = _parse_user_expression(str(annotationText).strip().lstrip('@'), f"the annotation @{annotationName}")
         if isinstance(parsed_decorator, cst.Call):
             normalized_args: list[cst.Arg] = []
             for arg in parsed_decorator.args:
@@ -1739,6 +2372,7 @@ class RewriteEngine:
         if not transformer.updated:
             raise RewriteError(message=f"Definition not found for annotation update: {entityType}")
         self._set_module(updated)
+        self._ensure_wfpy_decorator_import(parsed_decorator)
 
     def merge_definition_annotation_args(
         self,
@@ -1768,7 +2402,7 @@ class RewriteEngine:
         # Parse each update value as a CST expression
         parsed_updates: dict[str, cst.BaseExpression] = {}
         for name, expr_str in argUpdates.items():
-            parsed = cst.parse_expression(expr_str.strip())
+            parsed = _parse_user_expression(expr_str, f"the value of {name} on @{annotationName}")
             parsed = _normalize_python_literal_name(parsed)
             parsed_updates[name] = parsed
 
@@ -1863,6 +2497,20 @@ class RewriteEngine:
         if not transformer.updated:
             raise RewriteError(message=f"Definition not found for annotation merge: {entityType}")
         self._set_module(updated)
+        self._ensure_wfpy_decorator_import(cst.Name(annotationName))
+
+    def _ensure_wfpy_decorator_import(self, decorator: cst.BaseExpression) -> None:
+        """A decorator the edit wrote that is one of wfpy's (`@tool`,
+        `@viewer`, ...) and that this file does not bind yet is imported from
+        wfpy, as a created class's decorator is."""
+        target = decorator.func if isinstance(decorator, cst.Call) else decorator
+        if not isinstance(target, cst.Name):
+            return  # `@wfpy.tool(...)` needs no name of its own
+        import wfpy
+
+        name = target.value
+        if name in getattr(wfpy, "__all__", ()) and not self._binds(name):
+            self._set_module(self._ensure_import(self.module, "wfpy", [name]))
 
     def remove_definition_annotation(
         self,
@@ -1901,6 +2549,32 @@ class RewriteEngine:
             raise RewriteError(message=f"Annotation not found for removal: {entityType}.{annotationName}")
         self._set_module(updated)
 
+    @staticmethod
+    def _parse_parameter_text(text: str) -> cst.Param:
+        """`name: type = default` (each part but the name optional) as a parameter."""
+        source = str(text).strip()
+        try:
+            fn = cst.parse_statement(f"def _f({source}):\n    pass\n")
+        except cst.ParserSyntaxError:
+            fn = None
+        params = fn.params if isinstance(fn, cst.FunctionDef) else None
+        if (
+            params is None
+            or len(params.params) != 1
+            or params.posonly_params
+            or params.kwonly_params
+            or isinstance(params.star_arg, cst.Param)
+            or params.star_kwarg is not None
+        ):
+            raise RewriteError(
+                message=f"the parameter is not written as `name: type = default`: {source!r}",
+                diagnostic={"code": "invalid_expression", "expression": source},
+            )
+        param = params.params[0]
+        if keyword.iskeyword(param.name.value):
+            raise RewriteError(message=f"invalid parameter name: {param.name.value}", diagnostic={"code": "invalid_parameter_name"})
+        return param
+
     def update_definition_parameter(
         self,
         *,
@@ -1908,92 +2582,373 @@ class RewriteEngine:
         parameterName: str,
         parameterText: str,
     ) -> None:
-        class _UpdateDefParam(cst.CSTTransformer):
-            def __init__(self) -> None:
-                self.updated = False
+        """Add or change parameter `parameterName` of `entityType`, as
+        `parameterText` (`name: type = default`) says.
 
-            def leave_FunctionDef(self, original_node: cst.FunctionDef, updated_node: cst.FunctionDef) -> cst.FunctionDef:
-                if self.updated or original_node.name.value != entityType:
-                    return updated_node
-                parsed_name, parsed_type, parsed_default = self._parse_parameter_text(parameterText)
-                params = list(updated_node.params.params)
-                replacement = self._build_param(parsed_name, parsed_type, parsed_default)
-                replaced = False
-                for idx, param in enumerate(params):
-                    if param.name.value == parameterName:
-                        params[idx] = replacement
-                        replaced = True
-                        break
-                if not replaced:
-                    params.append(replacement)
-                self.updated = True
-                return updated_node.with_changes(params=updated_node.params.with_changes(params=params))
-
-            def leave_ClassDef(self, original_node: cst.ClassDef, updated_node: cst.ClassDef) -> cst.ClassDef:
-                if self.updated or original_node.name.value != entityType:
-                    return updated_node
-                init_fn = None
-                init_idx = -1
-                for idx, stmt in enumerate(updated_node.body.body):
-                    if isinstance(stmt, cst.FunctionDef) and stmt.name.value == '__init__':
-                        init_fn = stmt
-                        init_idx = idx
-                        break
-                parsed_name, parsed_type, parsed_default = self._parse_parameter_text(parameterText)
-                if init_fn is None:
-                    params = [cst.Param(name=cst.Name('self')), self._build_param(parsed_name, parsed_type, parsed_default)]
-                    init_fn = cst.FunctionDef(
-                        name=cst.Name('__init__'),
-                        params=cst.Parameters(params=params),
-                        body=cst.IndentedBlock(body=[cst.SimpleStatementLine([cst.Pass()])])
+        A class task's parameter is an annotated field with no default (one
+        with a default is state, `core._classify_fields`): it is written as
+        `name: type` in the class body, beside the class's other
+        parameters, never as an `__init__`. A function's (a factory's, a
+        workflow's) is a parameter of its signature."""
+        param = self._parse_parameter_text(parameterText)
+        top = {
+            stmt.name.value: stmt
+            for stmt in self.module.body
+            if isinstance(stmt, (cst.FunctionDef, cst.ClassDef))
+        }
+        target = top.get(entityType)
+        if isinstance(target, cst.ClassDef):
+            if self._is_task_class(target):
+                self._update_class_parameter(target, parameterName, param)
+                return
+            self._update_init_parameter(target, parameterName, param)
+            return
+        if isinstance(target, cst.FunctionDef):
+            params = list(target.params.params)
+            for idx, existing in enumerate(params):
+                if existing.name.value == parameterName:
+                    params[idx] = existing.with_changes(
+                        name=param.name, annotation=param.annotation, default=param.default,
+                        equal=param.equal,
                     )
-                    body = list(updated_node.body.body)
-                    body.append(init_fn)
-                    self.updated = True
-                    return updated_node.with_changes(body=updated_node.body.with_changes(body=body))
+                    break
+            else:
+                params.append(param.with_changes(comma=cst.MaybeSentinel.DEFAULT))
+            self._replace_node(target, target.with_changes(params=target.params.with_changes(params=params)))
+            return
+        raise RewriteError(
+            message=f"Definition parameter update failed: {entityType}.{parameterName}",
+            diagnostic={"code": "definition_not_found", "entityType": entityType},
+        )
 
-                params = list(init_fn.params.params)
-                replaced = False
-                for idx, param in enumerate(params):
-                    if param.name.value == parameterName:
-                        params[idx] = self._build_param(parsed_name, parsed_type, parsed_default)
-                        replaced = True
-                        break
-                if not replaced:
-                    params.append(self._build_param(parsed_name, parsed_type, parsed_default))
-                body = list(updated_node.body.body)
-                body[init_idx] = init_fn.with_changes(params=init_fn.params.with_changes(params=params))
-                self.updated = True
-                return updated_node.with_changes(body=updated_node.body.with_changes(body=body))
+    @staticmethod
+    def _is_task_class(cls: cst.ClassDef) -> bool:
+        return any(_decorator_name(dec) in TASK_TYPE_KINDS or _decorator_name(dec) == "context" for dec in cls.decorators)
 
-            def _parse_parameter_text(self, text: str) -> tuple[str, str | None, str | None]:
-                name = text.strip()
-                type_expr: str | None = None
-                default_expr: str | None = None
-                if '=' in name:
-                    left, right = name.split('=', 1)
-                    name = left.strip()
-                    default_expr = right.strip()
-                if ':' in name:
-                    left, right = name.split(':', 1)
-                    name = left.strip()
-                    type_expr = right.strip()
-                if not name.isidentifier() or keyword.iskeyword(name):
-                    raise RewriteError(message=f"invalid parameter name: {name}")
-                return name, type_expr, default_expr
+    def _update_class_parameter(self, cls: cst.ClassDef, parameter_name: str, param: cst.Param) -> None:
+        name = param.name.value
+        if param.default is not None:
+            raise RewriteError(
+                message=(
+                    f"'{name}' of '{cls.name.value}' would have a default, which makes a field of a task "
+                    f"state, not a parameter: write `{name}: <type>` and give each node its value"
+                ),
+                diagnostic={"code": "parameter_has_default", "entityType": cls.name.value, "parameter": name},
+            )
+        annotation = param.annotation.annotation if param.annotation is not None else cst.Name("Any")
+        body: list[cst.BaseStatement] = [stmt for stmt in cls.body.body if isinstance(stmt, cst.BaseStatement)]
 
-            def _build_param(self, name: str, type_expr: str | None, default_expr: str | None) -> cst.Param:
-                return cst.Param(
-                    name=cst.Name(name),
-                    annotation=cst.Annotation(cst.parse_expression(type_expr)) if type_expr else None,
-                    default=cst.parse_expression(default_expr) if default_expr else None,
+        def field_of(stmt: cst.CSTNode) -> cst.AnnAssign | None:
+            if isinstance(stmt, cst.SimpleStatementLine) and len(stmt.body) == 1 and isinstance(stmt.body[0], cst.AnnAssign):
+                ann = stmt.body[0]
+                return ann if isinstance(ann.target, cst.Name) else None
+            return None
+
+        parameters = [
+            i for i, stmt in enumerate(body)
+            if (f := field_of(stmt)) is not None and f.value is None and isinstance(f.target, cst.Name)
+            and not f.target.value.startswith("_")
+        ]
+        # The end comment the class's parameters carry (`# parameter`), if they do.
+        comment: cst.TrailingWhitespace | None = None
+        for i in parameters:
+            stmt = body[i]
+            assert isinstance(stmt, cst.SimpleStatementLine)
+            if stmt.trailing_whitespace.comment is not None:
+                comment = cst.TrailingWhitespace(
+                    whitespace=cst.SimpleWhitespace("  "),
+                    comment=stmt.trailing_whitespace.comment,
+                    newline=cst.Newline(),
                 )
+                break
+        existing = next(
+            (i for i, stmt in enumerate(body)
+             if (f := field_of(stmt)) is not None and isinstance(f.target, cst.Name) and f.target.value == parameter_name),
+            None,
+        )
+        if existing is not None:
+            stmt = body[existing]
+            assert isinstance(stmt, cst.SimpleStatementLine)
+            old = stmt.body[0]
+            assert isinstance(old, cst.AnnAssign)
+            new_field = old.with_changes(
+                target=cst.Name(name), annotation=cst.Annotation(annotation), value=None, equal=cst.MaybeSentinel.DEFAULT,
+            )
+            body[existing] = stmt.with_changes(body=[new_field])
+        else:
+            line = cst.SimpleStatementLine(
+                [cst.AnnAssign(target=cst.Name(name), annotation=cst.Annotation(annotation), value=None)],
+            )
+            if comment is not None:
+                line = line.with_changes(trailing_whitespace=comment)
+            if parameters:
+                at = parameters[-1] + 1
+            else:
+                at = self._first_non_docstring_index(body)
+            body.insert(at, line)
+            body = self._strip_placeholder_pass(body)
+        self._replace_node(cls, cls.with_changes(body=cls.body.with_changes(body=body)))
+        if param.annotation is None and "Any" not in self._module_level_names():
+            self._set_module(self._ensure_any_import(self.module))
 
-        transformer = _UpdateDefParam()
-        updated = self.module.visit(transformer)
-        if not transformer.updated:
-            raise RewriteError(message=f"Definition parameter update failed: {entityType}.{parameterName}")
-        self._set_module(updated)
+    def _update_init_parameter(self, cls: cst.ClassDef, parameter_name: str, param: cst.Param) -> None:
+        """A plain class (no wfpy decorator) takes its parameters in `__init__`."""
+        body: list[cst.BaseStatement] = [stmt for stmt in cls.body.body if isinstance(stmt, cst.BaseStatement)]
+        init_idx = next(
+            (i for i, stmt in enumerate(body) if isinstance(stmt, cst.FunctionDef) and stmt.name.value == "__init__"),
+            None,
+        )
+        if init_idx is None:
+            body.append(cst.FunctionDef(
+                name=cst.Name("__init__"),
+                params=cst.Parameters(params=[cst.Param(name=cst.Name("self")), param.with_changes(comma=cst.MaybeSentinel.DEFAULT)]),
+                body=cst.IndentedBlock(body=[cst.SimpleStatementLine([cst.Pass()])]),
+            ))
+            body = self._strip_placeholder_pass(body)
+        else:
+            init_fn = body[init_idx]
+            assert isinstance(init_fn, cst.FunctionDef)
+            params = list(init_fn.params.params)
+            for idx, existing in enumerate(params):
+                if existing.name.value == parameter_name:
+                    params[idx] = param.with_changes(comma=existing.comma)
+                    break
+            else:
+                params.append(param.with_changes(comma=cst.MaybeSentinel.DEFAULT))
+            body[init_idx] = init_fn.with_changes(params=init_fn.params.with_changes(params=params))
+        self._replace_node(cls, cls.with_changes(body=cls.body.with_changes(body=body)))
+
+    # ── A class's own ports: `class Ports:` of a task ────────────────────
+
+    def _class_def(self, entity: str) -> cst.ClassDef | None:
+        """The class `entity` of this file: at the top level, else the first
+        of the name at any depth (a factory's)."""
+        for stmt in self.module.body:
+            if isinstance(stmt, cst.ClassDef) and stmt.name.value == entity:
+                return stmt
+        found: list[cst.ClassDef] = []
+
+        class _Find(cst.CSTVisitor):
+            def visit_ClassDef(self, node: cst.ClassDef) -> None:
+                if node.name.value == entity and not found:
+                    found.append(node)
+
+        self.module.visit(_Find())
+        return found[0] if found else None
+
+    def _require_class(self, entity: str) -> cst.ClassDef:
+        cls = self._class_def(entity)
+        if cls is None:
+            raise RewriteError(
+                message=f"no class '{entity}' in {Path(self.file_path).name}",
+                diagnostic={"code": "definition_not_found", "entityType": entity, "file": self.file_path},
+            )
+        return cls
+
+    @staticmethod
+    def _ports_class(cls: cst.ClassDef) -> cst.ClassDef | None:
+        for stmt in cls.body.body:
+            if isinstance(stmt, cst.ClassDef) and stmt.name.value == "Ports":
+                return stmt
+        return None
+
+    def _class_port_names(self, cls: cst.ClassDef) -> list[str]:
+        ports = self._ports_class(cls)
+        names: list[str] = []
+        for line in ports.body.body if ports is not None else []:
+            if isinstance(line, cst.SimpleStatementLine):
+                for small in line.body:
+                    if isinstance(small, (cst.Assign, cst.AnnAssign)):
+                        targets = [t.target for t in small.targets] if isinstance(small, cst.Assign) else [small.target]
+                        names.extend(t.value for t in targets if isinstance(t, cst.Name))
+        return names
+
+    def _action_port_mentions(self, cls: cst.ClassDef, port: str) -> list[tuple[str, str, cst.CSTNode]]:
+        """The `@action(consumes=..., produces=...)` of `cls` naming `port`:
+        (action, keyword, the key)."""
+        found: list[tuple[str, str, cst.CSTNode]] = []
+        for stmt in cls.body.body:
+            if not isinstance(stmt, cst.FunctionDef):
+                continue
+            for dec in stmt.decorators:
+                if _decorator_name(dec) != "action" or not isinstance(dec.decorator, cst.Call):
+                    continue
+                for arg in dec.decorator.args:
+                    if arg.keyword is None or arg.keyword.value not in ("consumes", "produces"):
+                        continue
+                    if isinstance(arg.value, cst.Dict):
+                        for element in arg.value.elements:
+                            if isinstance(element, cst.DictElement) and _string_value(element.key) == port:
+                                found.append((stmt.name.value, arg.keyword.value, element.key))
+        return found
+
+    def _workflow_defs_in_file(self) -> list[cst.FunctionDef]:
+        """Every `@workflow def` of this file, a factory's included."""
+        found: list[cst.FunctionDef] = []
+        matcher = self
+
+        class _Find(cst.CSTVisitor):
+            def visit_FunctionDef(self, node: cst.FunctionDef) -> None:
+                if matcher._is_workflow_def(node):
+                    found.append(node)
+
+        self.module.visit(_Find())
+        return found
+
+    def _local_instances(self, fn: cst.FunctionDef, type_name: str) -> list[str]:
+        """The names workflow `fn` binds instances of class `type_name` to."""
+        names: list[str] = []
+
+        class _Find(cst.CSTVisitor):
+            def visit_FunctionDef(self, node: cst.FunctionDef) -> bool:
+                return node is fn
+
+            def visit_Assign(self, node: cst.Assign) -> None:
+                call = node.value
+                if isinstance(call, cst.Call) and isinstance(call.func, cst.Name) and call.func.value == type_name:
+                    for target in node.targets:
+                        if isinstance(target.target, cst.Name) and target.target.value not in names:
+                            names.append(target.target.value)
+
+        fn.visit(_Find())
+        return names
+
+    def instance_port_mentions(
+        self, workflow: str, instances: Iterable[str], port: str, new: str | None = None
+    ) -> tuple[list[str], list[tuple[str, int | None]]]:
+        """In workflow `workflow`, the mentions of port `port` of `instances`
+        (`x.Port`, `x.Ports.Port`, `getattr(x, "Port")`): the instances a
+        `connect` names it of, and those mentioning it otherwise (with the
+        line). With `new`, every mention is renamed to it."""
+        fn = self._resolve_workflow_def(workflow)
+        if not self._is_workflow_def(fn) or fn.name.value != workflow:
+            raise RewriteError(
+                message=f"no workflow '{workflow}' in {Path(self.file_path).name}",
+                diagnostic={"code": "workflow_not_found", "workflow": workflow, "file": self.file_path},
+            )
+        names = set(instances)
+        connected: list[str] = []
+        used: list[tuple[str, int | None]] = []
+        engine = self
+
+        class _Mentions(_WorkflowBodyTransformer):
+            def __init__(self) -> None:
+                super().__init__(fn)
+                self._connects = 0
+
+            def _seen(self, name: str, node: cst.CSTNode) -> None:
+                if self._connects > 0:
+                    if name not in connected:
+                        connected.append(name)
+                elif name not in [n for n, _ in used]:
+                    used.append((name, engine._line_of(node)))
+
+            def visit_Call(self, node: cst.Call) -> None:
+                if _is_connect_call(node):
+                    self._connects += 1
+
+            def leave_Call(self, original_node: cst.Call, updated_node: cst.Call) -> cst.Call:
+                if _is_connect_call(original_node):
+                    self._connects -= 1
+                args = original_node.args
+                if (
+                    isinstance(original_node.func, cst.Name)
+                    and original_node.func.value == "getattr"
+                    and len(args) >= 2
+                    and isinstance(args[0].value, cst.Name)
+                    and args[0].value.value in names
+                    and _string_value(args[1].value) == port
+                ):
+                    self._seen(args[0].value.value, original_node)
+                    if new is not None and isinstance(updated_node.args[1].value, cst.SimpleString):
+                        renamed = list(updated_node.args)
+                        renamed[1] = renamed[1].with_changes(value=_quoted_like(updated_node.args[1].value, new))
+                        return updated_node.with_changes(args=renamed)
+                return updated_node
+
+            def leave_Attribute(self, original_node: cst.Attribute, updated_node: cst.Attribute) -> cst.Attribute:
+                if original_node.attr.value != port:
+                    return updated_node
+                value = original_node.value
+                instance: str | None = None
+                if isinstance(value, cst.Name) and value.value in names:
+                    instance = value.value
+                elif (
+                    isinstance(value, cst.Attribute)
+                    and value.attr.value == "Ports"
+                    and isinstance(value.value, cst.Name)
+                    and value.value.value in names
+                ):
+                    instance = value.value.value
+                if instance is None:
+                    return updated_node
+                self._seen(instance, original_node)
+                return updated_node.with_changes(attr=cst.Name(new)) if new is not None else updated_node
+
+        updated = fn.visit(_Mentions())
+        if new is not None and (connected or used) and isinstance(updated, cst.FunctionDef):
+            self._replace_node(fn, updated)
+        return connected, used
+
+    def _companion(self, file_path: str) -> "RewriteEngine":
+        """The engine of another file this op edits, saved with this one."""
+        resolved = str(Path(file_path).resolve())
+        if resolved == str(Path(self.file_path).resolve()):
+            return self
+        companions = self.__dict__.setdefault("_companions", {})
+        if resolved not in companions:
+            module, source_text, _revision = load_module(resolved)
+            companions[resolved] = RewriteEngine(resolved, module, source_text)
+        engine: RewriteEngine = companions[resolved]
+        return engine
+
+    def changed_companions(self) -> list["RewriteEngine"]:
+        return [engine for engine in self.__dict__.get("_companions", {}).values() if engine._updated]
+
+    def _port_uses(self, usedIn: Any) -> list[tuple[str, str, list[str]]]:
+        """`usedIn` as the IDE sends it (`[{file, workflow, instances}]`)."""
+        uses: list[tuple[str, str, list[str]]] = []
+        for entry in usedIn or []:
+            if not isinstance(entry, dict):
+                continue
+            file = str(entry.get("file", "")).strip()
+            workflow = str(entry.get("workflow", "")).strip()
+            instances = [str(n).strip() for n in entry.get("instances") or [] if str(n).strip().isidentifier()]
+            if file and workflow and instances:
+                uses.append((file, workflow, instances))
+        return uses
+
+    def _this_files_uses(self, entity: str) -> list[tuple[str, str, list[str]]]:
+        """This file's workflows with instances of its class `entity`."""
+        uses = []
+        for fn in self._workflow_defs_in_file():
+            names = self._local_instances(fn, entity)
+            if names:
+                uses.append((self.file_path, fn.name.value, names))
+        return uses
+
+    def _all_port_uses(self, entity: str, usedIn: Any) -> list[tuple["RewriteEngine", str, list[str]]]:
+        """Every workflow an edit of a port of `entity` has to look into: this
+        file's, and those the IDE names (`usedIn`), each once."""
+        seen: dict[tuple[str, str], list[str]] = {}
+        order: list[tuple[str, str]] = []
+        for file, workflow, names in [*self._this_files_uses(entity), *self._port_uses(usedIn)]:
+            key = (str(Path(file).resolve()), workflow)
+            if key not in seen:
+                seen[key] = []
+                order.append(key)
+            seen[key].extend(n for n in names if n not in seen[key])
+        found: list[tuple[RewriteEngine, str, list[str]]] = []
+        for file, workflow in order:
+            try:
+                engine = self._companion(file)
+            except (OSError, cst.ParserSyntaxError) as exc:
+                raise RewriteError(
+                    message=f"{Path(file).name} cannot be read, so the connections of workflow '{workflow}' cannot be followed: {exc}",
+                    diagnostic={"code": "port_uses_unreadable", "file": file, "workflow": workflow},
+                ) from None
+            found.append((engine, workflow, seen[(file, workflow)]))
+        return found
 
     def create_entity_port(
         self,
@@ -2004,116 +2959,164 @@ class RewriteEngine:
         portType: str,
     ) -> None:
         self._ensure_identifier(portName)
-        class _CreatePort(cst.CSTTransformer):
-            def __init__(self) -> None:
-                self.updated = False
-
-            def leave_ClassDef(self, original_node: cst.ClassDef, updated_node: cst.ClassDef) -> cst.ClassDef:
-                if self.updated or original_node.name.value != entityType:
-                    return updated_node
-                body = list(updated_node.body.body)
-                ports_idx = -1
-                ports_cls = None
-                for idx, stmt in enumerate(body):
-                    if isinstance(stmt, cst.ClassDef) and stmt.name.value == 'Ports':
-                        ports_idx = idx
-                        ports_cls = stmt
-                        break
-                port_call = cst.Call(
-                    func=cst.Subscript(
-                        value=cst.Name('Port'),
-                        slice=[cst.SubscriptElement(slice=cst.Index(value=cst.parse_expression(portType)))]
-                    ),
-                    args=[] if portDirection == 'input' else [cst.Arg(keyword=cst.Name('direction'), value=cst.SimpleString('"out"'))]
-                )
-                port_stmt = cst.SimpleStatementLine([
-                    cst.Assign(targets=[cst.AssignTarget(target=cst.Name(portName))], value=port_call)
-                ])
-                if ports_cls is None:
-                    ports_cls = cst.ClassDef(name=cst.Name('Ports'), body=cst.IndentedBlock(body=[port_stmt]))
-                    body.append(ports_cls)
-                else:
-                    ports_body = list(ports_cls.body.body)
-                    ports_body.append(port_stmt)
-                    body[ports_idx] = ports_cls.with_changes(body=ports_cls.body.with_changes(body=ports_body))
-                self.updated = True
-                return updated_node.with_changes(body=updated_node.body.with_changes(body=body))
-
-        transformer = _CreatePort()
-        updated = self.module.visit(transformer)
-        if not transformer.updated:
-            raise RewriteError(message=f"Entity port create failed: {entityType}.{portName}")
-        if 'Any' in portType:
-            updated = self._ensure_any_import(updated)
-        self._set_module(updated)
+        port_type = _parse_user_expression(portType, f"the type of port '{portName}'")
+        direction = _PORT_DIRECTIONS.get(str(portDirection), None)
+        if direction is None:
+            raise RewriteError(message=f"Invalid port direction: {portDirection}", diagnostic={"code": "invalid_direction"})
+        cls = self._require_class(entityType)
+        if portName in self._class_port_names(cls):
+            raise RewriteError(
+                message=f"'{entityType}' has a port '{portName}' already",
+                diagnostic={"code": "port_exists", "entityType": entityType, "port": portName},
+            )
+        port_call = cst.Call(
+            func=cst.Subscript(
+                value=cst.Name("Port"),
+                slice=[cst.SubscriptElement(slice=cst.Index(value=port_type))],
+            ),
+            # Said, not left to `Port`'s default, which is "inout".
+            args=[_keyword_arg("direction", cst.SimpleString(f'"{direction}"'))],
+        )
+        port_stmt = cst.SimpleStatementLine([
+            cst.Assign(targets=[cst.AssignTarget(target=cst.Name(portName))], value=port_call)
+        ])
+        body = list(cls.body.body)
+        ports_cls = self._ports_class(cls)
+        if ports_cls is None:
+            body.append(cst.ClassDef(
+                name=cst.Name("Ports"),
+                body=cst.IndentedBlock(body=[port_stmt]),
+                leading_lines=[cst.EmptyLine()] if body else [],
+            ))
+        else:
+            index = body.index(ports_cls)
+            ports_body = self._strip_placeholder_pass([*ports_cls.body.body, port_stmt])
+            body[index] = ports_cls.with_changes(body=ports_cls.body.with_changes(body=ports_body))
+        self._replace_node(cls, cls.with_changes(body=cls.body.with_changes(body=body)))
+        needed = ["Port"] if "Port" not in self._module_level_names() else []
+        if needed:
+            self._set_module(self._ensure_import(self.module, "wfpy", needed))
+        if "Any" in portType:
+            self._set_module(self._ensure_any_import(self.module))
 
     def delete_entity_port(
         self,
         *,
         entityType: str,
-        portDirection: str,
+        portDirection: str = "",
         portName: str,
+        usedIn: Any = None,
     ) -> None:
-        class _DeletePort(cst.CSTTransformer):
-            def __init__(self) -> None:
-                self.updated = False
+        """Delete port `portName` of class `entityType`: refused while an
+        action of the class reads or writes it, or a workflow of this file
+        or one the IDE names (`usedIn`) connects or otherwise names it."""
+        cls = self._require_class(entityType)
+        if portName not in self._class_port_names(cls):
+            raise RewriteError(
+                message=f"'{entityType}' has no port '{portName}'",
+                diagnostic={"code": "port_not_found", "entityType": entityType, "port": portName},
+            )
+        actions = self._action_port_mentions(cls, portName)
+        if actions:
+            action_name, keyword_name, key = actions[0]
+            line = self._line_of(key)
+            verb = "read" if keyword_name == "consumes" else "written"
+            raise RewriteError(
+                message=(
+                    f"port '{portName}' of '{entityType}' is {verb} by action '{action_name}'"
+                    f"{f' (line {line})' if line else ''}: take it out of the action first"
+                ),
+                diagnostic={"code": "port_in_use", "entityType": entityType, "portName": portName, "action": action_name},
+            )
+        for engine, workflow, instances in self._all_port_uses(entityType, usedIn):
+            connected, used = engine.instance_port_mentions(workflow, instances, portName)
+            if connected or used:
+                names = [*connected, *(n for n, _ in used if n not in connected)]
+                listed = ", ".join(repr(n) for n in names)
+                if used:
+                    line = used[0][1]
+                    where = f" (line {line} of {Path(engine.file_path).name})" if line else ""
+                    message = (
+                        f"port '{portName}' of {listed} is used in workflow '{workflow}'{where}: "
+                        "take it out of the workflow first"
+                    )
+                else:
+                    message = f"port '{portName}' of {listed} is connected in workflow '{workflow}': delete its connections first"
+                raise RewriteError(
+                    message=message,
+                    diagnostic={
+                        "code": "port_in_use",
+                        "entityType": entityType,
+                        "portName": portName,
+                        "workflow": workflow,
+                        "file": engine.file_path,
+                        "instances": names,
+                    },
+                )
+        ports_cls = self._ports_class(cls)
+        assert ports_cls is not None
+        kept: list[cst.BaseStatement] = []
+        for line_stmt in ports_cls.body.body:
+            if isinstance(line_stmt, cst.SimpleStatementLine):
+                smalls = [
+                    small for small in line_stmt.body
+                    if not (
+                        isinstance(small, (cst.Assign, cst.AnnAssign))
+                        and any(
+                            isinstance(t, cst.Name) and t.value == portName
+                            for t in ([x.target for x in small.targets] if isinstance(small, cst.Assign) else [small.target])
+                        )
+                    )
+                ]
+                if not smalls:
+                    continue
+                if len(smalls) != len(line_stmt.body):
+                    line_stmt = line_stmt.with_changes(body=smalls)
+            if isinstance(line_stmt, cst.BaseStatement):
+                kept.append(line_stmt)
+        new_ports = ports_cls.with_changes(
+            body=ports_cls.body.with_changes(body=kept or [cst.SimpleStatementLine([cst.Pass()])])
+        )
+        self._replace_node(ports_cls, new_ports)
 
-            def leave_ClassDef(self, original_node: cst.ClassDef, updated_node: cst.ClassDef) -> cst.ClassDef:
-                if self.updated or original_node.name.value != entityType:
-                    return updated_node
-                body = list(updated_node.body.body)
-                for idx, stmt in enumerate(body):
-                    if isinstance(stmt, cst.ClassDef) and stmt.name.value == 'Ports':
-                        new_ports_body: list[cst.BaseStatement] = []
-                        removed = False
-                        for port_stmt in stmt.body.body:
-                            if isinstance(port_stmt, cst.SimpleStatementLine):
-                                matched = False
-                                for s in port_stmt.body:
-                                    if isinstance(s, cst.Assign) and len(s.targets) == 1 and isinstance(s.targets[0].target, cst.Name) and s.targets[0].target.value == portName:
-                                        matched = True
-                                        removed = True
-                                        break
-                                if matched:
-                                    continue
-                            if isinstance(port_stmt, cst.BaseStatement):
-                                new_ports_body.append(port_stmt)
-                        if removed:
-                            body[idx] = stmt.with_changes(body=stmt.body.with_changes(body=new_ports_body or [cst.SimpleStatementLine([cst.Pass()])]))
-                            self.updated = True
-                            return updated_node.with_changes(body=updated_node.body.with_changes(body=body))
-                return updated_node
+    def _body_assigns(self, fn: cst.FunctionDef, name: str) -> bool:
+        """Whether workflow `fn`'s body binds `name` (`name = ...`): an instance."""
+        found = False
 
-        transformer = _DeletePort()
-        updated = self.module.visit(transformer)
-        if not transformer.updated:
-            raise RewriteError(message=f"Entity port delete failed: {entityType}.{portName}")
-        self._set_module(updated)
+        class _Assigns(cst.CSTVisitor):
+            def visit_FunctionDef(self, node: cst.FunctionDef) -> bool:
+                return node is fn
 
-    def rename_node(self, *, workflow: str | None = None, old: str, new: str) -> None:
+            def visit_AssignTarget(self, node: cst.AssignTarget) -> None:
+                nonlocal found
+                if isinstance(node.target, cst.Name) and node.target.value == name:
+                    found = True
+
+        fn.visit(_Assigns())
+        return found
+
+    def rename_node(self, *, workflow: str | None = None, old: str, new: str, usedIn: Any = None) -> None:
         self._ensure_identifier(new)
         fn, _ = self._get_workflow_body(workflow)
+        if not self._body_assigns(fn, old) and self._is_workflow_port(fn, old):
+            # The diagram draws a workflow's own port as a node of its own,
+            # and renames it as one. The workflows that use this one
+            # (`usedIn`: their instances of it) have their ends follow.
+            uses = self._workflow_port_uses(fn, usedIn)
+            for engine, use_workflow, instances in uses:
+                engine.instance_port_mentions(use_workflow, instances, old)
+            self.rename_workflow_port(self._resolve_workflow_def(fn.name.value), old, new)
+            for engine, use_workflow, instances in uses:
+                engine.instance_port_mentions(use_workflow, instances, old, new)
+            return
 
-        class _RenameNodeTransformer(cst.CSTTransformer):
-            def __init__(self, fn_name: str, old_name: str, new_name: str) -> None:
-                self._fn_name = fn_name
+        class _RenameNodeTransformer(_WorkflowBodyTransformer):
+            def __init__(self, fn_node: cst.FunctionDef, old_name: str, new_name: str) -> None:
+                super().__init__(fn_node)
                 self._old = old_name
                 self._new = new_name
-                self._in_target_fn = False
+                self._in_target_fn = True
                 self.renamed = False
-
-            def visit_FunctionDef(self, node: cst.FunctionDef) -> bool:
-                if self._in_target_fn:
-                    return False
-                if node.name.value == self._fn_name:
-                    self._in_target_fn = True
-                    return True
-                return False
-
-            def leave_FunctionDef(self, original_node: cst.FunctionDef, updated_node: cst.FunctionDef) -> cst.FunctionDef:
-                if original_node.name.value == self._fn_name:
-                    self._in_target_fn = False
-                return updated_node
 
             def leave_Assign(self, original_node: cst.Assign, updated_node: cst.Assign) -> cst.Assign:
                 if not self._in_target_fn:
@@ -2164,20 +3167,141 @@ class RewriteEngine:
                     return updated_node.with_changes(args=new_args)
                 return updated_node
 
-        transformer = _RenameNodeTransformer(fn.name.value, old, new)
+        transformer = _RenameNodeTransformer(fn, old, new)
+        updated = fn.visit(transformer)
+        if not transformer.renamed or not isinstance(updated, cst.FunctionDef):
+            raise RewriteError(message=f"Node not found: {old}", diagnostic={"code": "node_not_found"})
+        self._replace_node(fn, updated)
+
+    def rename_port(
+        self,
+        *,
+        entity: str,
+        portDirection: str | None = None,
+        portName: str | None = None,
+        newValue: str | None = None,
+        usedIn: Any = None,
+        port_direction: str | None = None,
+        port_name: str | None = None,
+        new_value: str | None = None,
+    ) -> None:
+        """Rename port `portName` of class `entity` to `newValue`: its
+        `class Ports` entry, the actions' `consumes` / `produces` keys and
+        the keys of the dicts they return, and every mention of it on an
+        instance in this file's workflows and in those the IDE names
+        (`usedIn`, in other files too). Refused, leaving every file as it
+        is, where a mention cannot be followed."""
+        old = str(portName if portName is not None else port_name or "")
+        new = str(newValue if newValue is not None else new_value or "").strip()
+        direction = str(portDirection if portDirection is not None else port_direction or "")
+        self._ensure_identifier(new)
+        cls = self._require_class(entity)
+        ports = self._class_port_names(cls)
+        if old not in ports:
+            raise RewriteError(
+                message=f"'{entity}' has no port '{old}'",
+                diagnostic={"code": "port_not_found", "entityType": entity, "port": old},
+            )
+        if new == old:
+            return
+        if new in ports:
+            raise RewriteError(
+                message=f"'{entity}' has a port '{new}' already",
+                diagnostic={"code": "port_exists", "entityType": entity, "port": new},
+            )
+        # Every workflow is looked into before anything is renamed.
+        uses = self._all_port_uses(entity, usedIn)
+        for engine, workflow, instances in uses:
+            _connected, used = engine.instance_port_mentions(workflow, instances, old)
+            del used  # each mention is one the rename follows
+        class_strings = self._class_string_mentions(cls, old)
+        if class_strings:
+            line = self._line_of(class_strings[0])
+            raise RewriteError(
+                message=(
+                    f"port '{old}' of '{entity}' is named by a string{f' at line {line}' if line else ''}, "
+                    "which this rename cannot follow: rename it there"
+                ),
+                diagnostic={"code": "port_used_by_name", "entityType": entity, "port": old},
+            )
+        transformer = _PortRenameTransformer(entity, direction, old, new)
+        self._set_module(self.module.visit(transformer))
+        for engine, workflow, instances in uses:
+            engine.instance_port_mentions(workflow, instances, old, new)
+
+    def _class_string_mentions(self, cls: cst.ClassDef, port: str) -> list[cst.SimpleString]:
+        """Strings `"port"` in class `cls` other than its actions' `consumes`
+        / `produces` keys and the keys of the dicts its actions return,
+        which a rename follows."""
+        followed: set[int] = set()
+        strings: list[cst.SimpleString] = []
+
+        class _Find(cst.CSTVisitor):
+            def __init__(self) -> None:
+                self._returns = 0
+                self._in_action = 0
+
+            def visit_FunctionDef(self, node: cst.FunctionDef) -> None:
+                if any(_decorator_name(d) == "action" for d in node.decorators) or node.name.value == "action":
+                    self._in_action += 1
+
+            def leave_FunctionDef(self, original_node: cst.FunctionDef) -> None:
+                if any(_decorator_name(d) == "action" for d in original_node.decorators) or original_node.name.value == "action":
+                    self._in_action -= 1
+
+            def visit_Decorator(self, node: cst.Decorator) -> None:
+                if _decorator_name(node) == "action" and isinstance(node.decorator, cst.Call):
+                    for arg in node.decorator.args:
+                        if arg.keyword is not None and arg.keyword.value in ("consumes", "produces") and isinstance(arg.value, cst.Dict):
+                            for element in arg.value.elements:
+                                if isinstance(element, cst.DictElement):
+                                    followed.add(id(element.key))
+
+            def visit_Return(self, node: cst.Return) -> None:
+                if self._in_action and isinstance(node.value, cst.Dict):
+                    for element in node.value.elements:
+                        if isinstance(element, cst.DictElement):
+                            followed.add(id(element.key))
+
+            def visit_SimpleString(self, node: cst.SimpleString) -> None:
+                if _string_value(node) == port:
+                    strings.append(node)
+
+        cls.visit(_Find())
+        return [string for string in strings if id(string) not in followed]
+
+    def update_port_type(
+        self,
+        *,
+        entity: str,
+        portDirection: str | None = None,
+        portName: str | None = None,
+        newValue: str | None = None,
+        usedIn: Any = None,
+        port_direction: str | None = None,
+        port_name: str | None = None,
+        new_value: str | None = None,
+    ) -> None:
+        name = str(portName if portName is not None else port_name or "")
+        value = str(newValue if newValue is not None else new_value or "")
+        direction = str(portDirection if portDirection is not None else port_direction or "")
+        _parse_user_expression(value, f"the type of port '{name}'")
+        cls = self._require_class(entity)
+        if name not in self._class_port_names(cls):
+            raise RewriteError(
+                message=f"'{entity}' has no port '{name}'",
+                diagnostic={"code": "port_not_found", "entityType": entity, "port": name},
+            )
+        transformer = _PortTypeTransformer(entity, direction, name, value)
         updated = self.module.visit(transformer)
-        if not transformer.renamed:
-            raise RewriteError(message=f"Node not found: {old}")
+        if not transformer.found:
+            raise RewriteError(
+                message=f"port '{name}' of '{entity}' is not written as `Port[...](...)`, so its type cannot be changed here",
+                diagnostic={"code": "unsupported_port_form", "entityType": entity, "port": name},
+            )
         self._set_module(updated)
-
-    def rename_port(self, *, entity: str, port_direction: str, port_name: str, new_value: str) -> None:
-        self._ensure_identifier(new_value)
-        transformer = _PortRenameTransformer(entity, port_direction, port_name, new_value)
-        self._set_module(self.module.visit(transformer))
-
-    def update_port_type(self, *, entity: str, port_direction: str, port_name: str, new_value: str) -> None:
-        transformer = _PortTypeTransformer(entity, port_direction, port_name, new_value)
-        self._set_module(self.module.visit(transformer))
+        if "Any" in value:
+            self._set_module(self._ensure_any_import(self.module))
 
     def create_if(
         self,
@@ -2194,7 +3318,7 @@ class RewriteEngine:
         target_body = list(target_block.body)
         assign = cst.Assign(
             targets=[cst.AssignTarget(target=cst.Name(name))],
-            value=cst.Call(func=cst.Attribute(value=cst.Name("wfpy"), attr=cst.Name("if_")), args=[cst.Arg(value=cst.parse_expression(condition_expr))]),
+            value=cst.Call(func=cst.Attribute(value=cst.Name("wfpy"), attr=cst.Name("if_")), args=[cst.Arg(value=_parse_user_expression(condition_expr, "the condition"))]),
         )
         then_block = cst.With(
             items=[cst.WithItem(item=cst.Attribute(value=cst.Name(name), attr=cst.Name("then")))],
@@ -2209,7 +3333,7 @@ class RewriteEngine:
         new_stmt_body = self._insert_statement(new_stmt_body, stmts[1], "node")
         new_stmt_body = self._insert_statement(new_stmt_body, stmts[2], "node")
         new_block = target_block.with_changes(body=new_stmt_body)
-        self._update_scope_body(fn.name.value, scope_control, scope_branch, new_block)
+        self._update_scope_body(fn, scope_control, scope_branch, new_block)
 
     def create_loop(
         self,
@@ -2226,7 +3350,7 @@ class RewriteEngine:
         target_body = list(target_block.body)
         assign = cst.Assign(
             targets=[cst.AssignTarget(target=cst.Name(name))],
-            value=cst.Call(func=cst.Attribute(value=cst.Name("wfpy"), attr=cst.Name("loop")), args=[cst.Arg(value=cst.parse_expression(iterable_expr))]),
+            value=cst.Call(func=cst.Attribute(value=cst.Name("wfpy"), attr=cst.Name("loop")), args=[cst.Arg(value=_parse_user_expression(iterable_expr, "what the loop iterates over"))]),
         )
         loop_block = cst.With(
             items=[cst.WithItem(item=cst.Name(name))],
@@ -2235,7 +3359,7 @@ class RewriteEngine:
         new_stmt_body = self._insert_statement(target_body, cst.SimpleStatementLine([assign]), "node")
         new_stmt_body = self._insert_statement(new_stmt_body, loop_block, "node")
         new_block = target_block.with_changes(body=new_stmt_body)
-        self._update_scope_body(fn.name.value, scope_control, scope_branch, new_block)
+        self._update_scope_body(fn, scope_control, scope_branch, new_block)
 
     def wrap_in_if(self, *, workflow: str | None = None, node_names: list[str], condition_expr: str) -> None:
         self._wrap_in_control("if", workflow, node_names, condition_expr)
@@ -2244,8 +3368,11 @@ class RewriteEngine:
         self._wrap_in_control("loop", workflow, node_names, iterable_expr)
 
     def unwrap_control(self, *, workflow: str | None = None, name: str) -> None:
-        class _Unwrap(cst.CSTTransformer):
+        fn, _ = self._get_workflow_body(workflow)
+
+        class _Unwrap(_WorkflowBodyTransformer):
             def __init__(self, matcher: RewriteEngine) -> None:
+                super().__init__(fn)
                 self._matcher = matcher
                 self.unwrapped = False
 
@@ -2261,14 +3388,17 @@ class RewriteEngine:
                 return updated_node
 
         transformer = _Unwrap(self)
-        updated = self.module.visit(transformer)
-        if not transformer.unwrapped:
+        updated = fn.visit(transformer)
+        if not transformer.unwrapped or not isinstance(updated, cst.FunctionDef):
             raise RewriteError(message=f"Control scope not found for {name}")
-        self._set_module(updated)
+        self._replace_node(fn, updated)
 
     def move_node(self, *, workflow: str | None = None, name: str, target_control: str, target_scope: str) -> None:
-        class _ExtractAssign(cst.CSTTransformer):
+        source_fn, _ = self._get_workflow_body(workflow)
+
+        class _ExtractAssign(_WorkflowBodyTransformer):
             def __init__(self) -> None:
+                super().__init__(source_fn)
                 self.extracted: cst.BaseStatement | None = None
 
             def leave_SimpleStatementLine(
@@ -2287,17 +3417,17 @@ class RewriteEngine:
                 return updated_node
 
         extractor = _ExtractAssign()
-        updated = self.module.visit(extractor)
-        if extractor.extracted is None:
+        updated = source_fn.visit(extractor)
+        if extractor.extracted is None or not isinstance(updated, cst.FunctionDef):
             raise RewriteError(message=f"Node not found: {name}")
-        self._set_module(updated)
+        self._replace_node(source_fn, updated)
 
         fn, body = self._get_workflow_body(workflow)
         target_block = self._find_scope_block(body, target_control, target_scope)
         target_body = list(target_block.body)
         new_stmt_body = self._insert_statement(target_body, extractor.extracted, "node")
         new_block = target_block.with_changes(body=new_stmt_body)
-        self._update_scope_body(fn.name.value, target_control, target_scope, new_block)
+        self._update_scope_body(fn, target_control, target_scope, new_block)
 
     def _wrap_in_control(self, kind: str, workflow: str | None, node_names: list[str], expr: str) -> None:
         if not node_names:
@@ -2324,7 +3454,7 @@ class RewriteEngine:
                 targets=[cst.AssignTarget(target=cst.Name(ctrl_name))],
                 value=cst.Call(
                     func=cst.Attribute(value=cst.Name("wfpy"), attr=cst.Name("if_")),
-                    args=[cst.Arg(value=cst.parse_expression(expr))],
+                    args=[cst.Arg(value=_parse_user_expression(expr, "the condition" if kind == "if" else "what the loop iterates over"))],
                 ),
             )
             with_block = cst.With(
@@ -2337,7 +3467,7 @@ class RewriteEngine:
                 targets=[cst.AssignTarget(target=cst.Name(ctrl_name))],
                 value=cst.Call(
                     func=cst.Attribute(value=cst.Name("wfpy"), attr=cst.Name("loop")),
-                    args=[cst.Arg(value=cst.parse_expression(expr))],
+                    args=[cst.Arg(value=_parse_user_expression(expr, "the condition" if kind == "if" else "what the loop iterates over"))],
                 ),
             )
             with_block = cst.With(
@@ -2346,7 +3476,7 @@ class RewriteEngine:
             )
             new_body.extend([cst.SimpleStatementLine([assign]), with_block])
 
-        self._update_function_body(fn.name.value, body.with_changes(body=new_body))
+        self._update_function_body(fn, body.with_changes(body=new_body))
 
 
 class _PortBaseTransformer(cst.CSTTransformer):
@@ -2356,6 +3486,8 @@ class _PortBaseTransformer(cst.CSTTransformer):
         self.port_name = port_name
         self._in_entity = False
         self._in_ports_class = False
+        self._action_depth = 0
+        self.found = False
 
     def _normalize_direction(self, direction: str) -> str:
         mapping = {
@@ -2422,9 +3554,56 @@ class _PortRenameTransformer(_PortBaseTransformer):
     def leave_Assign(self, original_node: cst.Assign, updated_node: cst.Assign) -> cst.Assign:
         if not self._matches_port_assign(updated_node):
             return updated_node
+        self.found = True
         return updated_node.with_changes(
             targets=[cst.AssignTarget(target=cst.Name(self.new_name))]
         )
+
+    def visit_FunctionDef(self, node: cst.FunctionDef) -> bool:
+        if self._in_entity and not self._in_ports_class and (
+            any(_decorator_name(d) == "action" for d in node.decorators) or node.name.value == "action"
+        ):
+            self._action_depth += 1
+        return True
+
+    def leave_FunctionDef(self, original_node: cst.FunctionDef, updated_node: cst.FunctionDef) -> cst.FunctionDef:
+        if self._in_entity and not self._in_ports_class and (
+            any(_decorator_name(d) == "action" for d in original_node.decorators) or original_node.name.value == "action"
+        ):
+            self._action_depth -= 1
+        return updated_node
+
+    def leave_Decorator(self, original_node: cst.Decorator, updated_node: cst.Decorator) -> cst.Decorator:
+        """`@action(consumes={"Old": 1}, produces=...)` of the class."""
+        if not self._in_entity or _decorator_name(original_node) != "action":
+            return updated_node
+        call = updated_node.decorator
+        if not isinstance(call, cst.Call):
+            return updated_node
+        args = [
+            arg.with_changes(value=self._renamed_keys(arg.value))
+            if arg.keyword is not None and arg.keyword.value in ("consumes", "produces") and isinstance(arg.value, cst.Dict)
+            else arg
+            for arg in call.args
+        ]
+        return updated_node.with_changes(decorator=call.with_changes(args=args))
+
+    def leave_Return(self, original_node: cst.Return, updated_node: cst.Return) -> cst.Return:
+        """`return {"Old": ...}` of an action of the class."""
+        if self._in_entity and self._action_depth > 0 and isinstance(updated_node.value, cst.Dict):
+            return updated_node.with_changes(value=self._renamed_keys(updated_node.value))
+        return updated_node
+
+    def _renamed_keys(self, mapping: cst.Dict) -> cst.Dict:
+        elements = [
+            element.with_changes(key=_quoted_like(element.key, self.new_name))
+            if isinstance(element, cst.DictElement)
+            and isinstance(element.key, cst.SimpleString)
+            and _string_value(element.key) == self.port_name
+            else element
+            for element in mapping.elements
+        ]
+        return mapping.with_changes(elements=elements)
 
     def leave_Attribute(self, original_node: cst.Attribute, updated_node: cst.Attribute) -> cst.Attribute:
         if isinstance(original_node.value, cst.Name):
@@ -2447,6 +3626,7 @@ class _PortTypeTransformer(_PortBaseTransformer):
         if not isinstance(value.func, cst.Subscript):
             return updated_node
         new_func = value.func.with_changes(
-            slice=[cst.SubscriptElement(slice=cst.Index(value=cst.parse_expression(self.new_type)))]
+            slice=[cst.SubscriptElement(slice=cst.Index(value=_parse_user_expression(self.new_type, f"the type of port '{self.port_name}'")))]
         )
+        self.found = True
         return updated_node.with_changes(value=value.with_changes(func=new_func))

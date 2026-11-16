@@ -212,6 +212,10 @@ def test_create_node_in_nested_if_scope(tmp_path: Path) -> None:
 from wfpy import workflow, connect
 
 
+class B:
+    pass
+
+
 @workflow
 def demo():
     if flag:
@@ -249,6 +253,9 @@ def demo():
 def test_create_loop_removes_placeholder_pass(tmp_path: Path) -> None:
     source = """
 from wfpy import workflow
+
+
+A = object
 
 
 @workflow
@@ -566,7 +573,7 @@ class TestCreateStreamblocksType:
         engine.create_task_type(kind="streamblocks", name="MyDesign", facade="design")
         code = engine.module.code
 
-        assert '@streamblocks(facade = "design")' in code
+        assert '@streamblocks(facade="design")' in code
         assert "class MyDesign:" in code
 
     def test_an_instance_carries_its_network(self, tmp_path):
@@ -575,7 +582,7 @@ class TestCreateStreamblocksType:
             kind="streamblocks", name="FirRun", facade="instance", network="designs/adder.py"
         )
 
-        assert 'network = "designs/adder.py"' in engine.module.code
+        assert 'network="designs/adder.py"' in engine.module.code
 
     def test_it_imports_what_the_class_needs(self, tmp_path):
         """The sidecar wrote the class, so the sidecar owes the imports —
@@ -584,7 +591,8 @@ class TestCreateStreamblocksType:
         engine.create_task_type(kind="streamblocks", name="MyDesign", facade="design")
         code = engine.module.code
 
-        assert "streamblocks" in code.split("\n")[1]  # folded into the wfpy import
+        wfpy_import = next(line for line in code.split("\n") if line.startswith("from wfpy import"))
+        assert "streamblocks" in wfpy_import  # folded into the wfpy import
         assert "Port" in code
         assert "from typing import Any" in code
 
@@ -655,8 +663,8 @@ class TestCreateSourceType:
         engine.create_task_type(kind="source", name="Frames")
         code = engine.module.code
 
-        assert 'direction = "out"' in code
-        assert 'direction = "in"' not in code
+        assert 'direction="out"' in code
+        assert 'direction="in"' not in code
         assert "In = " not in code
 
     def test_it_declares_the_path_parameter(self, tmp_path):
@@ -673,7 +681,7 @@ class TestCreateSourceType:
         engine = _engine_from_source(tmp_path, self.SOURCE)
         engine.create_task_type(kind="source", name="Design", viewType="product.diagram")
 
-        assert 'viewType = "product.diagram"' in engine.module.code
+        assert 'viewType="product.diagram"' in engine.module.code
 
     def test_it_omits_the_editor_when_none_is_given(self, tmp_path):
         """No editor means the default one, which is a real choice — writing an
@@ -699,7 +707,8 @@ class TestCreateSourceType:
         engine.create_task_type(kind="source", name="Frames")
         code = engine.module.code
 
-        assert "source" in code.split("\n")[1]
+        wfpy_import = next(line for line in code.split("\n") if line.startswith("from wfpy import"))
+        assert "source" in wfpy_import
         assert "Port" in code
         assert "File" in code
 
