@@ -46,7 +46,8 @@ All notable changes to wfpy are documented here. The format follows
   from the package that re-exports it, and refuses a name that would hide
   another. A class task's new parameter is an annotated field, never an
   `__init__`; an annotation edit imports its decorator. A value that is not
-  Python is refused as `invalid_expression`.
+  Python is refused as `invalid_expression`. An edit that writes several
+  files writes them all or none.
 - The run's live files are written whole: `run.wf-viewer.live.json`, the
   agent-context and context live files, and the final overlay, queue trace
   and run record go to a sibling file renamed over the target, so a reader
