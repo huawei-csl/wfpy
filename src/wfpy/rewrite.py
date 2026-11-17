@@ -385,58 +385,34 @@ def _static_exports(source: Path) -> frozenset[str] | None:
     return frozenset(name for name in _block_bindings(tree.body) if not name.startswith("_"))
 
 
-def _port_name_strings(node: cst.CSTNode, name: str, everywhere: bool = False) -> list[cst.SimpleString]:
-    """The strings `"name"` under `node` used as a port's name: the second
-    argument of a `getattr`, a dict's key, a subscript's index, an item of
-    what a `for` loops over. With `everywhere`, `node` is an expression
-    that is itself a port's name, and each string in it counts but a
-    keyword's value. A keyword's value elsewhere (`direction="out"`) or a
-    docstring is not a port's name."""
+def _named_strings(root: cst.CSTNode, name: str, connect_keywords: bool = False) -> list[cst.SimpleString]:
+    """Each string `"name"` under `root` that may be a port's name: every
+    one but a string standing as a statement of its own (a docstring) and
+    a keyword argument's value (`File(path="path")`, `direction="out"`) --
+    with `connect_keywords`, a `connect(...)`'s keyword values still
+    count. Whatever else a string is used for (a loop's items, a variable,
+    a key) it may reach a port's name some way an edit cannot follow."""
     found: list[cst.SimpleString] = []
-
-    def keep(expr: cst.CSTNode | None) -> None:
-        if isinstance(expr, cst.SimpleString) and _string_value(expr) == name:
-            found.append(expr)
-
-    def items(expr: cst.BaseExpression) -> None:
-        if isinstance(expr, (cst.Tuple, cst.List, cst.Set)):
-            for element in expr.elements:
-                keep(element.value)
-        else:
-            keep(expr)
+    skipped: set[int] = set()
 
     class _Find(cst.CSTVisitor):
-        def visit_Arg(self, arg: cst.Arg) -> bool:
-            # In an expression that is a port's name, a keyword's value
-            # (`make(path="x")`) names something else.
-            return arg.keyword is None or not everywhere
+        def visit_Expr(self, node: cst.Expr) -> None:
+            if isinstance(node.value, cst.SimpleString):
+                skipped.add(id(node.value))
 
-        def visit_SimpleString(self, string: cst.SimpleString) -> None:
-            if everywhere:
-                keep(string)
+        def visit_Call(self, node: cst.Call) -> None:
+            if connect_keywords and _is_connect_call(node):
+                return
+            for arg in node.args:
+                if arg.keyword is not None and isinstance(arg.value, cst.SimpleString):
+                    skipped.add(id(arg.value))
 
-        def visit_Call(self, call: cst.Call) -> None:
-            if not everywhere and isinstance(call.func, cst.Name) and call.func.value == "getattr" and len(call.args) >= 2:
-                keep(call.args[1].value)
+        def visit_SimpleString(self, node: cst.SimpleString) -> None:
+            if id(node) not in skipped and _string_value(node) == name:
+                found.append(node)
 
-        def visit_DictElement(self, element: cst.DictElement) -> None:
-            if not everywhere:
-                keep(element.key)
-
-        def visit_SubscriptElement(self, element: cst.SubscriptElement) -> None:
-            if not everywhere and isinstance(element.slice, cst.Index):
-                keep(element.slice.value)
-
-        def visit_For(self, loop: cst.For) -> None:
-            if not everywhere:
-                items(loop.iter)
-
-    node.visit(_Find())
-    unique: list[cst.SimpleString] = []
-    for string in found:
-        if not any(string is seen for seen in unique):
-            unique.append(string)
-    return unique
+    root.visit(_Find())
+    return found
 
 
 class _ReplaceNode(cst.CSTTransformer):
@@ -2050,61 +2026,77 @@ class RewriteEngine:
     ) -> tuple[list[tuple[cst.Call, int]], list[cst.SimpleString]]:
         """Where workflow `fn`'s own body names its port `name` by a string:
         the `connect(...)` ends that do (the call and which end), which an
-        edit of the port follows, and the strings that reach a `connect` end
-        some other way it cannot follow -- a name a loop connects from
-        (`for name in ("Metrics", ...): connect(..., name)`), a variable a
-        connect reads, a string inside a connect's argument. A string that
-        names something else (`File(path="path")`, a docstring, a nested
-        helper's) is not one, nor a `getattr(x, "name")`: that names a port of
-        the instance `x`."""
+        edit of the port follows, and every other string `"name"` of the
+        body, which it cannot (a loop's item, a variable, a part of a
+        connect's argument: each may reach a connect end). Not one: a
+        docstring, a keyword's value outside a connect (`File(path="path")`),
+        and `getattr(x, "name")` of an instance `x` -- that names a port of
+        the instance."""
         ends: list[tuple[cst.Call, int]] = []
-        others: list[cst.SimpleString] = []
-        end_names: set[str] = set()
-        loops: list[cst.For] = []
-        assigned: list[tuple[str, cst.BaseExpression]] = []
+        followed: set[int] = set()
+        instances = self._instance_names(fn)
 
         class _Read(cst.CSTVisitor):
+            # The ends a rename follows are those of the workflow's own
+            # body (`_WorkflowBodyTransformer`): not a nested def's or
+            # class's, whose strings are left to count.
             def __init__(self) -> None:
-                self._getattr = 0
+                self._nested = 0
 
+            def visit_FunctionDef(self, node: cst.FunctionDef) -> None:
+                if node is not fn:
+                    self._nested += 1
+
+            def leave_FunctionDef(self, original_node: cst.FunctionDef) -> None:
+                if original_node is not fn:
+                    self._nested -= 1
+
+            def visit_ClassDef(self, node: cst.ClassDef) -> None:
+                self._nested += 1
+
+            def leave_ClassDef(self, original_node: cst.ClassDef) -> None:
+                self._nested -= 1
+
+            def visit_Call(self, node: cst.Call) -> None:
+                if self._nested:
+                    return
+                args = node.args
+                if _is_connect_call(node):
+                    for index, arg in enumerate(args[:2]):
+                        if arg.keyword is None and _string_value(arg.value) == name:
+                            ends.append((node, index))
+                            followed.add(id(arg.value))
+                elif (
+                    isinstance(node.func, cst.Name)
+                    and node.func.value == "getattr"
+                    and len(args) >= 2
+                    and isinstance(args[0].value, cst.Name)
+                    and args[0].value.value in instances
+                ):
+                    followed.add(id(args[1].value))
+
+        fn.body.visit(_Read())
+        others = [s for s in _named_strings(fn.body, name, connect_keywords=True) if id(s) not in followed]
+        return ends, others
+
+    def _instance_names(self, fn: cst.FunctionDef) -> set[str]:
+        """The names workflow `fn`'s own body binds to a call (`x =
+        Text(...)`, `y = pair(...)()`): its instances."""
+        names: set[str] = set()
+
+        class _Instances(cst.CSTVisitor):
             def visit_FunctionDef(self, node: cst.FunctionDef) -> bool:
                 return node is fn
 
             def visit_ClassDef(self, node: cst.ClassDef) -> bool:
                 return False
 
-            def visit_Lambda(self, node: cst.Lambda) -> bool:
-                return False
-
-            def visit_For(self, node: cst.For) -> None:
-                loops.append(node)
-
             def visit_Assign(self, node: cst.Assign) -> None:
-                for target in node.targets:
-                    if isinstance(target.target, cst.Name):
-                        assigned.append((target.target.value, node.value))
+                if isinstance(node.value, cst.Call):
+                    names.update(t.target.value for t in node.targets if isinstance(t.target, cst.Name))
 
-            def visit_Call(self, node: cst.Call) -> None:
-                if not _is_connect_call(node):
-                    return
-                for index, arg in enumerate(node.args):
-                    if arg.keyword is not None:
-                        continue
-                    if index < 2 and _string_value(arg.value) == name:
-                        ends.append((node, index))
-                    elif index < 2 and isinstance(arg.value, cst.Name):
-                        end_names.add(arg.value.value)
-                    elif not (index < 2 and isinstance(arg.value, cst.SimpleString)):
-                        others.extend(_port_name_strings(arg.value, name, everywhere=True))
-
-        fn.visit(_Read())
-        for loop in loops:
-            if isinstance(loop.target, cst.Name) and loop.target.value in end_names:
-                others.extend(_port_name_strings(loop.iter, name, everywhere=True))
-        for variable, value in assigned:
-            if variable in end_names:
-                others.extend(_port_name_strings(value, name, everywhere=True))
-        return ends, others
+        fn.visit(_Instances())
+        return names
 
     def _refuse_by_name(self, fn: cst.FunctionDef, name: str, others: list[cst.SimpleString], doing: str, fix: str) -> None:
         if not others:
@@ -3560,13 +3552,17 @@ class RewriteEngine:
         port: str,
         new: str | None = None,
         ordinal: int | None = None,
+        unfollowed: list[tuple[str, int | None]] | None = None,
     ) -> tuple[list[str], list[tuple[str, int | None]]]:
         """In workflow `workflow` -- the `ordinal`-th `@workflow def` of the
         name in this file, or every one of the name -- the mentions of port
         `port` of `instances` (`x.Port`, `x.Ports.Port`, `getattr(x,
         "Port")`): the instances a `connect` names it of, and those
         mentioning it otherwise (with the line). With `new`, every mention
-        is renamed to it."""
+        is renamed to it. `unfollowed` is given the code and line of each
+        place that may name it but is none of those: `getattr(x, p)` of an
+        instance by a name `p`, the port of what is not an instance's name
+        (`(a, b)[i].Port`, `getattr(nodes[0], "Port")`)."""
         targets = self._workflow_defs_named(workflow)
         if ordinal is not None:
             targets = targets[ordinal : ordinal + 1]
@@ -3599,10 +3595,37 @@ class RewriteEngine:
                 if _is_connect_call(node):
                     self._connects += 1
 
+            def _unfollowed(self, node: cst.CSTNode) -> None:
+                if self._rename or unfollowed is None:
+                    return
+                text = " ".join(engine.module.code_for_node(node).split())
+                unfollowed.append((text if len(text) <= 60 else text[:57] + "...", engine._line_of(node)))
+
             def leave_Call(self, original_node: cst.Call, updated_node: cst.Call) -> cst.Call:
                 if _is_connect_call(original_node):
                     self._connects -= 1
                 args = original_node.args
+                if (
+                    not self._rename
+                    and unfollowed is not None
+                    and isinstance(original_node.func, cst.Name)
+                    and original_node.func.value == "getattr"
+                    and len(args) >= 2
+                ):
+                    first, second = args[0].value, args[1].value
+                    if not isinstance(second, cst.SimpleString) or not isinstance(first, cst.Name):
+                        # What it may name: a literal's value, the strings a
+                        # name only ever holds (`for p in ("A", "B")`), or
+                        # anything.
+                        values: set[str] | None = None
+                        if isinstance(second, cst.SimpleString):
+                            value = _string_value(second)
+                            values = {value} if value is not None else None
+                        elif isinstance(second, cst.Name):
+                            values = engine._string_values(self._root, second.value)
+                        of_instance = isinstance(first, cst.Name) and first.value in names
+                        if (of_instance or not isinstance(first, cst.Name)) and (values is None or port in values):
+                            self._unfollowed(original_node)
                 if (
                     isinstance(original_node.func, cst.Name)
                     and original_node.func.value == "getattr"
@@ -3632,6 +3655,12 @@ class RewriteEngine:
                     and value.value.value in names
                 ):
                     instance = value.value.value
+                elif not (
+                    isinstance(value, cst.Name)
+                    or (isinstance(value, cst.Attribute) and value.attr.value == "Ports" and isinstance(value.value, cst.Name))
+                ):
+                    # Not an instance's name, nor another variable's.
+                    self._unfollowed(original_node)
                 if instance is None:
                     return updated_node
                 self._seen(instance, original_node)
@@ -3656,6 +3685,103 @@ class RewriteEngine:
 
             self._set_module(self.module.visit(_Apply()))
         return connected, used
+
+    def _string_values(self, fn: cst.FunctionDef, name: str) -> set[str] | None:
+        """The strings `name` may hold in workflow `fn`'s own body, when it
+        is bound there only to string literals (`for p in ("A", "B"):`, `p =
+        "A"`); None when it may hold anything else (a parameter, a name
+        bound some other way or not in the body)."""
+        values: set[str] = set()
+        known = True
+        bound = False
+
+        def literals(expr: cst.BaseExpression) -> list[str] | None:
+            if isinstance(expr, cst.SimpleString):
+                value = _string_value(expr)
+                return [value] if value is not None else None
+            if isinstance(expr, (cst.Tuple, cst.List, cst.Set)):
+                found: list[str] = []
+                for element in expr.elements:
+                    if not isinstance(element, cst.Element):
+                        return None
+                    value = _string_value(element.value)
+                    if value is None:
+                        return None
+                    found.append(value)
+                return found
+            return None
+
+        def binds(target: cst.BaseExpression) -> bool:
+            return name in _target_names(target)
+
+        class _Values(cst.CSTVisitor):
+            def _bound(self, held: list[str] | None) -> None:
+                nonlocal known, bound
+                bound = True
+                if held is None:
+                    known = False
+                else:
+                    values.update(held)
+
+            def visit_FunctionDef(self, node: cst.FunctionDef) -> bool:
+                if node is fn:
+                    return True
+                if node.name.value == name:
+                    self._bound(None)
+                return False
+
+            def visit_ClassDef(self, node: cst.ClassDef) -> bool:
+                if node.name.value == name:
+                    self._bound(None)
+                return False
+
+            def visit_Lambda(self, node: cst.Lambda) -> bool:
+                return False
+
+            def visit_For(self, node: cst.For) -> None:
+                if binds(node.target):
+                    # Over a tuple of strings, not a string's characters.
+                    plain = isinstance(node.target, cst.Name) and isinstance(node.iter, (cst.Tuple, cst.List, cst.Set))
+                    self._bound(literals(node.iter) if plain else None)
+
+            def visit_Assign(self, node: cst.Assign) -> None:
+                for target in node.targets:
+                    if binds(target.target):
+                        plain = isinstance(target.target, cst.Name) and isinstance(node.value, cst.SimpleString)
+                        self._bound(literals(node.value) if plain else None)
+
+            def visit_AnnAssign(self, node: cst.AnnAssign) -> None:
+                if binds(node.target):
+                    plain = isinstance(node.target, cst.Name) and isinstance(node.value, cst.SimpleString)
+                    self._bound(literals(node.value) if plain and node.value is not None else None)
+
+            def visit_AugAssign(self, node: cst.AugAssign) -> None:
+                if binds(node.target):
+                    self._bound(None)
+
+            def visit_NamedExpr(self, node: cst.NamedExpr) -> None:
+                if binds(node.target):
+                    self._bound(None)
+
+            def visit_WithItem(self, node: cst.WithItem) -> None:
+                if node.asname is not None and binds(node.asname.name):
+                    self._bound(None)
+
+            def visit_ExceptHandler(self, node: cst.ExceptHandler) -> None:
+                if node.name is not None and binds(node.name.name):
+                    self._bound(None)
+
+            def visit_ImportAlias(self, node: cst.ImportAlias) -> None:
+                head: cst.BaseExpression = node.asname.name if node.asname else node.name
+                while isinstance(head, cst.Attribute):
+                    head = head.value
+                if isinstance(head, cst.Name) and head.value == name:
+                    self._bound(None)
+
+        if name in _param_names(fn):
+            return None
+        fn.visit(_Values())
+        return values if bound and known else None
 
     def _companion(self, file_path: str) -> "RewriteEngine":
         """The engine of another file this op edits, saved with this one."""
@@ -3778,6 +3904,37 @@ class RewriteEngine:
                     "workflow": use.workflow,
                     "file": use.engine.file_path,
                     "instances": names,
+                },
+            )
+        self._refuse_unfollowed_uses(uses, port, "delete", "take it out there first", **diagnostic)
+
+    def _refuse_unfollowed_uses(self, uses: list[_Use], port: str, doing: str, fix: str, **diagnostic: Any) -> None:
+        """Refuse while a workflow of `uses` may name port `port` of its
+        instances some way an edit cannot follow nor rule out: `getattr(x,
+        p)` of an instance and a name `p` (`for p in ("Out",): ...`), or the
+        port of an instance not named (`(a, b)[i].Out`)."""
+        for use in uses:
+            unfollowed: list[tuple[str, int | None]] = []
+            use.engine.instance_port_mentions(
+                use.workflow, use.instances, port, ordinal=use.ordinal, unfollowed=unfollowed
+            )
+            if not unfollowed:
+                continue
+            text, line = unfollowed[0]
+            file = Path(use.engine.file_path).name
+            where = f"line {line} of {file}" if line is not None else file
+            raise RewriteError(
+                message=(
+                    f"port '{port}' may be named by `{text}` in workflow '{use.workflow}' ({where}), "
+                    f"which this {doing} cannot follow: {fix}"
+                ),
+                diagnostic={
+                    "code": "port_used_by_name",
+                    **diagnostic,
+                    "port": port,
+                    "workflow": use.workflow,
+                    "file": use.engine.file_path,
+                    **({"line": line} if line is not None else {}),
                 },
             )
 
@@ -3912,7 +4069,10 @@ class RewriteEngine:
             # The uses are found before the edit, on the module as it is;
             # the rename refuses (port_exists, port_used_by_name) before it
             # writes anything, and the uses follow only once it has.
+            if new == old:
+                return
             uses = self._workflow_port_uses(fn, usedIn)
+            self._refuse_unfollowed_uses(uses, old, "rename", "rename it there", entityType=fn.name.value)
             self.rename_workflow_port(fn, old, new)
             for use in uses:
                 use.engine.instance_port_mentions(use.workflow, use.instances, old, new, ordinal=use.ordinal)
@@ -4025,6 +4185,7 @@ class RewriteEngine:
                 diagnostic={"code": "port_exists", "entityType": entity, "port": new},
             )
         uses = self._all_port_uses(entity, usedIn)
+        self._refuse_unfollowed_uses(uses, old, "rename", "rename it there", entityType=entity)
         class_strings = self._class_string_mentions(cls, old)
         if class_strings:
             line = self._line_of(class_strings[0])
@@ -4033,7 +4194,12 @@ class RewriteEngine:
                     f"port '{old}' of '{entity}' is named by a string{f' at line {line}' if line else ''}, "
                     "which this rename cannot follow: rename it there"
                 ),
-                diagnostic={"code": "port_used_by_name", "entityType": entity, "port": old},
+                diagnostic={
+                    "code": "port_used_by_name",
+                    "entityType": entity,
+                    "port": old,
+                    **({"line": line} if line is not None else {}),
+                },
             )
         # The declaration first, found by its name (`direction` only tells
         # two of the name apart): a use renamed without it would name a port
@@ -4050,12 +4216,12 @@ class RewriteEngine:
             use.engine.instance_port_mentions(use.workflow, use.instances, old, new, ordinal=use.ordinal)
 
     def _class_string_mentions(self, cls: cst.ClassDef, port: str) -> list[cst.SimpleString]:
-        """Strings `"port"` class `cls` uses as a port's name and a rename
-        does not follow: a `getattr(self, "port")`, a key of a dict or of a
-        subscript (`tokens["port"]`), a name a `for` loops over. Its
-        actions' `consumes` / `produces` keys and the keys of the dicts they
-        return are followed; a string that is not a port's name (the
-        `direction="out"` of a declaration, a docstring) is not one."""
+        """Strings `"port"` of class `cls` a rename does not follow: every
+        one but its actions' `consumes` / `produces` keys and the keys of
+        the dicts they return, which it does, and those that cannot be a
+        port's name (a docstring, a keyword's value: `direction="out"`). A
+        `getattr(self, "port")`, a key of a subscript, a variable (`key =
+        "port"; return {key: ...}`) each may reach one."""
         followed: set[int] = set()
         for stmt in cls.body.body:
             if not isinstance(stmt, cst.FunctionDef):
@@ -4081,7 +4247,7 @@ class RewriteEngine:
                             )
 
                 stmt.visit(_Returns())
-        return [string for string in _port_name_strings(cls, port) if id(string) not in followed]
+        return [string for string in _named_strings(cls, port) if id(string) not in followed]
 
     def update_port_type(
         self,

@@ -1725,3 +1725,163 @@ def test_rename_a_class_port_is_not_a_keyword(project: Path) -> None:
     answer = _send(project / "compile/sources/text.py", "renamePort", entity="Text", portDirection="output", portName="Out", newValue="def")
     assert answer["diagnostic"]["code"] == "invalid_identifier", answer
     assert _text(project, "compile/sources/text.py") == before
+
+
+PORT_BY_VARIABLE = '''from wfpy import connect, workflow
+
+from stages import Reader
+
+
+@workflow(outputs={"Out": str, "Log": str})
+def flow():
+    a = Reader()
+    b = Reader()
+'''
+
+
+@pytest.mark.parametrize(
+    "lines",
+    [
+        '    for i, dst in enumerate(("Out", "Log")):\n        connect((a, b)[i].Out, dst)\n',
+        '    outs = ("Out", "Log")\n    for dst in outs:\n        connect(a.Out, dst)\n',
+        '    dst, log = "Out", "Log"\n    connect(a.Out, dst)\n    connect(b.Out, log)\n',
+    ],
+)
+@pytest.mark.parametrize("op", ["renameNode", "deletePort"])
+def test_a_workflow_port_named_through_a_variable_is_not_edited(tmp_path: Path, lines: str, op: str) -> None:
+    text = PORT_BY_VARIABLE + lines
+    src = _flow(tmp_path, text)
+    if op == "renameNode":
+        answer = _send(src, op, workflow="flow", old="Out", new="Res")
+    else:
+        answer = _send(src, op, workflow="flow", direction="output", portName="Out")
+    assert answer["diagnostic"].get("code") == "port_used_by_name", answer
+    assert src.read_text(encoding="utf-8") == text
+
+
+PORT_OF_AN_INSTANCE = '''from wfpy import Port, action, connect, task, workflow
+
+
+@task
+class Reader:
+    class Ports:
+        result = Port[str](direction="out")
+
+    @action(consumes={}, produces={"result": 1})
+    def emit(self) -> dict:
+        return {"result": "x"}
+
+
+@workflow(outputs={"result": str})
+def flow():
+    a = Reader()
+    connect(getattr(a, "result"), "result")
+'''
+
+
+def test_rename_a_workflow_port_past_the_port_of_an_instance_of_its_name(tmp_path: Path) -> None:
+    """`getattr(a, "result")` names the port of `a`, not the workflow's."""
+    src = _module(tmp_path, PORT_OF_AN_INSTANCE, "flow.py")
+    answer = _send(src, "renameNode", workflow="flow", old="result", new="final")
+    assert answer["status"] == "ok", answer
+    after = src.read_text(encoding="utf-8")
+    assert '@workflow(outputs={"final": str})' in after
+    assert 'connect(getattr(a, "result"), "final")' in after
+    _plans(tmp_path, "flow.py")
+
+
+def test_rename_a_workflow_port_to_its_own_name_changes_nothing(tmp_path: Path) -> None:
+    src = _module(tmp_path, PORT_OF_AN_INSTANCE, "flow.py")
+    answer = _send(src, "renameNode", workflow="flow", old="result", new="result")
+    assert answer["status"] == "ok", answer
+    assert src.read_text(encoding="utf-8") == PORT_OF_AN_INSTANCE
+
+
+def test_rename_a_class_port_a_variable_of_the_class_names_is_refused(tmp_path: Path) -> None:
+    text = STAGES.replace('        return {"Out": "x"}\n', '        key = "Out"\n        return {key: "x"}\n', 1)
+    src = _module(tmp_path, text, "stages.py")
+    answer = _send(src, "renamePort", entity="Reader", portDirection="output", portName="Out", newValue="Res")
+    assert answer["diagnostic"] == {"code": "port_used_by_name", "entityType": "Reader", "port": "Out", "line": 13}, answer
+    assert src.read_text(encoding="utf-8") == text
+
+
+CLASS_PORT_BY_VARIABLE = '''from wfpy import connect, workflow
+
+from stages import Fan, Reader, Writer
+
+
+@workflow
+def flow():
+    a = Reader()
+    b = Reader()
+    f = Fan()
+    w = Writer()
+'''
+
+
+@pytest.mark.parametrize(
+    ("op", "args", "lines", "line"),
+    [
+        (
+            "renamePort",
+            {"entity": "Reader", "portDirection": "output", "portName": "Out", "newValue": "Res"},
+            '    for p in ("Out",):\n        connect(getattr(a, p), w.In)\n',
+            13,
+        ),
+        (
+            "renamePort",
+            {"entity": "Reader", "portDirection": "output", "portName": "Out", "newValue": "Res"},
+            "    for i in (0,):\n        connect((a, b)[i].Out, w.In)\n",
+            13,
+        ),
+        (
+            "deleteEntityPort",
+            {"entityType": "Fan", "portDirection": "output", "portName": "Extra"},
+            '    for p in ("Extra",):\n        connect(getattr(f, p), w.In)\n',
+            13,
+        ),
+    ],
+)
+def test_a_class_port_a_workflow_names_through_a_variable_is_not_edited(
+    tmp_path: Path, op: str, args: dict, lines: str, line: int
+) -> None:
+    text = CLASS_PORT_BY_VARIABLE + lines
+    src = _flow(tmp_path, text)
+    stages = tmp_path / "stages.py"
+    entity = args.get("entity") or args.get("entityType")
+    uses = _send(stages, "portUses", entity=entity)["diagnostic"]["usedIn"]
+    assert str(src.resolve()) in [use["file"] for use in uses]
+    answer = _send(stages, op, usedIn=uses, **args)
+    assert answer["diagnostic"].get("code") == "port_used_by_name", answer
+    assert answer["diagnostic"]["file"] == str(src.resolve()) and answer["diagnostic"]["line"] == line
+    assert "line 13 of flow.py" in answer["message"]
+    assert src.read_text(encoding="utf-8") == text
+    assert stages.read_text(encoding="utf-8") == STAGES
+
+
+def test_a_workflow_port_its_user_names_through_a_variable_is_not_renamed(tmp_path: Path) -> None:
+    text = NESTED.replace("    connect(s.y, b.In)\n", '    for p in ("y",):\n        connect(getattr(s, p), b.In)\n')
+    src = _module(tmp_path, text)
+    answer = _send(src, "renameNode", workflow="inner", old="y", new="z")
+    assert answer["diagnostic"].get("code") == "port_used_by_name", answer
+    assert answer["diagnostic"]["workflow"] == "outer"
+    assert src.read_text(encoding="utf-8") == text
+
+
+LOOPED_PORTS = NESTED.replace(
+    "    connect(s.y, b.In)\n", '    for p in ("y",):\n        connect(getattr(s, p), b.In)\n    connect("x", s.x)\n'
+).replace("@workflow\ndef outer():", '@workflow(inputs={"x": Any})\ndef outer():')
+
+
+def test_a_port_a_loop_of_other_names_reaches_is_renamed(tmp_path: Path) -> None:
+    """`for p in ("y",): getattr(s, p)` names `y` only: renaming `x`
+    follows `s.x`; renaming `y` is refused."""
+    src = _module(tmp_path, LOOPED_PORTS)
+    _plans(tmp_path, "m.py", workflow="outer")
+    answer = _send(src, "renameNode", workflow="inner", old="x", new="w")
+    assert answer["status"] == "ok", answer
+    after = src.read_text(encoding="utf-8")
+    assert 'connect("x", s.w)' in after and "connect(getattr(s, p), b.In)" in after
+    _plans(tmp_path, "m.py", workflow="outer")
+    refused = _send(src, "renameNode", workflow="inner", old="y", new="z")
+    assert refused["diagnostic"].get("code") == "port_used_by_name", refused
