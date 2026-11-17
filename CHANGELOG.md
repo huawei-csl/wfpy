@@ -52,7 +52,8 @@ All notable changes to wfpy are documented here. The format follows
 - `connect()` (and `>>`) given a node rather than one of its ports
   (`connect(a, b)`) says so where it is written, naming the node and the
   ports it has on that side, instead of "Invalid source" from the plan
-  builder.
+  builder. The diagram's partial graph flags that node with the message
+  (`node_not_port`); it took the error off the file and put it nowhere.
 - Diagram edits leave the project importable. `createPort` adds the port
   to `@workflow(inputs=, outputs=)` (it replaced the module with the
   workflow's body); `deletePort` and renaming a workflow's own port edit
