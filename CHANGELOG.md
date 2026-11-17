@@ -60,6 +60,20 @@ All notable changes to wfpy are documented here. The format follows
   argument that reads a name not bound where it is written (nothing binds
   it, or the workflow binds it only below the node) as `name_not_bound`.
   An edit that writes several files writes them all or none.
+- `renameNode` renames the local wherever Python reads it: `getattr(a, ...)`,
+  a tuple a loop goes over, a closure, an assignment that is not one call
+  (`a = X() if dry else Y()`). It renamed only `a = Call()`, `a.port` and a
+  connect's end, and the workflow then failed with a `NameError`. A local
+  bound by a definition or an import, or declared `nonlocal`, is refused as
+  `name_used_otherwise`. A node and a port of one workflow are not named
+  alike (`name_exists`): renamed by its name alone, the node was renamed for
+  the port.
+- `updateNodeParameter` writes an argument where the call that makes the
+  node gives it: in place when it is given by position (`make("a")`); it
+  appended a keyword, and the call got two values. A node a helper function
+  makes (`s = _source("a")`), or whose call may give the argument through a
+  `*args` / `**kwargs`, is refused as `arguments_elsewhere`; the export no
+  longer shows the helper's call text as the node's.
 - The run's live files are written whole: `run.wf-viewer.live.json`, the
   agent-context and context live files, and the final overlay, queue trace
   and run record go to a sibling file renamed over the target, so a reader

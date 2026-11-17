@@ -179,6 +179,22 @@ def _innermost_statement(tree: ast.Module, line: int) -> ast.stmt | None:
     return best
 
 
+def _in_a_workflow(tree: ast.Module, line: int) -> bool:
+    """Whether ``line`` is a workflow's own: not in a function that one
+    calls (``def _file(path): return FileSource(...)``), whose call is not
+    what the workflow writes and whose text is not the node's."""
+    enclosing: ast.FunctionDef | ast.AsyncFunctionDef | None = None
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.lineno <= line <= (node.end_lineno or node.lineno):
+            if enclosing is None or node.lineno > enclosing.lineno:
+                enclosing = node
+    if enclosing is None:
+        return True
+    return any(
+        _callee_name(dec.func if isinstance(dec, ast.Call) else dec) == "workflow" for dec in enclosing.decorator_list
+    )
+
+
 def instantiation_call(
     source: dict[str, Any] | None, callee: str | None = None, factory: bool = False
 ) -> tuple[str, ast.Call] | None:
@@ -193,7 +209,7 @@ def instantiation_call(
         return None
     text, tree = found
     statement = _innermost_statement(tree, line)
-    if statement is None:
+    if statement is None or not _in_a_workflow(tree, line):
         return None
     calls = [n for n in ast.walk(statement) if isinstance(n, ast.Call)]
     if factory:

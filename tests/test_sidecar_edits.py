@@ -1885,3 +1885,196 @@ def test_a_port_a_loop_of_other_names_reaches_is_renamed(tmp_path: Path) -> None
     _plans(tmp_path, "m.py", workflow="outer")
     refused = _send(src, "renameNode", workflow="inner", old="y", new="z")
     assert refused["diagnostic"].get("code") == "port_used_by_name", refused
+
+
+# ── a node renamed where Python reads it, an argument edited where it is written ──
+
+
+READ_BARE = '''from wfpy import connect, workflow
+
+from stages import Reader, Writer
+
+DRY = False
+
+
+@workflow(outputs={"Out": str})
+def flow():
+    a = Reader() if not DRY else Reader()
+    b = Writer()
+    for node in (a,):
+        connect(getattr(a, "Out"), b.In)
+    later = lambda: a.Out
+    count = [a for a in range(2)]
+    connect(later(), "Out")
+'''
+
+
+def test_rename_node_follows_every_read_of_the_local(tmp_path: Path) -> None:
+    """`getattr(a, ...)`, a tuple a loop goes over, a closure, and an
+    assignment that is not one call: each reads the local, each is renamed.
+    A comprehension's own `a` is another variable, and stays."""
+    src = _flow(tmp_path, READ_BARE)
+    answer = _send(src, "renameNode", workflow="flow", old="a", new="first")
+    assert answer["status"] == "ok", answer
+    text = src.read_text(encoding="utf-8")
+    assert "first = Reader() if not DRY else Reader()" in text
+    assert "for node in (first,):" in text
+    assert 'getattr(first, "Out")' in text
+    assert "lambda: first.Out" in text
+    assert "[a for a in range(2)]" in text
+    _plans(tmp_path, "flow.py")
+
+
+def test_rename_node_refuses_a_local_declared_nonlocal(tmp_path: Path) -> None:
+    src = _flow(tmp_path, '''from wfpy import workflow
+
+from stages import Reader
+
+
+@workflow
+def flow():
+    a = Reader()
+
+    def again():
+        nonlocal a
+        a = Reader()
+''')
+    before = src.read_text(encoding="utf-8")
+    answer = _send(src, "renameNode", workflow="flow", old="a", new="first")
+    assert answer["status"] == "error"
+    assert answer["diagnostic"]["code"] == "name_used_otherwise", answer
+    assert src.read_text(encoding="utf-8") == before
+
+
+def test_rename_node_says_a_node_made_in_a_loop_is_renamed_in_its_source(tmp_path: Path) -> None:
+    src = _flow(tmp_path, '''from wfpy import workflow
+
+from stages import Reader
+
+
+@workflow
+def flow():
+    made = {}
+    for k in ("x",):
+        made[k] = Reader()
+''')
+    answer = _send(src, "renameNode", workflow="flow", old="x", new="y")
+    assert answer["status"] == "error"
+    assert answer["diagnostic"] == {"code": "node_not_found", "name": "x"}, answer
+
+
+PORT_AND_NODE = '''from wfpy import connect, workflow
+
+from stages import Reader
+
+
+@workflow(outputs={"Out": str})
+def flow():
+    r = Reader()
+    connect(r.Out, "Out")
+'''
+
+
+@pytest.mark.parametrize(
+    ("op", "args"),
+    [
+        ("createNode", {"type": "Reader", "name": "Out"}),
+        ("renameNode", {"old": "r", "new": "Out"}),
+        ("createPort", {"direction": "output", "portName": "r", "portType": "str"}),
+        ("renameNode", {"old": "Out", "new": "r"}),
+    ],
+)
+def test_a_node_and_a_port_of_one_workflow_are_not_named_alike(tmp_path: Path, op: str, args: dict) -> None:
+    """Renamed by its name alone, the node would be renamed for the port."""
+    src = _flow(tmp_path, PORT_AND_NODE)
+    answer = _send(src, op, workflow="flow", **args)
+    assert answer["status"] == "error"
+    assert answer["diagnostic"]["code"] == "name_exists", answer
+    assert src.read_text(encoding="utf-8") == PORT_AND_NODE
+
+
+MADE_BY_A_HELPER = '''from wfpy import connect, workflow
+
+from stages import Source, Writer
+
+
+def _source(path):
+    return Source(path=path + ".txt")
+
+
+@workflow
+def flow():
+    s = _source("a")
+    w = Writer()
+    connect(s.Out, w.In)
+'''
+
+
+def test_an_argument_of_a_node_a_helper_makes_is_not_written_on_the_helper(tmp_path: Path) -> None:
+    """`s = _source("a")`: the `path` the node shows is the one `_source`
+    gives `Source`; `_source(..., path=...)` would give `_source` two."""
+    src = _flow(tmp_path, MADE_BY_A_HELPER)
+    answer = _send(src, "updateNodeParameter", workflow="flow", entity="s", parameterName="path", newValue='"b.txt"')
+    assert answer["status"] == "error"
+    assert answer["diagnostic"]["code"] == "arguments_elsewhere", answer
+    assert answer["diagnostic"]["line"] == 12
+    assert src.read_text(encoding="utf-8") == MADE_BY_A_HELPER
+
+
+def test_a_node_a_helper_makes_exports_no_source_text_of_the_helper(tmp_path: Path) -> None:
+    _flow(tmp_path, MADE_BY_A_HELPER)
+    exported = _plans(tmp_path, "flow.py")
+    (path,) = [p for p in _node(exported, "s")["meta"]["parameters"] if p["name"] == "path"]
+    assert path["value"] == "'a.txt'"
+    assert "expression" not in path
+
+
+FACTORY_BY_POSITION = '''from wfpy import connect, workflow
+
+from stages import Source, Writer
+
+
+def make(path, label="x", **rest):
+    @workflow(outputs={"Out": str})
+    def made():
+        s = Source(path=path)
+        connect(s.Out, "Out")
+
+    return made
+
+
+OPTIONS = {"label": "y"}
+
+
+@workflow
+def flow():
+    m = make("a.txt")()
+    n = make("b.txt", **OPTIONS)()
+    w = Writer()
+    connect(m.Out, w.In)
+'''
+
+
+def test_an_argument_given_by_position_is_set_there(tmp_path: Path) -> None:
+    src = _flow(tmp_path, FACTORY_BY_POSITION)
+    answer = _send(src, "updateNodeParameter", workflow="flow", entity="m", parameterName="path", newValue='"c.txt"')
+    assert answer["status"] == "ok", answer
+    assert 'm = make("c.txt")()' in src.read_text(encoding="utf-8")
+    _plans(tmp_path, "flow.py")
+
+
+def test_an_argument_a_splat_may_give_is_not_added(tmp_path: Path) -> None:
+    src = _flow(tmp_path, FACTORY_BY_POSITION)
+    answer = _send(src, "updateNodeParameter", workflow="flow", entity="n", parameterName="label", newValue='"z"')
+    assert answer["status"] == "error"
+    assert answer["diagnostic"]["code"] == "arguments_elsewhere", answer
+    assert "**OPTIONS" in answer["message"]
+    assert src.read_text(encoding="utf-8") == FACTORY_BY_POSITION
+
+
+def test_an_argument_of_a_node_no_one_call_makes_is_refused_with_why(tmp_path: Path) -> None:
+    src = _flow(tmp_path, READ_BARE)
+    answer = _send(src, "updateNodeParameter", workflow="flow", entity="a", parameterName="path", newValue='"x"')
+    assert answer["status"] == "error"
+    assert answer["diagnostic"] == {"code": "arguments_elsewhere", "entity": "a", "parameter": "path"}, answer
+    assert src.read_text(encoding="utf-8") == READ_BARE

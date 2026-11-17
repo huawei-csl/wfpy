@@ -8,7 +8,7 @@ import keyword
 import sys
 import tempfile
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Iterable, Sequence
+from typing import TYPE_CHECKING, Any, Iterable, NoReturn, Sequence
 
 import libcst as cst
 import libcst.matchers as m
@@ -1783,6 +1783,23 @@ class RewriteEngine:
                 + ": choose another name",
                 diagnostic={"code": "name_exists", "name": name, **({"line": line} if line is not None else {})},
             )
+        # A node and a port of one workflow are drawn apart, but renamed by
+        # their name alone: the node would be renamed for the port.
+        declared = self._workflow_port_names(fn)
+        if name in declared["inputs"] or name in declared["outputs"]:
+            raise RewriteError(
+                message=f"'{name}' is a port of this workflow: choose another name",
+                diagnostic={"code": "name_exists", "name": name, "port": name},
+            )
+
+    def _refuse_node_named(self, fn: cst.FunctionDef, name: str) -> None:
+        """Refuse a port name of workflow `fn` that one of its nodes has:
+        renamed by that name, the node would be renamed for the port."""
+        if self._body_assigns(fn, name):
+            raise RewriteError(
+                message=f"'{name}' is the name of a node of this workflow: choose another name",
+                diagnostic={"code": "name_exists", "name": name},
+            )
 
     def _names_bound_in(self, fn: cst.FunctionDef) -> dict[str, int | None]:
         """The names workflow `fn` binds itself, each with the line it is
@@ -1869,6 +1886,67 @@ class RewriteEngine:
 
         fn.visit(_Binds())
         return bound
+
+    def _refuse_unwritable_argument(self, made: cst.Assign | None, entity: str, parameter: str) -> int | None:
+        """Where argument `parameter` of instance `entity` is written: the
+        index of the positional argument that gives it, or nothing (a
+        keyword, given or to add). Refused where the call that makes the
+        instance is not the one its parameters belong to (`x = helper(...)`,
+        a function making it inside), or a `*args` / `**kwargs` of the call
+        may give it already."""
+        if made is None or not isinstance(made.value, cst.Call):
+            return None
+        call = made.value
+        if isinstance(call.func, cst.Call) and not call.args:
+            call = call.func  # `factory(...)()`: the factory's parameters.
+        line = self._line_of(made)
+        at = f" at line {line}" if line else ""
+        if any(arg.keyword is not None and arg.keyword.value == parameter for arg in call.args):
+            return None
+        callee = call.func.value if isinstance(call.func, cst.Name) else None
+        kind, positional_names = self._callee_parameters(callee) if callee else (None, None)
+        if kind == "function":
+            raise RewriteError(
+                message=(
+                    f"'{entity}' is made by {callee}(...){at}, a function whose own parameters are not "
+                    f"the node's: give '{parameter}' where it makes the node"
+                ),
+                diagnostic={"code": "arguments_elsewhere", "entity": entity, "parameter": parameter,
+                            **({"line": line} if line else {})},
+            )
+        for index, arg in enumerate(call.args):
+            if arg.star:
+                raise RewriteError(
+                    message=(
+                        f"the call that makes '{entity}'{at} passes {arg.star}{self.module.code_for_node(arg.value)}, "
+                        f"which may give '{parameter}' already: edit it there"
+                    ),
+                    diagnostic={"code": "arguments_elsewhere", "entity": entity, "parameter": parameter,
+                                **({"line": line} if line else {})},
+                )
+            if arg.keyword is None and positional_names is not None and index < len(positional_names) \
+                    and positional_names[index] == parameter:
+                return index
+        return None
+
+    def _callee_parameters(self, name: str) -> tuple[str | None, list[str] | None]:
+        """What `name` is (`task`, `workflow`, `factory`, or a plain
+        `function`) and the names its positional parameters have, in order;
+        nothing known where the project does not define it."""
+        import ast
+
+        from wfpy._project_index import factory_workflow, is_workflow_function, resolve_type
+
+        try:
+            _index, _definition, node = resolve_type(self.file_path, name)
+        except RewriteError:
+            return None, None
+        if isinstance(node, ast.ClassDef):
+            return "task", []
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            kind = "workflow" if is_workflow_function(node) else "factory" if factory_workflow(node) else "function"
+            return kind, [a.arg for a in (*node.args.posonlyargs, *node.args.args)]
+        return None, None
 
     def _instance_assign(self, fn: cst.FunctionDef, name: str) -> cst.Assign | None:
         """The first `name = <call>` of workflow `fn`'s own body: the one
@@ -2144,6 +2222,7 @@ class RewriteEngine:
                 message=f"workflow '{fn.name.value}' has a port '{portName}' already",
                 diagnostic={"code": "port_exists", "workflow": fn.name.value, "port": portName},
             )
+        self._refuse_node_named(fn, portName)
         ports_kw = "inputs" if direction == "input" else "outputs"
         element = cst.DictElement(key=cst.SimpleString(f'"{portName}"'), value=port_type)
         decorator = found[1].decorator
@@ -2248,6 +2327,7 @@ class RewriteEngine:
                 message=f"workflow '{fn.name.value}' has a port '{new}' already",
                 diagnostic={"code": "port_exists", "workflow": fn.name.value, "port": new},
             )
+        self._refuse_node_named(fn, new)
         _ends, others = self._workflow_name_mentions(fn, old)
         self._refuse_by_name(fn, old, others, "rename", "rename it there")
 
@@ -2994,6 +3074,7 @@ class RewriteEngine:
         self._refuse_unbound(
             value, fn, f"the value of {entity}.{parameterName}", self._line_of(made) if made is not None else None
         )
+        positional = self._refuse_unwritable_argument(made, entity, parameterName)
 
         class _UpdateParam(_WorkflowBodyTransformer):
             def __init__(self) -> None:
@@ -3006,6 +3087,10 @@ class RewriteEngine:
                     if arg.keyword and arg.keyword.value == parameterName:
                         args[idx] = arg.with_changes(value=value)
                         return call.with_changes(args=args)
+                if positional is not None:
+                    # Given by position (`make("x")` for `make(mode)`): set there.
+                    args[positional] = args[positional].with_changes(value=value)
+                    return call.with_changes(args=args)
                 args = _with_inserted(args, len(args), _keyword_arg(parameterName, value), call.whitespace_before_args)
                 return call.with_changes(args=args)
 
@@ -3025,9 +3110,21 @@ class RewriteEngine:
         transformer = _UpdateParam()
         updated = fn.visit(transformer)
         if not transformer.updated or not isinstance(updated, cst.FunctionDef):
+            if self._body_assigns(fn, entity):
+                # `x = A() if dry else B()`: no one call is the node's.
+                raise RewriteError(
+                    message=(
+                        f"'{entity}' is not made by one call this edit can change: "
+                        f"give '{parameterName}' where its source makes it"
+                    ),
+                    diagnostic={"code": "arguments_elsewhere", "entity": entity, "parameter": parameterName},
+                )
             raise RewriteError(
-                message=f"Entity parameter not found: {entity}.{parameterName}",
-                diagnostic={"code": "node_not_found"},
+                message=(
+                    f"'{entity}' is not a name workflow '{fn.name.value}' assigns: a node made in a loop, "
+                    "or under another name, is edited in its source"
+                ),
+                diagnostic={"code": "node_not_found", "name": entity},
             )
         self._replace_node(fn, updated)
 
@@ -4081,72 +4178,73 @@ class RewriteEngine:
             return
         # The new name is the workflow's alone: not another of its names
         # (`front = ...` twice), not one it reads (`Text = Text(...)`).
-        if self._body_assigns(fn, old):
-            self._refuse_taken(fn, new)
-            self._refuse_shadowing(fn, new, self._instance_type_name(fn, old), renamed=old)
+        self._refuse_taken(fn, new)
+        self._refuse_shadowing(fn, new, self._instance_type_name(fn, old), renamed=old)
 
-        class _RenameNodeTransformer(_WorkflowBodyTransformer):
-            def __init__(self, fn_node: cst.FunctionDef, old_name: str, new_name: str) -> None:
-                super().__init__(fn_node)
-                self._old = old_name
-                self._new = new_name
-                self._in_target_fn = True
-                self.renamed = False
+        self._replace_node(fn, self._renamed_local(fn, old, new))
 
-            def leave_Assign(self, original_node: cst.Assign, updated_node: cst.Assign) -> cst.Assign:
-                if not self._in_target_fn:
-                    return updated_node
-                if not isinstance(updated_node.value, cst.Call):
-                    return updated_node
-                changed = False
-                new_targets: list[cst.AssignTarget] = []
-                for tgt in updated_node.targets:
-                    target = tgt.target
-                    if isinstance(target, cst.Name) and target.value == self._old:
-                        target = target.with_changes(value=self._new)
-                        changed = True
-                    new_targets.append(tgt.with_changes(target=target))
-                if changed:
-                    self.renamed = True
-                    return updated_node.with_changes(targets=new_targets)
-                return updated_node
+    def _renamed_local(self, fn: cst.FunctionDef, old: str, new: str) -> cst.FunctionDef:
+        """Workflow `fn` with its local `old` named `new` wherever Python
+        reads it as that local: every binding of it in `fn`'s own scope and
+        every read of one, the function's closures included. Not a word
+        that only spells it (`x.old`, `f(old=...)`, a string), nor a nested
+        scope's own `old` (a comprehension's variable). Refused where a use
+        cannot be followed: `old` bound by a definition or an import, read
+        as a string annotation, or declared `nonlocal`/`global`."""
+        from libcst.metadata import MetadataWrapper, ScopeProvider
 
-            def leave_Attribute(self, original_node: cst.Attribute, updated_node: cst.Attribute) -> cst.Attribute:
-                if not self._in_target_fn:
-                    return updated_node
-                if isinstance(updated_node.value, cst.Name) and updated_node.value.value == self._old:
-                    self.renamed = True
-                    return updated_node.with_changes(value=updated_node.value.with_changes(value=self._new))
-                return updated_node
+        statements = fn.body.body if isinstance(fn.body, cst.IndentedBlock) else ()
+        scopes = MetadataWrapper(self.module, unsafe_skip_copy=True).resolve(ScopeProvider)
+        scope = scopes.get(statements[0]) if statements else None
+        bindings = [a for a in scope.assignments[old] if a.scope is scope] if scope is not None else []
+        if not bindings:
+            raise RewriteError(
+                message=(
+                    f"'{old}' is not a name workflow '{fn.name.value}' assigns: a node made in a loop, "
+                    "or under another name, is renamed in its source"
+                ),
+                diagnostic={"code": "node_not_found", "name": old},
+            )
 
-            def leave_Call(self, original_node: cst.Call, updated_node: cst.Call) -> cst.Call:
-                if not self._in_target_fn:
-                    return updated_node
-                if not isinstance(updated_node.func, cst.Name) or updated_node.func.value != "connect":
-                    return updated_node
-                changed = False
-                new_args = list(updated_node.args)
-                for idx in (0, 1):
-                    if idx >= len(new_args):
-                        continue
-                    expr = new_args[idx].value
-                    if isinstance(expr, cst.Name) and expr.value == self._old:
-                        new_args[idx] = new_args[idx].with_changes(value=expr.with_changes(value=self._new))
-                        changed = True
-                    elif isinstance(expr, cst.Attribute) and isinstance(expr.value, cst.Name) and expr.value.value == self._old:
-                        new_value = expr.value.with_changes(value=self._new)
-                        new_args[idx] = new_args[idx].with_changes(value=expr.with_changes(value=new_value))
-                        changed = True
-                if changed:
-                    self.renamed = True
-                    return updated_node.with_changes(args=new_args)
-                return updated_node
+        def refuse(node: cst.CSTNode, how: str) -> NoReturn:
+            line = self._line_of(node)
+            raise RewriteError(
+                message=(
+                    f"'{old}' is {how}{f' at line {line}' if line else ''}, "
+                    "which this rename cannot follow: rename it there"
+                ),
+                diagnostic={"code": "name_used_otherwise", "name": old, **({"line": line} if line else {})},
+            )
 
-        transformer = _RenameNodeTransformer(fn, old, new)
-        updated = fn.visit(transformer)
-        if not transformer.renamed or not isinstance(updated, cst.FunctionDef):
-            raise RewriteError(message=f"Node not found: {old}", diagnostic={"code": "node_not_found"})
-        self._replace_node(fn, updated)
+        names: set[int] = set()
+        for binding in bindings:
+            node = getattr(binding, "node", None)
+            if not isinstance(node, cst.Name):
+                refuse(node if isinstance(node, cst.CSTNode) else fn, "also bound by a definition or an import")
+            names.add(id(node))
+            for access in binding.references:
+                if not isinstance(access.node, cst.Name):
+                    refuse(access.node, "read in a string")
+                names.add(id(access.node))
+
+        class _Declared(cst.CSTVisitor):
+            def visit_Nonlocal(self, node: cst.Nonlocal) -> None:
+                if any(item.name.value == old for item in node.names):
+                    refuse(node, "declared nonlocal")
+
+            def visit_Global(self, node: cst.Global) -> None:
+                if any(item.name.value == old for item in node.names):
+                    refuse(node, "declared global")
+
+        fn.visit(_Declared())
+
+        class _Rename(cst.CSTTransformer):
+            def leave_Name(self, original_node: cst.Name, updated_node: cst.Name) -> cst.Name:
+                return updated_node.with_changes(value=new) if id(original_node) in names else updated_node
+
+        updated = fn.visit(_Rename())
+        assert isinstance(updated, cst.FunctionDef)
+        return updated
 
     def rename_port(
         self,
