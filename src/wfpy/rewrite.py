@@ -68,6 +68,45 @@ def _parse_user_expression(text: Any, what: str) -> cst.BaseExpression:
         ) from None
 
 
+def _free_names(expr: cst.BaseExpression) -> list[str]:
+    """The names `expr` reads from its scope, in order, once each: not an
+    attribute (`File.path`'s `path`), a keyword (`File(path=...)`), or a
+    name the expression binds itself (a lambda's parameter, a
+    comprehension's variable, a `:=` target)."""
+    read: list[str] = []
+    own: set[str] = set()
+
+    class _Names(cst.CSTVisitor):
+        def visit_Attribute(self, node: cst.Attribute) -> bool:
+            node.value.visit(self)
+            return False
+
+        def visit_Arg(self, node: cst.Arg) -> bool:
+            node.value.visit(self)
+            return False
+
+        def visit_Param(self, node: cst.Param) -> bool:
+            own.add(node.name.value)
+            if node.default is not None:
+                node.default.visit(self)
+            return False
+
+        def visit_CompFor(self, node: cst.CompFor) -> None:
+            for target in _target_names(node.target):
+                own.add(target)
+
+        def visit_NamedExpr(self, node: cst.NamedExpr) -> None:
+            for target in _target_names(node.target):
+                own.add(target)
+
+        def visit_Name(self, node: cst.Name) -> None:
+            if node.value not in read:
+                read.append(node.value)
+
+    expr.visit(_Names())
+    return [name for name in read if name not in own and name not in ("True", "False", "None")]
+
+
 def _keyword_arg(name: str, value: cst.BaseExpression) -> cst.Arg:
     """`name=value`, as a keyword argument is written by hand."""
     return cst.Arg(
@@ -1402,7 +1441,9 @@ class RewriteEngine:
                     message=f"parameter '{key}' is given twice, as a value and as an expression",
                     diagnostic={"code": "invalid_parameter_name"},
                 )
-            args.append(_keyword_arg(str(key), _parse_user_expression(text, f"the value of {name}.{key}")))
+            value = _parse_user_expression(text, f"the value of {name}.{key}")
+            self._refuse_unbound(value, fn, f"the value of {name}.{key}")
+            args.append(_keyword_arg(str(key), value))
             written.add(str(key))
         # Where the type comes from is settled before anything is written.
         import_from = str(importFrom).strip() if importFrom else ""
@@ -1489,6 +1530,18 @@ class RewriteEngine:
             if self._star_binds(star, name):
                 return True
         return False
+
+    def _refuse_unbound(self, expr: cst.BaseExpression, fn: cst.FunctionDef | None, what: str) -> None:
+        """Refuse an expression that reads a name nothing binds where it is
+        written (`fn`'s body, or the module's top level): the file would be
+        written, and the workflow then fail as it is built (NameError)."""
+        for name in _free_names(expr):
+            if not self._binds(name, fn):
+                where = f"workflow '{fn.name.value}'" if fn is not None else "this file"
+                raise RewriteError(
+                    message=f"{what} reads '{name}', which nothing in {where} binds: define or import it first",
+                    diagnostic={"code": "name_not_bound", "name": name},
+                )
 
     def _star_binds(self, star: cst.ImportFrom, name: str) -> bool:
         """Whether `from module import *` binds `name`: for a module of the
@@ -2734,6 +2787,7 @@ class RewriteEngine:
             )
         value = _parse_user_expression(newValue, f"the value of {entity}.{parameterName}")
         fn, body = self._get_workflow_body(workflow)
+        self._refuse_unbound(value, fn, f"the value of {entity}.{parameterName}")
 
         class _UpdateParam(_WorkflowBodyTransformer):
             def __init__(self) -> None:

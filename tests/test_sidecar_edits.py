@@ -853,6 +853,32 @@ def test_rename_node_refuses_a_name_a_factory_parameter_has(project: Path) -> No
     assert answer["diagnostic"]["code"] == "name_shadows"
 
 
+@pytest.mark.parametrize("text", ["MISSING", "LABEL + MISSING", "str(object=MISSING)", "[x for x in MISSING]"])
+def test_create_node_refuses_an_expression_that_reads_an_unbound_name(project: Path, text: str) -> None:
+    before = _text(project, "compile/flow.py")
+    answer = _send(project / "compile/flow.py", "createNode", workflow="flow", type="Text", name="again", expressions={"text": text})
+    assert answer["status"] == "error"
+    assert answer["diagnostic"] == {"code": "name_not_bound", "name": "MISSING"}, answer
+    assert _text(project, "compile/flow.py") == before
+
+
+@pytest.mark.parametrize(
+    "text",
+    ['LABEL + "!"', "os.environ.get('X', LABEL)", "str(len(LABEL))", "[c for c in LABEL]", "(lambda v: v)(LABEL)", "front.Out", "name"],
+)
+def test_create_node_takes_an_expression_of_names_in_scope(project: Path, text: str) -> None:
+    answer = _send(project / "compile/flow.py", "createNode", workflow="flow", type="Text", name="again", expressions={"text": text})
+    assert answer["status"] == "ok", answer
+
+
+def test_a_factory_workflows_node_reads_the_factorys_parameters(project: Path) -> None:
+    answer = _send(project / "compile/workflows/pair.py", "createNode", workflow="pair", type="Text", name="third", expressions={"text": "label * times"})
+    assert answer["status"] == "ok", answer
+    refused = _send(project / "compile/workflows/pair.py", "updateNodeParameter", workflow="pair", entity="third", parameterName="text", newValue="LABEL")
+    assert refused["diagnostic"] == {"code": "name_not_bound", "name": "LABEL"}, refused
+    _plans(project, "compile/flow.py")
+
+
 def test_create_node_refuses_a_name_a_factory_parameter_has(project: Path) -> None:
     answer = _send(
         project / "compile/workflows/pair.py",

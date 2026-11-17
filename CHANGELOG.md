@@ -48,7 +48,8 @@ All notable changes to wfpy are documented here. The format follows
   has (`name_exists`: an instance, a loop variable, a parameter), and
   `renameNode` one that would hide what the workflow reads (`Text = Text(...)`). A class task's new parameter is an annotated field, never an
   `__init__`; an annotation edit imports its decorator. A value that is not
-  Python is refused as `invalid_expression`. An edit that writes several
+  Python is refused as `invalid_expression`, and a node's argument that
+  reads a name nothing binds where it is written as `name_not_bound`. An edit that writes several
   files writes them all or none.
 - The run's live files are written whole: `run.wf-viewer.live.json`, the
   agent-context and context live files, and the final overlay, queue trace
