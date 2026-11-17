@@ -591,6 +591,89 @@ _PORT_DIRECTIONS = {
 }
 
 
+def _rebased(value: cst.BaseExpression, indent: str) -> cst.BaseExpression:
+    """`value`, parsed from a text whose later lines stand at the columns
+    they have in the file (as the graph export gives an argument, and the
+    panel shows it), made to land at those columns in a block indented by
+    `indent`. libcst indents a line inside brackets, and a comment or blank
+    line among them, by the block again: such a line loses `indent` first,
+    and one that does not start with it (at the margin, blank) is not
+    indented again. A string's lines and a backslash's are written as they
+    are, and are left so."""
+    if not indent:
+        return value
+
+    def at_its_column(whitespace: str) -> tuple[bool, str]:
+        if whitespace.startswith(indent):
+            return True, whitespace[len(indent):]
+        return False, whitespace
+
+    class _Rebase(cst.CSTTransformer):
+        def leave_ParenthesizedWhitespace(
+            self, original_node: cst.ParenthesizedWhitespace, updated_node: cst.ParenthesizedWhitespace
+        ) -> cst.ParenthesizedWhitespace:
+            if not updated_node.indent:
+                return updated_node
+            again, rest = at_its_column(updated_node.last_line.value)
+            return updated_node.with_changes(indent=again, last_line=cst.SimpleWhitespace(rest))
+
+        def leave_EmptyLine(self, original_node: cst.EmptyLine, updated_node: cst.EmptyLine) -> cst.EmptyLine:
+            if not updated_node.indent:
+                return updated_node
+            if updated_node.comment is None and not updated_node.whitespace.value:
+                return updated_node.with_changes(indent=False)
+            again, rest = at_its_column(updated_node.whitespace.value)
+            return updated_node.with_changes(indent=again, whitespace=cst.SimpleWhitespace(rest))
+
+    rebased = value.visit(_Rebase())
+    assert isinstance(rebased, cst.BaseExpression)
+    return rebased
+
+
+def _same_tokens(written: str, given: str) -> bool:
+    """Whether `given` is `written` but for whitespace and line breaks
+    outside strings, and for parentheses around the whole of either."""
+    import io
+    import tokenize
+
+    def tokens(text: str) -> list[tuple[int, str]] | None:
+        skip = {tokenize.NL, tokenize.NEWLINE, tokenize.INDENT, tokenize.DEDENT, tokenize.ENDMARKER}
+        try:
+            found = [
+                (t.type, t.string)
+                for t in tokenize.generate_tokens(io.StringIO("(" + text.strip() + ")").readline)
+                if t.type not in skip
+            ]
+        except (tokenize.TokenError, SyntaxError):
+            return None
+        while len(found) >= 2 and found[0][1] == "(" and found[-1][1] == ")" and _wraps(found):
+            found = found[1:-1]
+        return found
+
+    a, b = tokens(written), tokens(given)
+    if a is None or a != b:
+        return False
+    # In an f-string's or a t-string's field, `{x = }` is not `{x=}`: the
+    # blanks are its value. Such a value is the same only as written.
+    templated = {getattr(tokenize, kind) for kind in ("FSTRING_START", "TSTRING_START") if hasattr(tokenize, kind)}
+    if any(kind in templated for kind, _text in a):
+        return written.strip() == given.strip()
+    return True
+
+
+def _wraps(found: list[tuple[int, str]]) -> bool:
+    """Whether the first and last token, `(` and `)`, are a pair."""
+    depth = 0
+    for index, (_kind, text) in enumerate(found):
+        if text in "([{":
+            depth += 1
+        elif text in ")]}":
+            depth -= 1
+            if depth == 0 and index < len(found) - 1:
+                return False
+    return depth == 0
+
+
 @dataclasses.dataclass
 class RewriteError(RuntimeError):
     message: str
@@ -1448,6 +1531,7 @@ class RewriteEngine:
         # names bound above it, not one a later statement binds.
         at = self._find_insert_index(target_body, "node")
         landing = self._line_of(target_body[at]) if at < len(target_body) else self._line_after(target_body[-1])
+        block_indent = self._indent_of(target_body[min(at, len(target_body) - 1)]) if target_body else ""
         args: list[cst.Arg] = []
         written: set[str] = set()
         for key, value in (params or {}).items():
@@ -1463,7 +1547,7 @@ class RewriteEngine:
                     message=f"parameter '{key}' is given twice, as a value and as an expression",
                     diagnostic={"code": "invalid_parameter_name"},
                 )
-            value = _parse_user_expression(text, f"the value of {name}.{key}")
+            value = _rebased(_parse_user_expression(text, f"the value of {name}.{key}"), block_indent)
             self._refuse_unbound(value, fn, f"the value of {name}.{key}", landing)
             args.append(_keyword_arg(str(key), value))
             written.add(str(key))
@@ -1947,6 +2031,16 @@ class RewriteEngine:
             kind = "workflow" if is_workflow_function(node) else "factory" if factory_workflow(node) else "function"
             return kind, [a.arg for a in (*node.args.posonlyargs, *node.args.args)]
         return None, None
+
+    def _indent_of(self, node: cst.CSTNode) -> str:
+        """The whitespace the line `node` starts on starts with: the
+        indentation of the block it is a statement of."""
+        line = self._line_of(node)
+        lines = self.module.code.split("\n")
+        if not line or line > len(lines):
+            return ""
+        text = lines[line - 1]
+        return text[: len(text) - len(text.lstrip(" \t"))]
 
     def _instance_assign(self, fn: cst.FunctionDef, name: str) -> cst.Assign | None:
         """The first `name = <call>` of workflow `fn`'s own body: the one
@@ -3071,6 +3165,8 @@ class RewriteEngine:
         value = _parse_user_expression(newValue, f"the value of {entity}.{parameterName}")
         fn, body = self._get_workflow_body(workflow)
         made = self._instance_assign(fn, entity)
+        if made is not None:
+            value = _rebased(value, self._indent_of(made))
         self._refuse_unbound(
             value, fn, f"the value of {entity}.{parameterName}", self._line_of(made) if made is not None else None
         )
@@ -3083,13 +3179,16 @@ class RewriteEngine:
 
             def _set(self, call: cst.Call) -> cst.Call:
                 args = list(call.args)
-                for idx, arg in enumerate(args):
-                    if arg.keyword and arg.keyword.value == parameterName:
-                        args[idx] = arg.with_changes(value=value)
-                        return call.with_changes(args=args)
-                if positional is not None:
-                    # Given by position (`make("x")` for `make(mode)`): set there.
-                    args[positional] = args[positional].with_changes(value=value)
+                at = next(
+                    (idx for idx, arg in enumerate(args) if arg.keyword and arg.keyword.value == parameterName),
+                    positional,  # given by position (`make("x")` for `make(mode)`): set there
+                )
+                if at is not None:
+                    if _same_tokens(cst.Module(body=[]).code_for_node(args[at].value), str(newValue)):
+                        # What it is already, but for whitespace or its own
+                        # parentheses: left as it is, every byte.
+                        return call
+                    args[at] = args[at].with_changes(value=value)
                     return call.with_changes(args=args)
                 args = _with_inserted(args, len(args), _keyword_arg(parameterName, value), call.whitespace_before_args)
                 return call.with_changes(args=args)

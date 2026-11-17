@@ -18,6 +18,7 @@ from __future__ import annotations
 import ast
 import inspect
 import os
+import re
 import weakref
 from typing import Any
 
@@ -240,16 +241,60 @@ def call_expressions(
         if isinstance(arg, ast.Starred):
             break
         if positional_names is not None and index < len(positional_names):
-            written = segment(text, arg)
+            written = _argument_text(text, arg)
             if written is not None:
                 expressions[positional_names[index]] = written
     for keyword in call.keywords:
         if keyword.arg is None:
             continue
-        written = segment(text, keyword.value)
+        written = _argument_text(text, keyword.value)
         if written is not None:
             expressions[keyword.arg] = written
     return expressions
+
+
+def _argument_text(text: str, node: ast.expr) -> str | None:
+    """An argument's text as the file has it, its later lines at the
+    file's columns (the edit that writes it back reads them so). With its
+    own parentheses where it is not an expression without them: ast leaves
+    them out, and `"a"` over a line break to `"b"` needs them."""
+    written = segment(text, node)
+    if written is None or "\n" not in written or _is_expression(written):
+        return written
+    lines = re.split(r"\r\n|\r|\n", text)
+    starts = [0]
+    for line, ending in zip(lines, re.findall(r"\r\n|\r|\n", text)):
+        starts.append(starts[-1] + len(line) + len(ending))
+
+    def offset(lineno: int, col: int) -> int:
+        return starts[lineno - 1] + len(lines[lineno - 1].encode("utf-8")[:col].decode("utf-8", errors="ignore"))
+
+    if node.end_lineno is None or node.end_col_offset is None:
+        return written
+    start, end = offset(node.lineno, node.col_offset), offset(node.end_lineno, node.end_col_offset)
+    for _ in range(8):
+        # Its own parentheses: with only blanks and comments between them and it.
+        opening, closing = text.rfind("(", 0, start), text.find(")", end)
+        if opening < 0 or closing < 0 or not (_GAP.fullmatch(text, opening + 1, start) and _GAP.fullmatch(text, end, closing)):
+            break
+        start, end = opening, closing + 1
+        if _is_expression(text[start:end]):
+            return text[start:end]
+    # None of its own (`path="a "` over a line break to `"b"`, in the call's):
+    # in parentheses, which an edit writes and an unchanged one does not.
+    return f"({written})" if _is_expression(f"({written})") else written
+
+
+# Blank lines and comments, then the blanks before a token.
+_GAP = re.compile(r"(?:[ \t\f]*(?:#[^\r\n]*)?(?:\r\n|\r|\n))*[ \t\f]*")
+
+
+def _is_expression(written: str) -> bool:
+    try:
+        ast.parse(written, mode="eval")
+    except SyntaxError:
+        return False
+    return True
 
 
 # ── the factory that builds a workflow ───────────────────────────────────
