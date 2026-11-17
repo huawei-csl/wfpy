@@ -127,6 +127,47 @@ def test_sibling_workflow_outputs_keep_their_own_files(tmp_path: Path) -> None:
     assert (b.name, b.read_text()) == ("B.txt", "second")
 
 
+def test_a_workflow_without_inputs_fires_once(tmp_path: Path) -> None:
+    """A sub-workflow that takes no input runs once, and the run around it ends."""
+    import threading
+
+    @task
+    class Emit:
+        _done: bool = False
+
+        class Ports:
+            Out = Port[int]()
+
+        def action(self) -> int | None:
+            if self._done:
+                return None
+            self._done = True
+            return 7
+
+    @workflow(outputs={"Out": int})
+    def closed():
+        emit = Emit()
+        connect(emit.Out, "Out")
+
+    @workflow(outputs={"Out": int})
+    def outer():
+        sub = closed()
+        leaf = Leaf()
+        connect(sub.Out, leaf.In)
+        connect(leaf.Out, "Out")
+
+    result: dict[str, object] = {}
+
+    def go() -> None:
+        result["outputs"] = run(outer, out_dir=str(tmp_path / "wf-out"), work_dir=str(tmp_path / "work"))
+
+    worker = threading.Thread(target=go, daemon=True)
+    worker.start()
+    worker.join(timeout=20)
+    assert not worker.is_alive(), "the run never ended"
+    assert result["outputs"]["Out"] == [7]
+
+
 def test_folder_output_is_handed_on(tmp_path: Path) -> None:
     hdl = tmp_path / "hdl"
 
