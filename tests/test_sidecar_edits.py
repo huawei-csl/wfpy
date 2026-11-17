@@ -864,11 +864,22 @@ def test_create_node_refuses_an_expression_that_reads_an_unbound_name(project: P
 
 @pytest.mark.parametrize(
     "text",
-    ['LABEL + "!"', "os.environ.get('X', LABEL)", "str(len(LABEL))", "[c for c in LABEL]", "(lambda v: v)(LABEL)", "front.Out", "name"],
+    ['LABEL + "!"', "os.environ.get('X', LABEL)", "str(len(LABEL))", "[c for c in LABEL]", "(lambda v: v)(LABEL)", "front.Out"],
 )
 def test_create_node_takes_an_expression_of_names_in_scope(project: Path, text: str) -> None:
     answer = _send(project / "compile/flow.py", "createNode", workflow="flow", type="Text", name="again", expressions={"text": text})
     assert answer["status"] == "ok", answer
+
+
+def test_create_node_refuses_an_expression_of_a_name_bound_below_it(project: Path) -> None:
+    """The node lands above the connects; `name`, the loop's variable
+    below them, is the workflow's local and not bound yet there
+    (UnboundLocalError)."""
+    before = _text(project, "compile/flow.py")
+    answer = _send(project / "compile/flow.py", "createNode", workflow="flow", type="Text", name="again", expressions={"text": "name"})
+    assert answer["status"] == "error"
+    assert answer["diagnostic"] == {"code": "name_not_bound", "name": "name", "line": 25}, answer
+    assert _text(project, "compile/flow.py") == before
 
 
 def test_a_factory_workflows_node_reads_the_factorys_parameters(project: Path) -> None:
@@ -1172,7 +1183,7 @@ if __name__ == "__main__":
 
 @pytest.mark.parametrize(
     "type_name",
-    ["Stage", "Local", "Fast", "Typed"],
+    ["Stage", "Local", "Fast"],
 )
 def test_create_node_of_a_type_the_workflows_scopes_bind(tmp_path: Path, type_name: str) -> None:
     src = _module(tmp_path, SCOPES)
@@ -1183,9 +1194,10 @@ def test_create_node_of_a_type_the_workflows_scopes_bind(tmp_path: Path, type_na
     assert after.count("import") == SCOPES.count("import")
 
 
-def test_a_name_bound_only_when_run_as_a_script_is_not_bound(tmp_path: Path) -> None:
+@pytest.mark.parametrize("type_name", ["Script", "Typed"])
+def test_a_name_bound_only_when_run_as_a_script_or_type_checked_is_not_bound(tmp_path: Path, type_name: str) -> None:
     src = _module(tmp_path, SCOPES)
-    answer = _send(src, "createNode", workflow="built", type="Script", name="node")
+    answer = _send(src, "createNode", workflow="built", type=type_name, name="node")
     assert answer["status"] == "error"
     assert answer["diagnostic"]["code"] == "type_not_found"
 
@@ -1447,3 +1459,269 @@ def test_rename_port_follows_usedIn_naming_a_shared_name(tmp_path: Path) -> None
     after = flows.read_text(encoding="utf-8")
     assert after.count('connect(a.Res, "Y")') == 2 and "a.Out" not in after
     assert 'Res = Port[Any](direction="out")' in lib.read_text(encoding="utf-8")
+
+
+# ── An edit that answers ok leaves every workflow building ────────────
+
+
+STAGES = '''from wfpy import Port, action, connect, task, workflow
+
+NAME = "n.txt"
+
+
+@task
+class Reader:
+    class Ports:
+        Out = Port[str](direction="out")
+
+    @action(consumes={}, produces={"Out": 1})
+    def emit(self) -> dict:
+        return {"Out": "x"}
+
+
+@task
+class Source:
+    path: str
+
+    class Ports:
+        Out = Port[str](direction="out")
+
+    @action(consumes={}, produces={"Out": 1})
+    def emit(self) -> dict:
+        return {"Out": self.path}
+
+
+@task
+class Fan:
+    class Ports:
+        Out = Port[str](direction="out")
+        Extra = Port[str](direction="out")
+
+    @action(consumes={}, produces={"Out": 1})
+    def emit(self) -> dict:
+        return {"Out": "x"}
+
+
+@task
+class Writer:
+    class Ports:
+        In = Port[str](direction="in")
+
+    @action(consumes={"In": 1}, produces={})
+    def take(self, value) -> None:
+        pass
+
+
+@workflow(outputs={"Out": str})
+def filter():
+    r = Reader()
+    connect(r.Out, "Out")
+'''
+
+
+def _flow(tmp_path: Path, text: str) -> Path:
+    """`stages.py` and the `flow.py` of `text`, which builds as written."""
+    _module(tmp_path, STAGES, "stages.py")
+    src = _module(tmp_path, text, "flow.py")
+    _plans(tmp_path, "flow.py")
+    return src
+
+
+EMPTY = '''from wfpy import workflow
+
+
+@workflow
+def flow():
+    pass
+'''
+
+
+def test_create_node_of_a_project_workflow_named_like_a_builtin(tmp_path: Path) -> None:
+    """`filter` is a builtin, but the project's `@workflow def filter` is
+    the type meant: it is imported, then bound."""
+    src = _flow(tmp_path, EMPTY)
+    answer = _send(src, "createNode", workflow="flow", type="filter", name="f")
+    assert answer["status"] == "ok", answer
+    after = src.read_text(encoding="utf-8")
+    assert "from stages import filter\n" in after and "    f = filter()\n" in after
+    again = _send(src, "createNode", workflow="flow", type="filter", name="g")
+    assert again["status"] == "ok", again
+    assert src.read_text(encoding="utf-8").count("import") == after.count("import")
+    _plans(tmp_path, "flow.py")
+
+
+TYPE_CHECKED = '''from typing import TYPE_CHECKING
+
+from wfpy import workflow
+
+if TYPE_CHECKING:
+    from stages import NAME, Reader
+else:
+    from stages import Source
+
+
+@workflow
+def flow():
+    s = Source(path="x")
+'''
+
+
+def test_a_type_imported_for_the_type_checker_only_is_imported_to_run(tmp_path: Path) -> None:
+    src = _flow(tmp_path, TYPE_CHECKED)
+    answer = _send(src, "createNode", workflow="flow", type="Reader", name="r")
+    assert answer["status"] == "ok", answer
+    after = src.read_text(encoding="utf-8")
+    assert "\nfrom stages import Reader\n" in after and "    r = Reader()\n" in after
+    _plans(tmp_path, "flow.py")
+
+
+def test_a_name_imported_for_the_type_checker_only_is_not_bound(tmp_path: Path) -> None:
+    src = _flow(tmp_path, TYPE_CHECKED)
+    answer = _send(src, "updateNodeParameter", workflow="flow", entity="s", parameterName="path", newValue="NAME")
+    assert answer["diagnostic"] == {"code": "name_not_bound", "name": "NAME"}, answer
+    assert src.read_text(encoding="utf-8") == TYPE_CHECKED
+
+
+LOCALS = '''from wfpy import connect, workflow
+
+from stages import NAME, Source, Writer
+
+
+@workflow
+def flow():
+    path = "a.txt"
+    s = Source(path="x")
+    w = Writer()
+    connect(s.Out, w.In)
+    later = "c.txt"
+    NAME = "d.txt"
+'''
+
+
+@pytest.mark.parametrize(("value", "line"), [("path", None), ("later", 12), ("NAME", 13), ("s.path", 9)])
+def test_update_node_parameter_reads_a_local_bound_above_the_node(tmp_path: Path, value: str, line: int | None) -> None:
+    """A name the workflow binds is its local all through its body: it has
+    to be bound above the node, even one the module binds too (`NAME`), and
+    the node's own name is bound only once the call has run."""
+    src = _flow(tmp_path, LOCALS)
+    answer = _send(src, "updateNodeParameter", workflow="flow", entity="s", parameterName="path", newValue=value)
+    if line is None:
+        assert answer["status"] == "ok", answer
+        assert '    s = Source(path=path)\n' in src.read_text(encoding="utf-8")
+        _plans(tmp_path, "flow.py")
+    else:
+        assert answer["diagnostic"] == {"code": "name_not_bound", "name": value.split(".")[0], "line": line}, answer
+        assert src.read_text(encoding="utf-8") == LOCALS
+
+
+MODULE_NAMES = '''import os
+
+from wfpy import workflow
+
+from stages import Source
+
+
+@workflow
+def flow(path: str = "a.txt"):
+    s = Source(path=path)
+'''
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["os.path.join(os.path.dirname(__file__), 'data.txt')", "__name__", "path + '.bak'"],
+)
+def test_a_node_reads_the_modules_dunders_and_the_workflows_parameters(tmp_path: Path, value: str) -> None:
+    src = _flow(tmp_path, MODULE_NAMES)
+    answer = _send(src, "updateNodeParameter", workflow="flow", entity="s", parameterName="path", newValue=value)
+    assert answer["status"] == "ok", answer
+    created = _send(src, "createNode", workflow="flow", type="Source", name="t", expressions={"path": value})
+    assert created["status"] == "ok", created
+    _plans(tmp_path, "flow.py")
+
+
+STAR_READS = '''from wfpy import connect, workflow
+
+from stages import *
+
+
+@workflow
+def flow():
+    a = Reader()
+    b = Writer()
+    connect(a.Out, b.In)
+'''
+
+BUILTIN_READS = '''from wfpy import connect, workflow
+
+from stages import Reader, Writer
+
+
+@workflow
+def flow():
+    a = Reader()
+    for i in range(2):
+        b = Writer()
+        connect(a.Out, b.In)
+'''
+
+FACTORY_READS = '''from wfpy import connect, workflow
+
+from stages import Reader, Writer
+
+
+def make():
+    Drain = Writer
+
+    @workflow
+    def built():
+        a = Reader()
+        b = Drain()
+        connect(a.Out, b.In)
+
+    return built
+
+
+@workflow
+def flow():
+    m = make()()
+'''
+
+
+@pytest.mark.parametrize(
+    ("text", "workflow", "name"),
+    [(STAR_READS, "flow", "Writer"), (BUILTIN_READS, "flow", "range"), (FACTORY_READS, "built", "Drain")],
+)
+def test_a_node_is_not_named_after_what_the_workflow_reads(tmp_path: Path, text: str, workflow: str, name: str) -> None:
+    """A star import's name, a builtin, a factory's local: each read by the
+    body, each hidden by a node of its name."""
+    src = _flow(tmp_path, text)
+    renamed = _send(src, "renameNode", workflow=workflow, old="a", new=name)
+    assert renamed["diagnostic"].get("code") == "name_shadows", renamed
+    created = _send(src, "createNode", workflow=workflow, type="Reader", name=name)
+    assert created["diagnostic"].get("code") == "name_shadows", created
+    assert src.read_text(encoding="utf-8") == text
+
+
+@pytest.mark.parametrize(
+    ("op", "args"),
+    [
+        ("renameNode", {"workflow": "flow", "old": "spare", "new": "class"}),
+        ("createNode", {"workflow": "flow", "type": "Text", "name": "None"}),
+        ("createPort", {"workflow": "flow", "direction": "output", "portName": "for", "portType": "str"}),
+        ("renameNode", {"workflow": "flow", "old": "Log", "new": "True"}),
+    ],
+)
+def test_a_keyword_is_not_a_name(project: Path, op: str, args: dict) -> None:
+    before = _text(project, "compile/flow.py")
+    answer = _send(project / "compile/flow.py", op, **args)
+    assert answer["status"] == "error"
+    assert answer["diagnostic"]["code"] == "invalid_identifier", answer
+    assert _text(project, "compile/flow.py") == before
+
+
+def test_rename_a_class_port_is_not_a_keyword(project: Path) -> None:
+    before = _text(project, "compile/sources/text.py")
+    answer = _send(project / "compile/sources/text.py", "renamePort", entity="Text", portDirection="output", portName="Out", newValue="def")
+    assert answer["diagnostic"]["code"] == "invalid_identifier", answer
+    assert _text(project, "compile/sources/text.py") == before

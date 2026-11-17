@@ -195,7 +195,8 @@ def _is_connect_call(node: cst.CSTNode) -> bool:
 def _block_statements(body: Sequence[cst.BaseStatement]) -> Iterable[cst.BaseStatement]:
     """The statements of `body` and of the blocks of its compound
     statements (`if`, `try`, `with`, loops), not of the functions and
-    classes it defines."""
+    classes it defines -- those that run: not a `__main__` guard's, nor an
+    `if TYPE_CHECKING:` block's (its `else` runs)."""
     for stmt in body:
         if _is_main_guard(stmt):
             continue  # run as a script only, never when the module is imported
@@ -204,6 +205,8 @@ def _block_statements(body: Sequence[cst.BaseStatement]) -> Iterable[cst.BaseSta
             continue
         blocks: list[cst.BaseSuite] = []
         for field in ("body", "orelse", "finalbody"):
+            if field == "body" and _is_type_checking_guard(stmt):
+                continue  # read by a type checker only, never run
             value = getattr(stmt, field, None)
             if isinstance(value, (cst.Else, cst.Finally)):
                 value = value.body
@@ -219,6 +222,32 @@ def _block_statements(body: Sequence[cst.BaseStatement]) -> Iterable[cst.BaseSta
                 yield from _block_statements(block.body)
             elif isinstance(block, cst.SimpleStatementSuite):
                 yield from _block_statements([cst.SimpleStatementLine(body=block.body)])
+
+
+def _is_type_checking_guard(stmt: cst.CSTNode) -> bool:
+    """`if TYPE_CHECKING:` / `if typing.TYPE_CHECKING:`, False at run time."""
+    if not isinstance(stmt, cst.If):
+        return False
+    test = stmt.test
+    return (isinstance(test, cst.Name) and test.value == "TYPE_CHECKING") or (
+        isinstance(test, cst.Attribute) and test.attr.value == "TYPE_CHECKING"
+    )
+
+
+# What a module has bound before any line of it runs.
+_MODULE_DUNDERS = frozenset(
+    {"__file__", "__name__", "__doc__", "__package__", "__spec__", "__loader__", "__builtins__"}
+)
+
+
+def _param_names(fn: cst.FunctionDef) -> list[str]:
+    """The names of `fn`'s parameters, `*args` and `**kwargs` included."""
+    params = fn.params
+    every = [*params.posonly_params, *params.params, *params.kwonly_params]
+    for star in (params.star_arg, params.star_kwarg):
+        if isinstance(star, cst.Param):
+            every.append(star)
+    return [param.name.value for param in every]
 
 
 def _is_main_guard(stmt: cst.CSTNode) -> bool:
@@ -1038,6 +1067,11 @@ class RewriteEngine:
         found = self._positions_of(node)
         return int(found.start.line) if found is not None else None
 
+    def _line_after(self, node: cst.CSTNode) -> int | None:
+        """The first line past `node` (a node of this module)."""
+        found = self._positions_of(node)
+        return int(found.end.line) + 1 if found is not None else None
+
     def _get_local_function(self, function_name: str) -> cst.FunctionDef | None:
         for stmt in self.module.body:
             if isinstance(stmt, cst.FunctionDef) and stmt.name.value == function_name:
@@ -1398,8 +1432,14 @@ class RewriteEngine:
         raise RewriteError(message="Invalid port spec")
 
     def _ensure_identifier(self, name: str) -> None:
-        if not name.isidentifier():
-            raise RewriteError(message=f"Invalid identifier: {name}")
+        """A name the edit writes as Python: an identifier, not a keyword
+        (`class = Text()`, `None = Text()` do not parse)."""
+        if not name.isidentifier() or keyword.iskeyword(name):
+            raise RewriteError(
+                message=f"Invalid identifier: {name}"
+                + (" (a Python keyword)" if keyword.iskeyword(name) else ""),
+                diagnostic={"code": "invalid_identifier", "name": name},
+            )
 
     # ── Operations ───────────────────────────────────────────────────────
 
@@ -1424,8 +1464,14 @@ class RewriteEngine:
         if not type_name.isidentifier() or keyword.iskeyword(type_name):
             raise RewriteError(message=f"Invalid type name: {type_name}", diagnostic={"code": "invalid_type"})
         fn, body = self._get_workflow_body(workflow)
-        self._refuse_shadowing(fn, name, type_name)
         self._refuse_taken(fn, name)
+        self._refuse_shadowing(fn, name, type_name)
+        target_block = self._find_scope_block(body, scope_control, scope_branch)
+        target_body = list(target_block.body)
+        # The line the node lands on: an expression reads the workflow's
+        # names bound above it, not one a later statement binds.
+        at = self._find_insert_index(target_body, "node")
+        landing = self._line_of(target_body[at]) if at < len(target_body) else self._line_after(target_body[-1])
         args: list[cst.Arg] = []
         written: set[str] = set()
         for key, value in (params or {}).items():
@@ -1442,16 +1488,21 @@ class RewriteEngine:
                     diagnostic={"code": "invalid_parameter_name"},
                 )
             value = _parse_user_expression(text, f"the value of {name}.{key}")
-            self._refuse_unbound(value, fn, f"the value of {name}.{key}")
+            self._refuse_unbound(value, fn, f"the value of {name}.{key}", landing)
             args.append(_keyword_arg(str(key), value))
             written.add(str(key))
         # Where the type comes from is settled before anything is written.
+        # A task or workflow of the project wins over a builtin of the name
+        # (`@workflow def filter`) unless this file binds the name itself.
         import_from = str(importFrom).strip() if importFrom else ""
-        bound = self._binds(type_name, fn)
+        bound = self._binds(type_name, fn, builtins=False)
         if not bound and not import_from:
-            import_from = self._project_module_of(type_name)
-        target_block = self._find_scope_block(body, scope_control, scope_branch)
-        target_body = list(target_block.body)
+            try:
+                import_from = self._project_module_of(type_name)
+            except RewriteError as refused:
+                if (refused.diagnostic or {}).get("code") != "type_not_found" or not self._binds(type_name, fn):
+                    raise
+                bound = True  # a builtin, which nothing of the project hides
         assign = cst.Assign(
             targets=[cst.AssignTarget(target=cst.Name(name))],
             value=cst.Call(func=cst.Name(type_name), args=args),
@@ -1466,10 +1517,10 @@ class RewriteEngine:
             self._set_module(self._ensure_import(self.module, import_from, [type_name]))
 
     def _module_bindings(self) -> dict[str, tuple[str, cst.CSTNode]]:
-        """Each name the top level of this file binds: what binds it (a
-        definition, an import, an assignment) and the statement -- one under
-        a top-level `try` / `if` (an optional import, `if TYPE_CHECKING:`)
-        included."""
+        """Each name the top level of this file binds as it runs: what binds
+        it (a definition, an import, an assignment) and the statement -- one
+        under a top-level `try` / `if` (an optional import) included, not
+        one under `if TYPE_CHECKING:`, which never runs."""
         return _block_bindings(self.module.body)
 
     def _module_level_names(self) -> set[str]:
@@ -1501,28 +1552,26 @@ class RewriteEngine:
 
     def _scope_bindings(self, fn: cst.FunctionDef) -> set[str]:
         """The names workflow `fn`'s body can read besides the module's: its
-        own locals, and the parameters and locals of the functions it is
-        nested in (a factory's `def make(Stage): @workflow def built(): ...`)."""
-        names: set[str] = set(_block_bindings(fn.body.body)) if isinstance(fn.body, cst.IndentedBlock) else set()
-        for outer in self._enclosing_functions(fn):
-            params = outer.params
-            every = [*params.posonly_params, *params.params, *params.kwonly_params]
-            if isinstance(params.star_arg, cst.Param):
-                every.append(params.star_arg)
-            if isinstance(params.star_kwarg, cst.Param):
-                every.append(params.star_kwarg)
-            names.update(p.name.value for p in every)
-            if isinstance(outer.body, cst.IndentedBlock):
-                names.update(_block_bindings(outer.body.body))
+        own parameters and locals, and the parameters and locals of the
+        functions it is nested in (a factory's `def make(Stage): @workflow
+        def built(): ...`)."""
+        names: set[str] = set()
+        for scope in (fn, *self._enclosing_functions(fn)):
+            names.update(_param_names(scope))
+            if isinstance(scope.body, cst.IndentedBlock):
+                names.update(_block_bindings(scope.body.body))
         return names
 
-    def _binds(self, name: str, fn: cst.FunctionDef | None = None) -> bool:
+    def _binds(self, name: str, fn: cst.FunctionDef | None = None, builtins: bool = True) -> bool:
         """Whether `name` is in scope in this file: at its top level (a star
-        import's names included), a builtin, or -- with `fn`, a workflow --
-        in the functions `fn` is nested in or in `fn` itself."""
-        import builtins
+        import's names, a module's `__file__` included), a builtin (unless
+        `builtins` is False), or -- with `fn`, a workflow -- in the
+        functions `fn` is nested in or in `fn` itself."""
+        import builtins as builtin_names
 
-        if name in self._module_level_names() or hasattr(builtins, name):
+        if name in self._module_level_names() or name in _MODULE_DUNDERS:
+            return True
+        if builtins and hasattr(builtin_names, name):
             return True
         if fn is not None and name in self._scope_bindings(fn):
             return True
@@ -1531,11 +1580,28 @@ class RewriteEngine:
                 return True
         return False
 
-    def _refuse_unbound(self, expr: cst.BaseExpression, fn: cst.FunctionDef | None, what: str) -> None:
+    def _refuse_unbound(
+        self, expr: cst.BaseExpression, fn: cst.FunctionDef | None, what: str, at_line: int | None = None
+    ) -> None:
         """Refuse an expression that reads a name nothing binds where it is
-        written (`fn`'s body, or the module's top level): the file would be
-        written, and the workflow then fail as it is built (NameError)."""
+        written (`fn`'s body at line `at_line`, or the module's top level):
+        the file would be written, and the workflow then fail as it is built
+        (NameError). A name `fn` binds is its local all through its body,
+        so it has to be bound above `at_line` (UnboundLocalError), whatever
+        the module binds of the name."""
+        local = self._names_bound_in(fn) if fn is not None else {}
         for name in _free_names(expr):
+            if fn is not None and name in local:
+                line = local[name]
+                if line is None or at_line is None or line < at_line:
+                    continue
+                raise RewriteError(
+                    message=(
+                        f"{what} reads '{name}', which workflow '{fn.name.value}' binds only at line {line}, "
+                        "below where it is written: move it, or read another name"
+                    ),
+                    diagnostic={"code": "name_not_bound", "name": name, "line": line},
+                )
             if not self._binds(name, fn):
                 where = f"workflow '{fn.name.value}'" if fn is not None else "this file"
                 raise RewriteError(
@@ -1565,15 +1631,17 @@ class RewriteEngine:
         else:
             source = index.module_file(module, near=Path(self.file_path))
         if source is not None:
-            return index.binding(source, name) is not None
+            return index.binding(source, name, runtime=True) is not None
         exported = _external_exports(module)
         return exported is None or name in exported
 
-    def _refuse_shadowing(self, fn: cst.FunctionDef, name: str, type_name: str) -> None:
+    def _refuse_shadowing(self, fn: cst.FunctionDef, name: str, type_name: str, renamed: str | None = None) -> None:
         """Refuse an instance name the workflow's body would make local over
         something it reads: the type it instantiates (`av1_refdec =
         av1_refdec()` reads the local before it is bound), a name the module
-        binds, or a parameter of the factory around the workflow."""
+        binds, a parameter or a local of the factory around the workflow, or
+        any other name the body reads and something binds (a builtin, one a
+        star import binds) but `renamed`, the instance being renamed."""
         what: str | None = None
         line: int | None = None
         if name == type_name:
@@ -1593,20 +1661,137 @@ class RewriteEngine:
                     what += f" (line {line})"
             else:
                 for outer in self._enclosing_functions(fn):
-                    params = outer.params
-                    every = [*params.posonly_params, *params.params, *params.kwonly_params]
-                    if isinstance(params.star_arg, cst.Param):
-                        every.append(params.star_arg)
-                    if isinstance(params.star_kwarg, cst.Param):
-                        every.append(params.star_kwarg)
-                    if any(p.name.value == name for p in every):
+                    if name in _param_names(outer):
                         what = f"the parameter '{name}' of '{outer.name.value}', which the workflow reads"
                         break
+                    local = _block_bindings(outer.body.body).get(name) if isinstance(outer.body, cst.IndentedBlock) else None
+                    if local is not None:
+                        line = self._line_of(local[1])
+                        what = f"the '{name}' '{outer.name.value}' binds" + (f" (line {line})" if line is not None else "")
+                        break
+                else:
+                    # A name the body reads that nothing binds hides
+                    # nothing: the node is what it was missing.
+                    reads = self._names_read_in(fn)
+                    reads.pop(renamed or "", None)
+                    if name in reads and self._binds(name, fn):
+                        line = reads[name]
+                        what = f"the '{name}' the workflow reads" + (f" (line {line})" if line is not None else "")
         if what is not None:
             raise RewriteError(
                 message=f"a node named '{name}' would hide {what}: choose another name",
                 diagnostic={"code": "name_shadows", "name": name, **({"line": line} if line is not None else {})},
             )
+
+    def _names_read_in(self, fn: cst.FunctionDef) -> dict[str, int | None]:
+        """Each name workflow `fn`'s body reads, with the first line it is
+        read at: the nested scopes' reads included (a helper's, a lambda's,
+        a comprehension's), not a name only written (`x = ...`), an
+        attribute (`x.Out`'s `Out`) or a keyword (`Text(text=...)`)."""
+        engine = self
+        read: dict[str, int | None] = {}
+
+        class _Reads(cst.CSTVisitor):
+            def _stored(self, target: cst.BaseExpression) -> None:
+                # A target binds its names; what it is indexed by is read.
+                if isinstance(target, (cst.Tuple, cst.List)):
+                    for element in target.elements:
+                        self._stored(element.value)
+                elif isinstance(target, cst.StarredElement):
+                    self._stored(target.value)
+                elif isinstance(target, (cst.Attribute, cst.Subscript)):
+                    target.visit(self)
+
+            def visit_Name(self, node: cst.Name) -> None:
+                read.setdefault(node.value, engine._line_of(node))
+
+            def visit_Attribute(self, node: cst.Attribute) -> bool:
+                node.value.visit(self)
+                return False
+
+            def visit_Arg(self, node: cst.Arg) -> bool:
+                node.value.visit(self)
+                return False
+
+            def visit_Param(self, node: cst.Param) -> bool:
+                for part in (node.annotation, node.default):
+                    if part is not None:
+                        part.visit(self)
+                return False
+
+            def visit_FunctionDef(self, node: cst.FunctionDef) -> bool:
+                for decorator in node.decorators:
+                    decorator.visit(self)
+                node.params.visit(self)
+                if node.returns is not None:
+                    node.returns.visit(self)
+                node.body.visit(self)
+                return False
+
+            def visit_ClassDef(self, node: cst.ClassDef) -> bool:
+                for part in (*node.decorators, *node.bases, *node.keywords):
+                    part.visit(self)
+                node.body.visit(self)
+                return False
+
+            def visit_Import(self, node: cst.Import) -> bool:
+                return False
+
+            def visit_ImportFrom(self, node: cst.ImportFrom) -> bool:
+                return False
+
+            def visit_Global(self, node: cst.Global) -> bool:
+                return False
+
+            def visit_Nonlocal(self, node: cst.Nonlocal) -> bool:
+                return False
+
+            def visit_AssignTarget(self, node: cst.AssignTarget) -> bool:
+                self._stored(node.target)
+                return False
+
+            def visit_AnnAssign(self, node: cst.AnnAssign) -> bool:
+                self._stored(node.target)
+                node.annotation.visit(self)
+                if node.value is not None:
+                    node.value.visit(self)
+                return False
+
+            def visit_For(self, node: cst.For) -> bool:
+                self._stored(node.target)
+                for part in (node.iter, node.body, node.orelse):
+                    if part is not None:
+                        part.visit(self)
+                return False
+
+            def visit_CompFor(self, node: cst.CompFor) -> bool:
+                self._stored(node.target)
+                node.iter.visit(self)
+                for condition in node.ifs:
+                    condition.visit(self)
+                if node.inner_for_in is not None:
+                    node.inner_for_in.visit(self)
+                return False
+
+            def visit_WithItem(self, node: cst.WithItem) -> bool:
+                node.item.visit(self)
+                if node.asname is not None:
+                    self._stored(node.asname.name)
+                return False
+
+            def visit_NamedExpr(self, node: cst.NamedExpr) -> bool:
+                self._stored(node.target)
+                node.value.visit(self)
+                return False
+
+            def visit_ExceptHandler(self, node: cst.ExceptHandler) -> bool:
+                if node.type is not None:
+                    node.type.visit(self)
+                node.body.visit(self)
+                return False
+
+        fn.body.visit(_Reads())
+        return read
 
     def _refuse_taken(self, fn: cst.FunctionDef, name: str) -> None:
         """Refuse a node name workflow `fn` already binds: another instance,
@@ -1708,6 +1893,32 @@ class RewriteEngine:
 
         fn.visit(_Binds())
         return bound
+
+    def _instance_assign(self, fn: cst.FunctionDef, name: str) -> cst.Assign | None:
+        """The first `name = <call>` of workflow `fn`'s own body: the one
+        `update_node_parameter` edits."""
+        found: cst.Assign | None = None
+
+        class _Made(cst.CSTVisitor):
+            def visit_FunctionDef(self, node: cst.FunctionDef) -> bool:
+                return node is fn
+
+            def visit_ClassDef(self, node: cst.ClassDef) -> bool:
+                return False
+
+            def visit_Assign(self, node: cst.Assign) -> None:
+                nonlocal found
+                if (
+                    found is None
+                    and len(node.targets) == 1
+                    and isinstance(node.targets[0].target, cst.Name)
+                    and node.targets[0].target.value == name
+                    and isinstance(node.value, cst.Call)
+                ):
+                    found = node
+
+        fn.visit(_Made())
+        return found
 
     def _instance_type_name(self, fn: cst.FunctionDef, name: str) -> str:
         """The name instance `name` of workflow `fn` is made from: `Text`
@@ -2787,7 +2998,10 @@ class RewriteEngine:
             )
         value = _parse_user_expression(newValue, f"the value of {entity}.{parameterName}")
         fn, body = self._get_workflow_body(workflow)
-        self._refuse_unbound(value, fn, f"the value of {entity}.{parameterName}")
+        made = self._instance_assign(fn, entity)
+        self._refuse_unbound(
+            value, fn, f"the value of {entity}.{parameterName}", self._line_of(made) if made is not None else None
+        )
 
         class _UpdateParam(_WorkflowBodyTransformer):
             def __init__(self) -> None:
@@ -3709,7 +3923,7 @@ class RewriteEngine:
         # (`front = ...` twice), not one it reads (`Text = Text(...)`).
         if self._body_assigns(fn, old):
             self._refuse_taken(fn, new)
-            self._refuse_shadowing(fn, new, self._instance_type_name(fn, old))
+            self._refuse_shadowing(fn, new, self._instance_type_name(fn, old), renamed=old)
 
         class _RenameNodeTransformer(_WorkflowBodyTransformer):
             def __init__(self, fn_node: cst.FunctionDef, old_name: str, new_name: str) -> None:

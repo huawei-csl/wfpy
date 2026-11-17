@@ -229,9 +229,11 @@ class ProjectIndex:
     # ── Bindings ───────────────────────────────────────────────────────
 
     def binding(
-        self, file: Path, name: str, _seen: frozenset[tuple[str, str]] = frozenset()
+        self, file: Path, name: str, _seen: frozenset[tuple[str, str]] = frozenset(), runtime: bool = False
     ) -> Definition | External | None:
-        """What ``name``, bound at the top level of module ``file``, is."""
+        """What ``name``, bound at the top level of module ``file``, is. With
+        ``runtime``, only as the module runs: not by an ``if TYPE_CHECKING:``
+        block's import."""
         file = file.resolve()
         key = (str(file), name)
         if key in _seen or len(_seen) > 32:
@@ -242,7 +244,7 @@ class ProjectIndex:
             return None
         found: Definition | External | None = None
         stars: list[ast.ImportFrom] = []
-        for stmt in _module_statements(tree.body):
+        for stmt in _module_statements(tree.body, runtime):
             if (
                 isinstance(stmt, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
                 and stmt.name == name
@@ -259,7 +261,7 @@ class ProjectIndex:
                     if source is None:
                         found = External(dotted, alias.name)
                         continue
-                    inner = self.binding(source, alias.name, seen)
+                    inner = self.binding(source, alias.name, seen, runtime)
                     if inner is None and source.name == "__init__.py":
                         # `from package import module`.
                         found = None
@@ -277,7 +279,7 @@ class ProjectIndex:
             for stmt in stars:
                 source, _dotted = self._import_source(file, stmt)
                 if source is not None:
-                    found = self.binding(source, name, seen)
+                    found = self.binding(source, name, seen, runtime)
                     if found is not None:
                         break
         return found
@@ -406,19 +408,31 @@ class ProjectIndex:
         return used_in, unchecked
 
 
-def _module_statements(body: list[ast.stmt]) -> Iterator[ast.stmt]:
+def _module_statements(body: list[ast.stmt], runtime: bool = False) -> Iterator[ast.stmt]:
     """The top-level statements of a module, those under a top-level ``if`` /
-    ``try`` (an optional import, a ``TYPE_CHECKING`` block) included."""
+    ``try`` (an optional import, a ``TYPE_CHECKING`` block) included -- with
+    ``runtime``, not a ``TYPE_CHECKING`` block's, which never runs."""
     for stmt in body:
         if isinstance(stmt, (ast.If, ast.Try)):
-            yield from _module_statements(stmt.body)
-            yield from _module_statements(stmt.orelse)
+            if not (runtime and _is_type_checking(stmt)):
+                yield from _module_statements(stmt.body, runtime)
+            yield from _module_statements(stmt.orelse, runtime)
             if isinstance(stmt, ast.Try):
                 for handler in stmt.handlers:
-                    yield from _module_statements(handler.body)
-                yield from _module_statements(stmt.finalbody)
+                    yield from _module_statements(handler.body, runtime)
+                yield from _module_statements(stmt.finalbody, runtime)
             continue
         yield stmt
+
+
+def _is_type_checking(stmt: ast.stmt) -> bool:
+    """``if TYPE_CHECKING:`` / ``if typing.TYPE_CHECKING:``."""
+    if not isinstance(stmt, ast.If):
+        return False
+    test = stmt.test
+    return (isinstance(test, ast.Name) and test.id == "TYPE_CHECKING") or (
+        isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING"
+    )
 
 
 # ── The sidecar's queries ──────────────────────────────────────────────
