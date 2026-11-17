@@ -622,6 +622,22 @@ def test_partial_graph_renders_broken_edge_and_phantom_port(tmp_path: Path) -> N
     assert consumer["meta"]["isErrored"] is True
 
 
+def test_partial_graph_flags_a_node_given_whole_to_connect(tmp_path: Path) -> None:
+    """``connect(producer.Out, consumer)``: the message is the consumer's, not lost."""
+    from wfpy.partial import build_partial_graph
+
+    src = tmp_path / "wf.py"
+    src.write_text(_WF_PARTIAL_BAD_PORT.replace("consumer.Nope", "consumer"), encoding="utf-8")
+
+    data = build_partial_graph(str(src), "demo", RuntimeError("elaboration failed"))
+    consumer = next(n for n in data["graph"]["nodes"] if n["label"] == "consumer")
+    diagnostics = consumer["meta"]["diagnostics"]
+    assert [d["code"] for d in diagnostics] == ["node_not_port"]
+    assert "target is the node 'consumer'" in diagnostics[0]["message"]
+    assert "consumer.In" in diagnostics[0]["message"]
+    assert consumer["location"]["line"] == 20
+
+
 def test_python_environment_names_the_interpreter_and_the_files_import_roots(tmp_path):
     import sys
 
@@ -673,3 +689,42 @@ def test_python_environment_that_fails_is_an_error_answer_not_a_crash(monkeypatc
     assert response.status == "error"
     assert response.diagnostic == {"code": "internal_error"}
     assert "no interpreter today" in response.message
+
+
+def test_task_types_of_every_kind_without_a_kind(tmp_path: Path) -> None:
+    """A chat tool asks with no kind, and with the workflow it scopes every query to."""
+    src = tmp_path / "wf.py"
+    src.write_text(
+        """
+from wfpy import agent, source, task, workflow
+
+
+@task
+class Split:
+    pass
+
+
+@agent(prompt="p")
+class Summarize:
+    pass
+
+
+@source
+class Text:
+    pass
+
+
+@workflow
+def demo():
+    pass
+""",
+        encoding="utf-8",
+    )
+
+    resp = _handle_request({"file": str(src), "op": "wfpy.listTaskTypes", "args": {"workflow": "demo"}})
+    assert resp.status == "ok", resp
+    assert resp.diagnostic["types"] == ["Split", "Summarize", "Text"]
+    assert resp.diagnostic["byKind"] == {"task": ["Split"], "agent": ["Summarize"], "source": ["Text"]}
+
+    one = _handle_request({"file": str(src), "op": "wfpy.listTaskTypes", "args": {"kind": "agent"}})
+    assert one.diagnostic["types"] == ["Summarize"]

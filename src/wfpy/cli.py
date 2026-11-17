@@ -13,6 +13,7 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import ast
 import importlib
 import importlib.util
 import json
@@ -212,6 +213,44 @@ def _find_workflows(module: Any) -> dict[str, Any]:
     return workflows
 
 
+def _imported_names(module: Any) -> set[str] | None:
+    """The names the module's file binds by importing them, or None when its
+    source cannot be read or imports with ``*`` (which binds names unseen)."""
+    path = getattr(module, "__file__", None)
+    if not path:
+        return None
+    try:
+        tree = ast.parse(Path(path).read_text(encoding="utf-8"))
+    except (OSError, SyntaxError, ValueError):
+        return None
+    names: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if alias.name == "*":
+                    return None
+                names.add(alias.asname or alias.name)
+    return names
+
+
+def _default_workflow(module: Any, workflows: dict[str, Any]) -> Any | None:
+    """The workflow to take when none is named: the only one in the module,
+    or the only one the file has of its own. A workflow it imports to use as a
+    node (``from pipeline import pipeline``) is a module attribute as well,
+    and must not make its own workflow ambiguous; one it builds with a factory
+    from elsewhere (``pipeline = make_pipeline(3)``) is its own."""
+    distinct = {id(wf): wf for wf in workflows.values()}
+    if len(distinct) == 1:
+        return next(iter(distinct.values()))
+    imported = _imported_names(module)
+    if imported is not None:
+        own = {id(wf): wf for name, wf in workflows.items() if name not in imported}
+    else:
+        module_name = getattr(module, "__name__", None)
+        own = {id(wf): wf for wf in workflows.values() if getattr(wf, "__module__", None) == module_name}
+    return next(iter(own.values())) if len(own) == 1 else None
+
+
 def _parse_input_value(raw: str) -> Any:
     """Parse a CLI --input value.  Supports int, float, bool, JSON, or plain string."""
     # Try int
@@ -259,14 +298,14 @@ def cmd_run(args: argparse.Namespace) -> None:
             )
             sys.exit(1)
     else:
-        if len(workflows) > 1:
+        target = _default_workflow(module, workflows)
+        if target is None:
             available = ", ".join(workflows.keys())
             print(
                 f"Multiple workflows found: {available}. Use --workflow to select one.",
                 file=sys.stderr,
             )
             sys.exit(1)
-        target = next(iter(workflows.values()))
 
     # Parse inputs
     inputs: dict[str, Any] = {}
@@ -413,7 +452,7 @@ def cmd_plan(args: argparse.Namespace) -> None:
             print(f"Error: workflow {args.workflow!r} not found.", file=sys.stderr)
             sys.exit(1)
     else:
-        target = next(iter(workflows.values()))
+        target = _default_workflow(module, workflows) or next(iter(workflows.values()))
 
     wf_def = target._wfpy_workflow
     if getattr(args, "format", "plan") == "graph":

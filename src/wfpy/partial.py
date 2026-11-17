@@ -535,14 +535,20 @@ def _apply_node_flags(
             and to_port not in _port_names(to_node)
         )
 
+        # A node given whole, without a port (`connect(a.Out, b)`), is as bad
+        # an endpoint as a port it does not have.
+        to_whole = to_node is not None and not to_port
+        from_whole = from_node is not None and not from_port
+
         # The "culprit" node (carries the node-level error flag) is whichever
         # endpoint's port name is not among its real ports — preferring the
         # target endpoint when both look bad.
         culprit_node: dict[str, Any] | None = None
-        if to_bad:
-            culprit_node = to_node
-        elif from_bad:
-            culprit_node = from_node
+        culprit_whole = False
+        if to_bad or to_whole:
+            culprit_node, culprit_whole = to_node, to_whole
+        elif from_bad or from_whole:
+            culprit_node, culprit_whole = from_node, from_whole
 
         if culprit_node is not None:
             meta = culprit_node.setdefault("meta", {})
@@ -550,7 +556,11 @@ def _apply_node_flags(
                 meta = {}
                 culprit_node["meta"] = meta
             meta.setdefault("diagnostics", []).append(
-                {"severity": "error", "code": "unknown_port", "message": message}
+                {
+                    "severity": "error",
+                    "code": "node_not_port" if culprit_whole else "unknown_port",
+                    "message": message,
+                }
             )
             meta["isErrored"] = True
             meta["errorMessage"] = message
@@ -560,7 +570,9 @@ def _apply_node_flags(
 
         # Render the dropped connection as a broken edge, if both endpoints'
         # NODES exist (we can't anchor an edge on a missing node).
+        drew_edge = False
         if from_node is not None and to_node is not None and from_port and to_port:
+            drew_edge = True
             scope_id = from_node.get("scope") or to_node.get("scope")
             if to_bad:
                 _add_phantom_port(to_node, to_port, "in", message)
@@ -577,7 +589,8 @@ def _apply_node_flags(
             )
 
         # Demote the matching file-level error — the element/edge carries it now.
-        if culprit_node is not None or (from_node is not None and to_node is not None):
+        # Only then: an error neither carries stays the file's, or it is lost.
+        if culprit_node is not None or drew_edge:
             for e in list(errors):
                 if e.line == line and e.message == message:
                     errors.remove(e)

@@ -2563,6 +2563,12 @@ def _step_workflow(
     if sub_plan is None:
         return False
 
+    # A workflow with no inputs is a closed program: its one firing runs it to
+    # quiescence, and another would find nothing left to do yet count as
+    # progress, so the run around it would never end.
+    if not actor.in_queues and actor.fire_count > 0 and actor.pending is None:
+        return False
+
     # Resuming a firing a failure interrupted: its tokens are already in the
     # sub-plan, which carries on from where it stopped.
     if actor.pending is None:

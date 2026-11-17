@@ -178,3 +178,66 @@ inner_workflow = make_workflow()
         assert workflow_dir in paths
         assert example_root in paths
         assert repo in paths
+
+
+class TestDefaultWorkflow:
+    """A file that imports a workflow to use as a node still has one workflow of its own."""
+
+    def _write(self, tmp_path):
+        (tmp_path / "pipeline_mod.py").write_text(
+            "from wfpy import workflow\n\n\n@workflow(outputs={'Out': int})\ndef pipeline():\n    pass\n"
+        )
+        site = tmp_path / "site_mod.py"
+        site.write_text(
+            "from wfpy import workflow\nfrom pipeline_mod import pipeline\n\n\n"
+            "@workflow\ndef site():\n    pipeline()\n"
+        )
+        return site
+
+    def test_the_file_s_own_workflow_is_the_default(self, tmp_path):
+        from wfpy.cli import _default_workflow, _find_workflows
+
+        module = _load_module(str(self._write(tmp_path)))
+        workflows = _find_workflows(module)
+        assert sorted(workflows) == ["pipeline", "site"]
+        assert _default_workflow(module, workflows) is workflows["site"]
+
+    def test_one_workflow_under_two_names_is_one(self, tmp_path):
+        from wfpy.cli import _default_workflow, _find_workflows
+
+        self._write(tmp_path)
+        alias = tmp_path / "alias_mod.py"
+        alias.write_text(
+            "from wfpy import workflow\nfrom pipeline_mod import pipeline\n\n\n"
+            "@workflow\ndef site():\n    pipeline()\n\n\nmain = site\n"
+        )
+        module = _load_module(str(alias))
+        workflows = _find_workflows(module)
+        assert _default_workflow(module, workflows) is workflows["site"]
+
+    def test_a_workflow_a_factory_builds_is_the_file_s_own(self, tmp_path):
+        from wfpy.cli import _default_workflow, _find_workflows
+
+        self._write(tmp_path)
+        (tmp_path / "factory_lib.py").write_text(
+            "from wfpy import workflow\n\n\ndef make_site(n):\n"
+            "    @workflow\n    def site():\n        pass\n\n    return site\n"
+        )
+        built = tmp_path / "built_mod.py"
+        built.write_text(
+            "from factory_lib import make_site\nfrom pipeline_mod import pipeline\n\nsite = make_site(3)\n"
+        )
+        module = _load_module(str(built))
+        workflows = _find_workflows(module)
+        assert sorted(workflows) == ["pipeline", "site"]
+        assert _default_workflow(module, workflows) is workflows["site"]
+
+    def test_two_workflows_of_its_own_are_still_ambiguous(self, tmp_path):
+        from wfpy.cli import _default_workflow, _find_workflows
+
+        both = tmp_path / "both_mod.py"
+        both.write_text(
+            "from wfpy import workflow\n\n\n@workflow\ndef a():\n    pass\n\n\n@workflow\ndef b():\n    pass\n"
+        )
+        module = _load_module(str(both))
+        assert _default_workflow(module, _find_workflows(module)) is None

@@ -45,7 +45,7 @@ _OP_ALIASES = {
 
 # Query ops (read-only): bare op name → callable(engine, args) -> diagnostic dict.
 _QUERY_OPS: dict[str, Callable[[RewriteEngine, dict[str, Any]], dict[str, Any]]] = {
-    "listTaskTypes": lambda engine, args: {"types": engine.list_task_types(**args)},
+    "listTaskTypes": lambda engine, args: _list_task_types(engine, args),
     "listInstanceNames": lambda engine, args: {"names": engine.list_instance_names(**args)},
     "listWorkflowTypes": lambda engine, args: {"types": engine.list_workflow_types()},
     "listWorkflowInstances": lambda engine, args: {
@@ -64,6 +64,19 @@ _QUERY_OPS: dict[str, Callable[[RewriteEngine, dict[str, Any]], dict[str, Any]]]
     # an instance of it.
     "typeParameters": lambda engine, args: _type_parameters(engine, args),
 }
+
+
+def _list_task_types(engine: RewriteEngine, args: dict[str, Any]) -> dict[str, Any]:
+    """The classes of the file of one kind, or of every kind, grouped by it.
+
+    A type belongs to the file, not to one workflow: a ``workflow`` scope the
+    caller adds to every query, as a chat tool does, is ignored here.
+    """
+    kind = str(args.get("kind") or "").strip()
+    if kind:
+        return {"types": engine.list_task_types(kind=kind)}
+    by_kind = engine.task_types_by_kind()
+    return {"types": sorted({name for types in by_kind.values() for name in types}), "byKind": by_kind}
 
 
 def _port_uses(engine: RewriteEngine, args: dict[str, Any]) -> dict[str, Any]:

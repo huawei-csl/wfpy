@@ -309,16 +309,9 @@ class WorkflowGraph:
         - A ``str`` — workflow-level input/output port name
         """
 
-        def _infer_name(inst: Any, frame: Any | None) -> str:
-            if frame is None:
-                return ""
-            try:
-                for key, val in frame.f_locals.items():
-                    if val is inst and key and not key.startswith("_"):
-                        return str(key)
-            except Exception:
-                return ""
-            return ""
+        for role, endpoint in (("source", source), ("target", target)):
+            if not isinstance(endpoint, (PortInstance, ControlPortInstance, str)):
+                raise TypeError(_endpoint_error(role, endpoint, caller_frame))
 
         # Auto-register actors that haven't been registered yet
         frame = inspect.currentframe()
@@ -327,13 +320,13 @@ class WorkflowGraph:
             inst = source.actor_instance
             inst_name = getattr(inst, "_wfpy_instance_name", "")
             if not inst_name or inst_name not in self.actors:
-                explicit = inst_name or _infer_name(inst, caller)
+                explicit = inst_name or _local_name(inst, caller)
                 self.register_actor(inst, explicit_name=explicit)
         if isinstance(target, PortInstance):
             inst = target.actor_instance
             inst_name = getattr(inst, "_wfpy_instance_name", "")
             if not inst_name or inst_name not in self.actors:
-                explicit = inst_name or _infer_name(inst, caller)
+                explicit = inst_name or _local_name(inst, caller)
                 self.register_actor(inst, explicit_name=explicit)
         if frame is not None:
             del frame
@@ -396,6 +389,46 @@ class WorkflowGraph:
         for conn in self.connections:
             lines.append(f"    {conn.from_port} → {conn.to_port}")
         return "\n".join(lines)
+
+
+def _local_name(inst: Any, frame: Any | None) -> str:
+    """The name of the caller's variable holding *inst*: what a node is called."""
+    if frame is None:
+        return ""
+    try:
+        for key, val in frame.f_locals.items():
+            if val is inst and key and not key.startswith("_"):
+                return str(key)
+    except Exception:
+        return ""
+    return ""
+
+
+def _endpoint_error(role: str, endpoint: Any, caller: Any | None) -> str:
+    """What to write instead of an endpoint that is not a port: a node's own
+    ports on that side when it is a node, the usual slip (``connect(a, b)``)."""
+    meta = getattr(endpoint, "_wfpy_meta", None)
+    wf_def = getattr(endpoint, "_wfpy_workflow", None)
+    if meta is not None:
+        ports = getattr(meta, "output_ports" if role == "source" else "input_ports", None)
+    elif wf_def is not None:
+        ports = getattr(wf_def, "output_names" if role == "source" else "input_names", None)
+    else:
+        return (
+            f"connect() {role} must be a port (node.Port) or a workflow port name, "
+            f"not {type(endpoint).__name__}: {endpoint!r}"
+        )
+    # The node is named by the variable that holds it: it is registered, and
+    # given that name, only by a connect() that succeeds.
+    node = _local_name(endpoint, caller) or type(endpoint).__name__
+    side = "output" if role == "source" else "input"
+    if not ports:
+        return f"connect() {role} is the node {node!r}, which has no {side} port to connect from there"
+    names = ", ".join(f"{node}.{name}" for name in ports)
+    return (
+        f"connect() {role} is the node {node!r}, not one of its ports: "
+        f"name an {side} port ({names}) or a workflow port by its name in quotes"
+    )
 
 
 def connect(

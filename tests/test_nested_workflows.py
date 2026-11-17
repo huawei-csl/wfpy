@@ -127,6 +127,75 @@ def test_sibling_workflow_outputs_keep_their_own_files(tmp_path: Path) -> None:
     assert (b.name, b.read_text()) == ("B.txt", "second")
 
 
+def test_a_workflow_without_inputs_fires_once(tmp_path: Path) -> None:
+    """A sub-workflow that takes no input runs once, and the run around it ends.
+
+    In a child process: a regression spins forever, and only a process can be
+    stopped when the time is up.
+    """
+    import subprocess
+    import sys
+
+    (tmp_path / "closed_wf.py").write_text(
+        textwrap.dedent(
+            """
+            from wfpy import Port, action, connect, task, workflow
+
+
+            @task
+            class Emit:
+                _done: bool = False
+
+                class Ports:
+                    Out = Port[int]()
+
+                def action(self) -> int | None:
+                    if self._done:
+                        return None
+                    self._done = True
+                    return 7
+
+
+            @task
+            class Show:
+                class Ports:
+                    In = Port[int](direction="in")
+
+                @action(consumes={"In": 1})
+                def show(self, x: int) -> None:
+                    print("GOT", x)
+
+
+            @workflow(outputs={"Out": int})
+            def closed():
+                emit = Emit()
+                connect(emit.Out, "Out")
+
+
+            @workflow
+            def outer():
+                sub = closed()
+                show = Show()
+                connect(sub.Out, show.In)
+            """
+        ),
+        encoding="utf-8",
+    )
+    script = (
+        "import sys\nfrom wfpy.cli import main\n"
+        "sys.argv = ['wfpy', 'run', 'closed_wf.py', '--workflow', 'outer', '--no-interactive', '--out-dir', 'wf-out']\n"
+        "main()\n"
+    )
+    try:
+        done = subprocess.run(
+            [sys.executable, "-c", script], cwd=tmp_path, capture_output=True, text=True, timeout=60
+        )
+    except subprocess.TimeoutExpired:
+        pytest.fail("the run never ended")
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.count("GOT 7") == 1
+
+
 def test_folder_output_is_handed_on(tmp_path: Path) -> None:
     hdl = tmp_path / "hdl"
 
@@ -322,3 +391,54 @@ def test_definitions_are_their_class_or_def_line_not_a_decorator() -> None:
         "s": "def stacked():",
         "shown": "class Shown:",
     }
+
+
+def test_a_node_given_to_connect_whole_names_its_ports() -> None:
+    """``connect(a, b)`` is the usual slip: the error says which ports to name."""
+
+    @workflow(outputs={"Out": int})
+    def closed():
+        leaf = Leaf()
+        connect(leaf.Out, "Out")
+
+    @task
+    class Sink:
+        class Ports:
+            In = Port[int](direction="in")
+
+        @action(consumes={"In": 1})
+        def take(self, x: int) -> None:
+            return None
+
+    @workflow
+    def node_as_target():
+        first = Leaf()
+        second = Leaf()
+        connect(first.Out, second)
+
+    @workflow
+    def node_as_target_by_operator():
+        first = Leaf()
+        second = Leaf()
+        first.Out >> second
+
+    @workflow
+    def workflow_as_source():
+        sub = closed()
+        leaf = Leaf()
+        connect(sub, leaf.In)
+
+    @workflow
+    def sink_as_source():
+        sink = Sink()
+        leaf = Leaf()
+        connect(sink, leaf.In)
+
+    with pytest.raises(TypeError, match=r"target is the node 'second'.*\(second\.In\)"):
+        _build_workflow_graph(node_as_target._wfpy_workflow)
+    with pytest.raises(TypeError, match=r"target is the node 'second'.*\(second\.In\)"):
+        _build_workflow_graph(node_as_target_by_operator._wfpy_workflow)
+    with pytest.raises(TypeError, match=r"source is the node 'sub'.*\(sub\.Out\)"):
+        _build_workflow_graph(workflow_as_source._wfpy_workflow)
+    with pytest.raises(TypeError, match=r"source is the node 'sink', which has no output port"):
+        _build_workflow_graph(sink_as_source._wfpy_workflow)
