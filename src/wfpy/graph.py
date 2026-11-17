@@ -398,6 +398,37 @@ class WorkflowGraph:
         return "\n".join(lines)
 
 
+def _endpoint_error(role: str, endpoint: Any, caller: Any | None) -> str:
+    """What to write instead of an endpoint that is not a port: a node's own
+    ports when it is a node, which is the usual slip (``connect(a, b)``)."""
+    meta = getattr(endpoint, "_wfpy_meta", None)
+    wf_def = getattr(endpoint, "_wfpy_workflow", None)
+    if meta is not None:
+        ports = getattr(meta, "output_ports" if role == "source" else "input_ports", None) or getattr(meta, "ports", None)
+    elif wf_def is not None:
+        ports = getattr(wf_def, "output_names" if role == "source" else "input_names", None)
+    else:
+        ports = None
+    if isinstance(ports, dict) and ports:
+        # The node is named by the variable that holds it: it is registered,
+        # and given that name, only by a connect() that succeeds.
+        local = ""
+        try:
+            local = next((key for key, val in caller.f_locals.items() if val is endpoint), "") if caller else ""
+        except Exception:
+            local = ""
+        node = local or type(endpoint).__name__
+        names = ", ".join(f"{node}.{name}" for name in ports)
+        return (
+            f"connect() {role} is the node {node!r}, not one of its ports: "
+            f"name a port ({names}) or a workflow port by its name in quotes"
+        )
+    return (
+        f"connect() {role} must be a port (node.Port) or a workflow port name, "
+        f"not {type(endpoint).__name__}: {endpoint!r}"
+    )
+
+
 def connect(
     source: PortInstance | ControlPortInstance | str,
     target: PortInstance | ControlPortInstance | str,
@@ -423,6 +454,9 @@ def connect(
         caller = frame.f_back if frame is not None else None
     except Exception:
         caller = None
+    for role, endpoint in (("source", source), ("target", target)):
+        if not isinstance(endpoint, (PortInstance, ControlPortInstance, str)):
+            raise TypeError(_endpoint_error(role, endpoint, caller))
     _graph_context._current_graph.connect(source, target, caller_frame=caller)
 
 

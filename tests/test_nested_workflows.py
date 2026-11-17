@@ -363,3 +363,29 @@ def test_definitions_are_their_class_or_def_line_not_a_decorator() -> None:
         "s": "def stacked():",
         "shown": "class Shown:",
     }
+
+
+def test_a_node_given_to_connect_whole_names_its_ports() -> None:
+    """``connect(a, b)`` is the usual slip: the error says which ports to name."""
+
+    @workflow(outputs={"Out": int})
+    def closed():
+        leaf = Leaf()
+        connect(leaf.Out, "Out")
+
+    @workflow
+    def node_as_target():
+        first = Leaf()
+        second = Leaf()
+        connect(first.Out, second)
+
+    @workflow
+    def workflow_as_source():
+        sub = closed()
+        leaf = Leaf()
+        connect(sub, leaf.In)
+
+    with pytest.raises(TypeError, match=r"target is the node 'second'.*\(second\.In\)"):
+        _build_workflow_graph(node_as_target._wfpy_workflow)
+    with pytest.raises(TypeError, match=r"source is the node 'sub'.*\(sub\.Out\)"):
+        _build_workflow_graph(workflow_as_source._wfpy_workflow)
