@@ -35,6 +35,20 @@ All notable changes to wfpy are documented here. The format follows
   takes. `createNode` takes `expressions`, written verbatim.
 
 ### Fixed
+- A run whose workflow holds a sub-workflow taking no input ends. The
+  sub-workflow node had its inputs whenever it had none, so after its one
+  firing the scheduler fired it again forever, each empty re-run counted as
+  progress; it now fires once, as a workflow instance does.
+- `wfpy run` and `wfpy plan` take the workflow a file defines itself when it
+  also imports one to use as a node (`from pipeline import pipeline`). `run`
+  said "Multiple workflows found" and `plan` took whichever name came first.
+- The sidecar's `listTaskTypes` without a `kind` lists the file's classes of
+  every kind, as `types` and grouped in `byKind`, and ignores the `workflow`
+  scope a caller adds to every query: a chat tool asking that way was told
+  "missing 1 required keyword-only argument: 'kind'".
+- `connect()` given a node rather than one of its ports (`connect(a, b)`)
+  says so where it is written, naming the node and the ports it has on that
+  side, instead of "Invalid source" from the plan builder.
 - Diagram edits leave the project importable. `createPort` adds the port
   to `@workflow(inputs=, outputs=)` (it replaced the module with the
   workflow's body); `deletePort` and renaming a workflow's own port edit
