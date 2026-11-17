@@ -2108,9 +2108,7 @@ def flow():
         BASE)
     grouped = Source(path=("a"
                            "b"))
-    field = Source(path=f"{
-        BASE
-    }x")
+    FIELD
     margin = Source(path=" ".join([
         BASE,
 # "y",
@@ -2142,6 +2140,14 @@ def make(tail):
 '''
 
 
+# An f-string's field over lines parses from Python 3.12 on (PEP 701).
+FIELD_OVER_LINES = sys.version_info >= (3, 12)
+OVER_LINES = OVER_LINES.replace(
+    "    FIELD\n",
+    '    field = Source(path=f"{\n        BASE\n    }x")\n' if FIELD_OVER_LINES else "",
+)
+
+
 @pytest.mark.parametrize(
     ("workflow", "entity", "shown"),
     [
@@ -2152,7 +2158,10 @@ def make(tail):
         ("flow", "slashed", '"x" + \\\n        BASE'),
         # Its own parentheses, without which it is no expression.
         ("flow", "grouped", '("a"\n                           "b")'),
-        ("flow", "field", 'f"{\n        BASE\n    }x"'),
+        pytest.param(
+            "flow", "field", 'f"{\n        BASE\n    }x"',
+            marks=pytest.mark.skipif(not FIELD_OVER_LINES, reason="an f-string field over lines needs 3.12"),
+        ),
         ("flow", "margin", '" ".join([\n        BASE,\n# "y",\n    ])'),
         # On one line, as ast reads it: without its parentheses, which stay.
         ("flow", "single", '"a"'),
