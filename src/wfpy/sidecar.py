@@ -22,7 +22,6 @@ from wfpy._python_environment import python_environment
 from wfpy._workflow_instance import discover_workflow_instances
 from wfpy.package_exports import apply_package_export, find_package_export
 from wfpy.rewrite import (
-    TASK_TYPE_KINDS,
     RewriteEngine,
     RewriteError,
     _atomic_write_if_unchanged,
@@ -76,7 +75,7 @@ def _list_task_types(engine: RewriteEngine, args: dict[str, Any]) -> dict[str, A
     kind = str(args.get("kind") or "").strip()
     if kind:
         return {"types": engine.list_task_types(kind=kind)}
-    by_kind = {k: types for k in TASK_TYPE_KINDS if (types := engine.list_task_types(kind=k))}
+    by_kind = engine.task_types_by_kind()
     return {"types": sorted({name for types in by_kind.values() for name in types}), "byKind": by_kind}
 
 

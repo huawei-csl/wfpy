@@ -13,6 +13,7 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import ast
 import importlib
 import importlib.util
 import json
@@ -212,16 +213,42 @@ def _find_workflows(module: Any) -> dict[str, Any]:
     return workflows
 
 
+def _imported_names(module: Any) -> set[str] | None:
+    """The names the module's file binds by importing them, or None when its
+    source cannot be read or imports with ``*`` (which binds names unseen)."""
+    path = getattr(module, "__file__", None)
+    if not path:
+        return None
+    try:
+        tree = ast.parse(Path(path).read_text(encoding="utf-8"))
+    except (OSError, SyntaxError, ValueError):
+        return None
+    names: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if alias.name == "*":
+                    return None
+                names.add(alias.asname or alias.name)
+    return names
+
+
 def _default_workflow(module: Any, workflows: dict[str, Any]) -> Any | None:
     """The workflow to take when none is named: the only one in the module,
-    or the only one the file defines itself. A workflow it imports to use as a
+    or the only one the file has of its own. A workflow it imports to use as a
     node (``from pipeline import pipeline``) is a module attribute as well,
-    and must not make its own workflow ambiguous."""
-    if len(workflows) == 1:
-        return next(iter(workflows.values()))
-    module_name = getattr(module, "__name__", None)
-    own = [wf for wf in workflows.values() if getattr(wf, "__module__", None) == module_name]
-    return own[0] if len(own) == 1 else None
+    and must not make its own workflow ambiguous; one it builds with a factory
+    from elsewhere (``pipeline = make_pipeline(3)``) is its own."""
+    distinct = {id(wf): wf for wf in workflows.values()}
+    if len(distinct) == 1:
+        return next(iter(distinct.values()))
+    imported = _imported_names(module)
+    if imported is not None:
+        own = {id(wf): wf for name, wf in workflows.items() if name not in imported}
+    else:
+        module_name = getattr(module, "__name__", None)
+        own = {id(wf): wf for wf in workflows.values() if getattr(wf, "__module__", None) == module_name}
+    return next(iter(own.values())) if len(own) == 1 else None
 
 
 def _parse_input_value(raw: str) -> Any:

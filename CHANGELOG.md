@@ -39,16 +39,20 @@ All notable changes to wfpy are documented here. The format follows
   sub-workflow node had its inputs whenever it had none, so after its one
   firing the scheduler fired it again forever, each empty re-run counted as
   progress; it now fires once, as a workflow instance does.
-- `wfpy run` and `wfpy plan` take the workflow a file defines itself when it
-  also imports one to use as a node (`from pipeline import pipeline`). `run`
-  said "Multiple workflows found" and `plan` took whichever name came first.
+- `wfpy run` takes the workflow a file has of its own when it also imports
+  one to use as a node (`from pipeline import pipeline`); it said "Multiple
+  workflows found". A workflow is imported when the file imports its name, so
+  one a factory from elsewhere builds (`site = make_site(3)`) is the file's
+  own, and one bound under two names is one. `wfpy plan` takes it first too;
+  with several of the file's own, it still takes the first name, as before.
 - The sidecar's `listTaskTypes` without a `kind` lists the file's classes of
   every kind, as `types` and grouped in `byKind`, and ignores the `workflow`
   scope a caller adds to every query: a chat tool asking that way was told
   "missing 1 required keyword-only argument: 'kind'".
-- `connect()` given a node rather than one of its ports (`connect(a, b)`)
-  says so where it is written, naming the node and the ports it has on that
-  side, instead of "Invalid source" from the plan builder.
+- `connect()` (and `>>`) given a node rather than one of its ports
+  (`connect(a, b)`) says so where it is written, naming the node and the
+  ports it has on that side, instead of "Invalid source" from the plan
+  builder.
 - Diagram edits leave the project importable. `createPort` adds the port
   to `@workflow(inputs=, outputs=)` (it replaced the module with the
   workflow's body); `deletePort` and renaming a workflow's own port edit

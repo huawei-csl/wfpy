@@ -2464,31 +2464,33 @@ class RewriteEngine:
         return bool(ends)
 
     def list_task_types(self, *, kind: str) -> list[str]:
-        """Every class in this file declared with the given kind's decorator.
+        """Every class in this file declared with the given kind's decorator."""
+        if kind not in TASK_TYPE_KINDS:
+            return []
+        return self.task_types_by_kind().get(kind, [])
+
+    def task_types_by_kind(self) -> dict[str, list[str]]:
+        """The file's classes of each kind, in one walk of the module.
 
         The kind IS the decorator name, so one matcher pair serves all of them.
         This was a ladder of one pair per kind, which is how `streamblocks`
         came to be creatable but not listable: the picker could not offer a
-        type the picker itself had written.
+        type the picker itself had written. A kind with no class is absent.
         """
-        if kind not in TASK_TYPE_KINDS:
-            return []
-        results: list[str] = []
+        found: dict[str, list[str]] = {}
 
         class _Visitor(cst.CSTVisitor):
             def visit_ClassDef(self, node: cst.ClassDef) -> None:
                 for dec in node.decorators:
                     target = dec.decorator
                     # `@kind` and `@kind(...)` are the same declaration.
-                    if m.matches(target, m.Name(kind)) or m.matches(
-                        target, m.Call(func=m.Name(kind))
-                    ):
-                        results.append(node.name.value)
+                    name = target.func if isinstance(target, cst.Call) else target
+                    if isinstance(name, cst.Name) and name.value in TASK_TYPE_KINDS:
+                        found.setdefault(name.value, []).append(node.name.value)
                         return
 
         self.module.visit(_Visitor())
-        results.sort()
-        return results
+        return {kind: sorted(found[kind]) for kind in TASK_TYPE_KINDS if kind in found}
 
     def list_workflow_types(self) -> list[str]:
         results: list[str] = []
