@@ -651,7 +651,14 @@ def _same_tokens(written: str, given: str) -> bool:
         return found
 
     a, b = tokens(written), tokens(given)
-    return a is not None and a == b
+    if a is None or a != b:
+        return False
+    # In an f-string's or a t-string's field, `{x = }` is not `{x=}`: the
+    # blanks are its value. Such a value is the same only as written.
+    templated = {getattr(tokenize, kind) for kind in ("FSTRING_START", "TSTRING_START") if hasattr(tokenize, kind)}
+    if any(kind in templated for kind, _text in a):
+        return written.strip() == given.strip()
+    return True
 
 
 def _wraps(found: list[tuple[int, str]]) -> bool:

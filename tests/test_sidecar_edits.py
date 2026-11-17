@@ -2116,6 +2116,14 @@ def flow():
 # "y",
     ]))
     single = Source(path=("a"))
+    concatenated = Source(
+        path="a "
+        "b",
+    )
+    commented = Source(path=(  # why
+        "a "
+        "b"
+    ))
     w = Writer()
     connect(joined.Out, w.In)
 
@@ -2148,6 +2156,10 @@ def make(tail):
         ("flow", "margin", '" ".join([\n        BASE,\n# "y",\n    ])'),
         # On one line, as ast reads it: without its parentheses, which stay.
         ("flow", "single", '"a"'),
+        # Over lines in the call's parentheses, none of its own: given some.
+        ("flow", "concatenated", '("a "\n        "b")'),
+        # Its own, a comment after the first: with them, and the comment.
+        ("flow", "commented", '(  # why\n        "a "\n        "b"\n    )'),
     ],
 )
 def test_an_argument_over_lines_is_shown_as_the_file_has_it_and_written_back_as_it_is(
@@ -2180,3 +2192,12 @@ def test_an_argument_over_lines_lands_at_the_columns_it_is_written_at(tmp_path: 
     assert answer["status"] == "ok", answer
     assert f"again = Source(path={edited})" in src.read_text(encoding="utf-8")
     _plans(tmp_path, "flow.py", hierarchy=True)
+
+
+@pytest.mark.parametrize("given", ['f"{BASE = }"', 'f"{BASE =}"', 'f"{BASE}  x"'])
+def test_a_field_of_an_f_string_differs_by_its_blanks(tmp_path: Path, given: str) -> None:
+    """`{BASE = }` is not `{BASE=}`: the blanks are its value, and the edit is written."""
+    src = _flow(tmp_path, OVER_LINES.replace('single = Source(path=("a"))', 'single = Source(path=f"{BASE=}")'))
+    answer = _send(src, "updateNodeParameter", workflow="flow", entity="single", parameterName="path", newValue=given)
+    assert answer["status"] == "ok", answer
+    assert f"single = Source(path={given})" in src.read_text(encoding="utf-8")

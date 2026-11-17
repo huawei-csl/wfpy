@@ -273,13 +273,20 @@ def _argument_text(text: str, node: ast.expr) -> str | None:
         return written
     start, end = offset(node.lineno, node.col_offset), offset(node.end_lineno, node.end_col_offset)
     for _ in range(8):
-        before, after = text[:start].rstrip(), text[end:].lstrip()
-        if not (before.endswith("(") and after.startswith(")")):
-            return written
-        start, end = len(before) - 1, len(text) - len(after) + 1
+        # Its own parentheses: with only blanks and comments between them and it.
+        opening, closing = text.rfind("(", 0, start), text.find(")", end)
+        if opening < 0 or closing < 0 or not (_GAP.fullmatch(text, opening + 1, start) and _GAP.fullmatch(text, end, closing)):
+            break
+        start, end = opening, closing + 1
         if _is_expression(text[start:end]):
             return text[start:end]
-    return written
+    # None of its own (`path="a "` over a line break to `"b"`, in the call's):
+    # in parentheses, which an edit writes and an unchanged one does not.
+    return f"({written})" if _is_expression(f"({written})") else written
+
+
+# Blank lines and comments, then the blanks before a token.
+_GAP = re.compile(r"(?:[ \t\f]*(?:#[^\r\n]*)?(?:\r\n|\r|\n))*[ \t\f]*")
 
 
 def _is_expression(written: str) -> bool:
