@@ -2099,6 +2099,23 @@ def flow():
     quoted = Source(path="""one
     two""")
     nested = make("t")()
+    wrapped = (
+        Source(path=" ".join([
+            BASE,
+        ]))
+    )
+    slashed = Source(path="x" + \\
+        BASE)
+    grouped = Source(path=("a"
+                           "b"))
+    field = Source(path=f"{
+        BASE
+    }x")
+    margin = Source(path=" ".join([
+        BASE,
+# "y",
+    ]))
+    single = Source(path=("a"))
     w = Writer()
     connect(joined.Out, w.In)
 
@@ -2120,17 +2137,24 @@ def make(tail):
 @pytest.mark.parametrize(
     ("workflow", "entity", "shown"),
     [
-        ("flow", "joined", '" ".join([\n    BASE,  # the base\n    "x",\n])'),
+        ("flow", "joined", '" ".join([\n        BASE,  # the base\n        "x",\n    ])'),
         ("flow", "quoted", '"""one\n    two"""'),
-        ("made", "deep", '" ".join([\n    BASE,\n    tail,\n])'),
+        ("made", "deep", '" ".join([\n            BASE,\n            tail,\n        ])'),
+        ("flow", "wrapped", '" ".join([\n            BASE,\n        ])'),
+        ("flow", "slashed", '"x" + \\\n        BASE'),
+        # Its own parentheses, without which it is no expression.
+        ("flow", "grouped", '("a"\n                           "b")'),
+        ("flow", "field", 'f"{\n        BASE\n    }x"'),
+        ("flow", "margin", '" ".join([\n        BASE,\n# "y",\n    ])'),
+        # On one line, as ast reads it: without its parentheses, which stay.
+        ("flow", "single", '"a"'),
     ],
 )
-def test_an_argument_over_lines_reads_from_its_statement_and_is_written_back_as_it_is(
+def test_an_argument_over_lines_is_shown_as_the_file_has_it_and_written_back_as_it_is(
     tmp_path: Path, workflow: str, entity: str, shown: str
 ) -> None:
-    """Its later lines read from the statement's indentation (written back,
-    the statement's indentation is added again); a string's own lines are
-    its value, as written."""
+    """Its later lines at the file's columns, whatever writes them (brackets,
+    a string, a backslash, an f-string's field, a comment at the margin)."""
     src = _flow(tmp_path, OVER_LINES)
     exported = _plans(tmp_path, "flow.py", hierarchy=True)
     graph = exported if workflow == "flow" else exported["hierarchy"]["children"][0]["graph"]
@@ -2139,3 +2163,20 @@ def test_an_argument_over_lines_reads_from_its_statement_and_is_written_back_as_
     answer = _send(src, "updateNodeParameter", workflow=workflow, entity=entity, parameterName="path", newValue=shown)
     assert answer["status"] == "ok", answer
     assert src.read_text(encoding="utf-8") == OVER_LINES
+
+
+@pytest.mark.parametrize("workflow", ["flow", "made"])
+def test_an_argument_over_lines_lands_at_the_columns_it_is_written_at(tmp_path: Path, workflow: str) -> None:
+    """Edited, or given to a new node (a paste), its later lines stand where
+    the text puts them, as the panel shows them: not indented by the block
+    once more, nor taken back to it."""
+    src = _flow(tmp_path, OVER_LINES)
+    entity = "joined" if workflow == "flow" else "deep"
+    edited = '" ".join([\n        BASE,  # the base\n        "z",\n    ])'
+    answer = _send(src, "updateNodeParameter", workflow=workflow, entity=entity, parameterName="path", newValue=edited)
+    assert answer["status"] == "ok", answer
+    assert f"{entity} = Source(path={edited})" in src.read_text(encoding="utf-8")
+    answer = _send(src, "createNode", workflow=workflow, type="Source", name="again", expressions={"path": edited})
+    assert answer["status"] == "ok", answer
+    assert f"again = Source(path={edited})" in src.read_text(encoding="utf-8")
+    _plans(tmp_path, "flow.py", hierarchy=True)
