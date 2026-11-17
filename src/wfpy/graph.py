@@ -131,6 +131,8 @@ class WorkflowGraph:
     def __init__(self, name: str = "") -> None:
         self.name = name
         self.factory_name: str | None = None
+        # The workflow function a factory built, for the factory's signature.
+        self.factory_builder: Any = None
         self.factory_parameters: list[dict[str, Any]] = []
         # The declared `@workflow(inputs=, outputs=)` ports and where each is
         # written; the runner fills them from the WorkflowDef.

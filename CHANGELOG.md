@@ -12,8 +12,68 @@ All notable changes to wfpy are documented here. The format follows
   and the folders its installed packages come from. An IDE configures its
   Python language server from the answer, so a workflow that runs is not
   drawn with its imports underlined because the editor looks elsewhere.
+- The graph export says what the source wrote beside what it evaluated to.
+  A node's parameter carries `expression`, the text of its keyword in the
+  call that made the node (`File(path=TESTBENCH)`, not the `File(...)` it
+  built); a node of a workflow a factory builds (`x = factory(...)()`) has
+  the factory's parameters, with the call's text, and the factory's
+  signature as `definitionParams` (`defaultValue` only where it declares
+  one). A nested workflow's `graph.meta.parameters` add `defaultValue` the
+  same way: `value` is what this instance was given, not a default.
+- An annotation argument's `value` is a Python expression, the decorator's
+  own text where it writes the argument (`network=NETWORK`), and an
+  annotation or argument wfpy works out (the `viewer` a source or a
+  StreamBlocks class gets, a source's `port`, a viewer's default `action`)
+  is marked `"derived": true`, so writing it back does not add what the
+  class never said.
+- The sidecar answers `portUses {entity}`: the project's workflows that
+  instantiate a class (or the workflow a factory builds), found by its
+  definition, read without running anything; `renamePort`,
+  `deleteEntityPort`, `deletePort` and a workflow port's rename take that
+  `usedIn` and follow or refuse every file (features `portUsesAcrossFiles`,
+  `portUsesQuery`). `typeParameters {type}` answers the parameters a type
+  takes. `createNode` takes `expressions`, written verbatim.
 
 ### Fixed
+- Diagram edits leave the project importable. `createPort` adds the port
+  to `@workflow(inputs=, outputs=)` (it replaced the module with the
+  workflow's body); `deletePort` and renaming a workflow's own port edit
+  that dict and its connects, and refuse, naming the line, a port used by
+  name elsewhere: any string of the port's name but a docstring, a
+  keyword's value and an instance's `getattr(x, "name")`. `renamePort` /
+  `updatePortType` take the IDE's arguments. `deleteEntityPort` refuses a
+  port an action or a workflow uses. A port a workflow may name some way an
+  edit cannot follow (`for p in ("Out",): getattr(a, p)`, `(a, b)[i].Out`,
+  `key = "Out"` in the class) is refused as `port_used_by_name`, naming the
+  file and line. Ports are written with their direction. An op on a
+  workflow a factory builds edits the inner `@workflow`. `createNode`
+  imports a type the module does not bind as it runs (an `if
+  TYPE_CHECKING:` import is not), from the package that re-exports it; a
+  project's `@workflow def filter` wins over the builtin. `createNode` and
+  `renameNode` refuse a name the workflow already has (`name_exists`: an
+  instance, a loop variable, a parameter), one that would hide what the
+  workflow reads (`name_shadows`: `Text = Text(...)`, a builtin, a star
+  import's name, a factory's local), and a Python keyword
+  (`invalid_identifier`). A class task's new parameter is an annotated
+  field, never an `__init__`; an annotation edit imports its decorator. A
+  value that is not Python is refused as `invalid_expression`, and a node's
+  argument that reads a name not bound where it is written (nothing binds
+  it, or the workflow binds it only below the node) as `name_not_bound`.
+  An edit that writes several files writes them all or none.
+- `renameNode` renames the local wherever Python reads it: `getattr(a, ...)`,
+  a tuple a loop goes over, a closure, an assignment that is not one call
+  (`a = X() if dry else Y()`). It renamed only `a = Call()`, `a.port` and a
+  connect's end, and the workflow then failed with a `NameError`. A local
+  bound by a definition or an import, or declared `nonlocal`, is refused as
+  `name_used_otherwise`. A node and a port of one workflow are not named
+  alike (`name_exists`): renamed by its name alone, the node was renamed for
+  the port.
+- `updateNodeParameter` writes an argument where the call that makes the
+  node gives it: in place when it is given by position (`make("a")`); it
+  appended a keyword, and the call got two values. A node a helper function
+  makes (`s = _source("a")`), or whose call may give the argument through a
+  `*args` / `**kwargs`, is refused as `arguments_elsewhere`; the export no
+  longer shows the helper's call text as the node's.
 - The run's live files are written whole: `run.wf-viewer.live.json`, the
   agent-context and context live files, and the final overlay, queue trace
   and run record go to a sibling file renamed over the target, so a reader
