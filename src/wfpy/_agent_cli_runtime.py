@@ -1011,9 +1011,14 @@ def _invoke_agent_opencode_acp(
     # The session's model and mode: the agent's, else the connector's. OpenCode
     # takes its model from OPENCODE_CONFIG_CONTENT above; the others from the
     # session's `model` config option, when they offer one.
+    # The decorator's default model ("openai/gpt-4o") is nobody's choice: an
+    # agent that names none takes the connector's, else the agent's own.
+    chosen_model = (spec.model if spec.model and spec.model != "openai/gpt-4o" else None) or (
+        connector.model if connector is not None else None
+    )
     session_model = None
     if connector is not None and not connector.http_api:
-        session_model = (spec.model if spec.model and spec.model != "openai/gpt-4o" else None) or connector.model
+        session_model = chosen_model
     session_mode = str(getattr(spec, "mode", "") or (connector.mode if connector else "") or "") or None
     
     # Get working directory
@@ -1023,9 +1028,9 @@ def _invoke_agent_opencode_acp(
     acp_env: dict[str, str] = {}
     if connector is not None:
         acp_env.update(connector.env)
-    if spec.model and (connector is None or connector.http_api):
-        acp_env["OPENCODE_CONFIG_CONTENT"] = json.dumps({"model": spec.model})
-        logger.info(f"Setting model via OPENCODE_CONFIG_CONTENT: {spec.model}")
+    if chosen_model and (connector is None or connector.http_api):
+        acp_env["OPENCODE_CONFIG_CONTENT"] = json.dumps({"model": chosen_model})
+        logger.info(f"Setting model via OPENCODE_CONFIG_CONTENT: {chosen_model}")
     
     debug_meta: dict[str, Any] = {
         "transport": "opencode-acp",

@@ -3,6 +3,7 @@ sets the session's model and mode where the agent offers them."""
 
 from __future__ import annotations
 
+import json
 import asyncio
 import types
 
@@ -128,6 +129,34 @@ class TestTheTransportHandsThemOn:
                                       effective_prompt="p", plan_options={},
                                       output_ports={"Out": types.SimpleNamespace(port_type=str, ext="")})
         assert seen["model"] == "haiku" and seen["mode"] == "acceptEdits"
+
+
+class TestOpenCodeModel:
+    """OpenCode is told its model through OPENCODE_CONFIG_CONTENT, and only a chosen one."""
+
+    def _env(self, monkeypatch, **kw):
+        import wfpy.acp_client as acp_client
+
+        seen = {}
+
+        async def fake_invoke(**invoke):
+            seen.update(invoke)
+            return {"stop_reason": "end_turn", "text": '{"outputs": {"Out": "ok"}}', "session_id": "s", "applied": {}}
+
+        monkeypatch.setattr(acp_client, "invoke_opencode_acp", fake_invoke)
+        rt._invoke_agent_opencode_acp(spec(**kw), "payload", False, effective_prompt="p",
+                                      plan_options={"acp_connector": "opencode"},
+                                      output_ports={"Out": types.SimpleNamespace(port_type=str, ext="")})
+        return seen["env"] or {}
+
+    def test_the_decorators_default_leaves_opencode_its_own(self, monkeypatch, connectors):
+        # An agent naming no model got openai/gpt-4o forced on OpenCode, which
+        # fails wherever no OpenAI provider is configured.
+        assert "OPENCODE_CONFIG_CONTENT" not in self._env(monkeypatch)
+
+    def test_a_named_model_is_handed_on(self, monkeypatch, connectors):
+        env = self._env(monkeypatch, model="opencode/big-pickle")
+        assert json.loads(env["OPENCODE_CONFIG_CONTENT"]) == {"model": "opencode/big-pickle"}
 
 
 class TestSessionCwd:
