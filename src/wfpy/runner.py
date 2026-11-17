@@ -1868,7 +1868,7 @@ def _step_agent(
         agent_options["_wf_elicit"] = build_elicit_closure(
             plan.options,
             agent_name=actor.name,
-            model=agent_spec.model,
+            model=agent_spec.model or "",
             event_publish=agent_options.get("_wf_event_publish"),
         )
 

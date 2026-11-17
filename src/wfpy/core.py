@@ -400,7 +400,10 @@ class AgentSpec:
     use_prompt: bool = True
     use_skill: bool = True
     use_skill_hooks: bool = True
-    model: str = "openai/gpt-4o"
+    # None: the agent names no model. Each transport then uses its own
+    # default -- the HTTP one DEFAULT_HTTP_MODEL, an ACP connector its
+    # configured model, a CLI the one it is set up with.
+    model: str | None = None
     provider: str | None = None
     endpoint: str | None = None
     timeout_ms: int = 120_000
@@ -1002,7 +1005,7 @@ def agent(
     use_prompt: bool = True,
     use_skill: bool = True,
     use_skill_hooks: bool = True,
-    model: str = "openai/gpt-4o",
+    model: str | None = None,
     provider: str | None = None,
     endpoint: str | None = None,
     timeout_ms: int = 120_000,

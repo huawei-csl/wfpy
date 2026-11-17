@@ -17,7 +17,7 @@ from wfpy.acp_client import ACPClient
 
 
 def spec(**kw):
-    base = dict(prompt="p", transport="acp", model="openai/gpt-4o", stateful=False, ask_user=False,
+    base = dict(prompt="p", transport="acp", model=None, stateful=False, ask_user=False,
                 cli_tools_mode="wfpy-none", connector="", mode="", provider=None, endpoint=None, timeout_ms=1000)
     base.update(kw)
     return types.SimpleNamespace(**base)
@@ -112,7 +112,7 @@ class TestTheTransportHandsThemOn:
         rt._invoke_agent_opencode_acp(spec(connector="claude"), "payload", False, effective_prompt="p",
                                       plan_options={}, output_ports={"Out": types.SimpleNamespace(port_type=str, ext="")})
         assert seen["agent_argv"] == ["claude-agent-acp"]
-        assert seen["model"] == "sonnet" and seen["mode"] == "plan"      # the connector's, the agent's model being the default
+        assert seen["model"] == "sonnet" and seen["mode"] == "plan"      # the connector's: the agent names no model
         assert seen["env"] == {"A": "1"}                                   # no OPENCODE_CONFIG_CONTENT for a non-opencode agent
 
     def test_the_agents_own_model_and_mode_win(self, monkeypatch, connectors):
@@ -134,29 +134,54 @@ class TestTheTransportHandsThemOn:
 class TestOpenCodeModel:
     """OpenCode is told its model through OPENCODE_CONFIG_CONTENT, and only a chosen one."""
 
-    def _env(self, monkeypatch, **kw):
+    def _run(self, monkeypatch, options=None, fail=False, **kw):
         import wfpy.acp_client as acp_client
 
         seen = {}
 
         async def fake_invoke(**invoke):
             seen.update(invoke)
+            if fail:
+                raise RuntimeError("session/load broke")
             return {"stop_reason": "end_turn", "text": '{"outputs": {"Out": "ok"}}', "session_id": "s", "applied": {}}
 
+        def fake_cli(spec, *args, **kwargs):
+            seen["cli_model"] = spec.model
+            return "", [], None, {}
+
         monkeypatch.setattr(acp_client, "invoke_opencode_acp", fake_invoke)
+        monkeypatch.setattr(rt, "_invoke_agent_opencode_cli", fake_cli)
         rt._invoke_agent_opencode_acp(spec(**kw), "payload", False, effective_prompt="p",
-                                      plan_options={"acp_connector": "opencode"},
+                                      plan_options={"acp_connector": "opencode", **(options or {})},
                                       output_ports={"Out": types.SimpleNamespace(port_type=str, ext="")})
-        return seen["env"] or {}
+        return seen
 
-    def test_the_decorators_default_leaves_opencode_its_own(self, monkeypatch, connectors):
-        # An agent naming no model got openai/gpt-4o forced on OpenCode, which
-        # fails wherever no OpenAI provider is configured.
-        assert "OPENCODE_CONFIG_CONTENT" not in self._env(monkeypatch)
+    def test_an_agent_naming_no_model_leaves_opencode_its_own(self, monkeypatch, connectors):
+        # It was told openai/gpt-4o, the decorator's default, which fails
+        # wherever no OpenAI provider is configured.
+        assert "OPENCODE_CONFIG_CONTENT" not in (self._run(monkeypatch)["env"] or {})
 
-    def test_a_named_model_is_handed_on(self, monkeypatch, connectors):
-        env = self._env(monkeypatch, model="opencode/big-pickle")
-        assert json.loads(env["OPENCODE_CONFIG_CONTENT"]) == {"model": "opencode/big-pickle"}
+    def test_a_named_model_is_handed_on_even_the_old_default(self, monkeypatch, connectors):
+        for model in ("opencode/big-pickle", "openai/gpt-4o"):
+            env = self._run(monkeypatch, model=model)["env"]
+            assert json.loads(env["OPENCODE_CONFIG_CONTENT"]) == {"model": model}
+
+    def test_the_connectors_model_joins_its_own_configuration(self, monkeypatch, connectors, tmp_path):
+        (tmp_path / "u.toml").write_text(
+            '[connectors.opencode]\nmodel = "zen/x"\n'
+            'env = { OPENCODE_CONFIG_CONTENT = \'{"provider": {"zen": {}}}\' }\n'
+        )
+        env = self._run(monkeypatch)["env"]
+        assert json.loads(env["OPENCODE_CONFIG_CONTENT"]) == {"provider": {"zen": {}}, "model": "zen/x"}
+
+    def test_the_cli_fallback_runs_on_the_same_model(self, monkeypatch, connectors):
+        assert self._run(monkeypatch, fail=True)["cli_model"] is None
+        assert self._run(monkeypatch, fail=True, model="opencode/big-pickle")["cli_model"] == "opencode/big-pickle"
+
+    def test_an_explicit_command_line_is_told_both_ways(self, monkeypatch, connectors):
+        seen = self._run(monkeypatch, options={"acp_connector": "", "agent_cli_acp_command": "claude-agent-acp"}, model="haiku")
+        assert seen["model"] == "haiku"
+        assert json.loads(seen["env"]["OPENCODE_CONFIG_CONTENT"]) == {"model": "haiku"}
 
 
 class TestSessionCwd:

@@ -356,9 +356,9 @@ def _invoke_agent(
     else:
         endpoint = spec.endpoint
     api_key = cfg.get("token") or _resolve_api_key(provider)
-    if cfg.get("model") and spec.model == "openai/gpt-4o":
-        # Only use config model if spec has the default
-        model = cfg["model"] or model
+    if cfg.get("model") and not spec.model:
+        # The config file's model, for an agent that names none.
+        model = str(cfg["model"])
 
     _prompt_caching = provider == "anthropic" or (
         provider == "openrouter" and _is_anthropic_model(model)

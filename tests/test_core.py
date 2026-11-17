@@ -395,6 +395,21 @@ class TestAgentDecorator:
         assert meta.agent_spec.model == "openai/gpt-4o"
         assert meta.agent_spec.transport == "http"
 
+    def test_an_agent_names_no_model_unless_given_one(self):
+        # None, not a model: each transport has its own default, and the
+        # HTTP one's (DEFAULT_HTTP_MODEL) means nothing to an ACP agent.
+        from wfpy._agent_request_runtime import DEFAULT_HTTP_MODEL, _resolve_provider_model
+
+        @agent(prompt="Summarize this.")
+        class Plain:
+            class Ports:
+                In = Port[str](direction="in")
+                Out = Port[str](direction="out")
+
+        spec = Plain._wfpy_meta.agent_spec
+        assert spec.model is None
+        assert _resolve_provider_model(spec) == tuple(DEFAULT_HTTP_MODEL.split("/", 1))
+
     def test_agent_stateful(self):
 
         @agent(prompt="Chat.", stateful=True, context_budget=30)
