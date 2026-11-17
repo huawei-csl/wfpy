@@ -39,18 +39,27 @@ All notable changes to wfpy are documented here. The format follows
   to `@workflow(inputs=, outputs=)` (it replaced the module with the
   workflow's body); `deletePort` and renaming a workflow's own port edit
   that dict and its connects, and refuse, naming the line, a port used by
-  name elsewhere. `renamePort` / `updatePortType` take the IDE's arguments.
-  `deleteEntityPort` refuses a port an action or a workflow uses. Ports are
-  written with their direction. An op on a workflow a factory builds edits
-  the inner `@workflow`. `createNode` imports a type the module does not,
-  from the package that re-exports it, and refuses a name that would hide
-  another; `createNode` and `renameNode` refuse a name the workflow already
-  has (`name_exists`: an instance, a loop variable, a parameter), and
-  `renameNode` one that would hide what the workflow reads (`Text = Text(...)`). A class task's new parameter is an annotated field, never an
-  `__init__`; an annotation edit imports its decorator. A value that is not
-  Python is refused as `invalid_expression`, and a node's argument that
-  reads a name nothing binds where it is written as `name_not_bound`. An edit that writes several
-  files writes them all or none.
+  name elsewhere: any string of the port's name but a docstring, a
+  keyword's value and an instance's `getattr(x, "name")`. `renamePort` /
+  `updatePortType` take the IDE's arguments. `deleteEntityPort` refuses a
+  port an action or a workflow uses. A port a workflow may name some way an
+  edit cannot follow (`for p in ("Out",): getattr(a, p)`, `(a, b)[i].Out`,
+  `key = "Out"` in the class) is refused as `port_used_by_name`, naming the
+  file and line. Ports are written with their direction. An op on a
+  workflow a factory builds edits the inner `@workflow`. `createNode`
+  imports a type the module does not bind as it runs (an `if
+  TYPE_CHECKING:` import is not), from the package that re-exports it; a
+  project's `@workflow def filter` wins over the builtin. `createNode` and
+  `renameNode` refuse a name the workflow already has (`name_exists`: an
+  instance, a loop variable, a parameter), one that would hide what the
+  workflow reads (`name_shadows`: `Text = Text(...)`, a builtin, a star
+  import's name, a factory's local), and a Python keyword
+  (`invalid_identifier`). A class task's new parameter is an annotated
+  field, never an `__init__`; an annotation edit imports its decorator. A
+  value that is not Python is refused as `invalid_expression`, and a node's
+  argument that reads a name not bound where it is written (nothing binds
+  it, or the workflow binds it only below the node) as `name_not_bound`.
+  An edit that writes several files writes them all or none.
 - The run's live files are written whole: `run.wf-viewer.live.json`, the
   agent-context and context live files, and the final overlay, queue trace
   and run record go to a sibling file renamed over the target, so a reader
