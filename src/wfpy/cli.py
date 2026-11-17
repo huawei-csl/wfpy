@@ -212,6 +212,18 @@ def _find_workflows(module: Any) -> dict[str, Any]:
     return workflows
 
 
+def _default_workflow(module: Any, workflows: dict[str, Any]) -> Any | None:
+    """The workflow to take when none is named: the only one in the module,
+    or the only one the file defines itself. A workflow it imports to use as a
+    node (``from pipeline import pipeline``) is a module attribute as well,
+    and must not make its own workflow ambiguous."""
+    if len(workflows) == 1:
+        return next(iter(workflows.values()))
+    module_name = getattr(module, "__name__", None)
+    own = [wf for wf in workflows.values() if getattr(wf, "__module__", None) == module_name]
+    return own[0] if len(own) == 1 else None
+
+
 def _parse_input_value(raw: str) -> Any:
     """Parse a CLI --input value.  Supports int, float, bool, JSON, or plain string."""
     # Try int
@@ -259,14 +271,14 @@ def cmd_run(args: argparse.Namespace) -> None:
             )
             sys.exit(1)
     else:
-        if len(workflows) > 1:
+        target = _default_workflow(module, workflows)
+        if target is None:
             available = ", ".join(workflows.keys())
             print(
                 f"Multiple workflows found: {available}. Use --workflow to select one.",
                 file=sys.stderr,
             )
             sys.exit(1)
-        target = next(iter(workflows.values()))
 
     # Parse inputs
     inputs: dict[str, Any] = {}
@@ -413,7 +425,7 @@ def cmd_plan(args: argparse.Namespace) -> None:
             print(f"Error: workflow {args.workflow!r} not found.", file=sys.stderr)
             sys.exit(1)
     else:
-        target = next(iter(workflows.values()))
+        target = _default_workflow(module, workflows) or next(iter(workflows.values()))
 
     wf_def = target._wfpy_workflow
     if getattr(args, "format", "plan") == "graph":
