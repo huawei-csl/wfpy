@@ -2078,3 +2078,64 @@ def test_an_argument_of_a_node_no_one_call_makes_is_refused_with_why(tmp_path: P
     assert answer["status"] == "error"
     assert answer["diagnostic"] == {"code": "arguments_elsewhere", "entity": "a", "parameter": "path"}, answer
     assert src.read_text(encoding="utf-8") == READ_BARE
+
+
+# ── an argument written over several lines, written back as it is ──
+
+
+OVER_LINES = '''from wfpy import connect, workflow
+
+from stages import Source, Writer
+
+BASE = "b"
+
+
+@workflow
+def flow():
+    joined = Source(path=" ".join([
+        BASE,  # the base
+        "x",
+    ]))
+    quoted = Source(path="""one
+    two""")
+    nested = make("t")()
+    w = Writer()
+    connect(joined.Out, w.In)
+
+
+def make(tail):
+    @workflow
+    def made():
+        deep = Source(path=" ".join([
+            BASE,
+            tail,
+        ]))
+        w = Writer()
+        connect(deep.Out, w.In)
+
+    return made
+'''
+
+
+@pytest.mark.parametrize(
+    ("workflow", "entity", "shown"),
+    [
+        ("flow", "joined", '" ".join([\n    BASE,  # the base\n    "x",\n])'),
+        ("flow", "quoted", '"""one\n    two"""'),
+        ("made", "deep", '" ".join([\n    BASE,\n    tail,\n])'),
+    ],
+)
+def test_an_argument_over_lines_reads_from_its_statement_and_is_written_back_as_it_is(
+    tmp_path: Path, workflow: str, entity: str, shown: str
+) -> None:
+    """Its later lines read from the statement's indentation (written back,
+    the statement's indentation is added again); a string's own lines are
+    its value, as written."""
+    src = _flow(tmp_path, OVER_LINES)
+    exported = _plans(tmp_path, "flow.py", hierarchy=True)
+    graph = exported if workflow == "flow" else exported["hierarchy"]["children"][0]["graph"]
+    (path,) = [p for p in _node(graph, entity)["meta"]["parameters"] if p["name"] == "path"]
+    assert path["expression"] == shown
+    answer = _send(src, "updateNodeParameter", workflow=workflow, entity=entity, parameterName="path", newValue=shown)
+    assert answer["status"] == "ok", answer
+    assert src.read_text(encoding="utf-8") == OVER_LINES

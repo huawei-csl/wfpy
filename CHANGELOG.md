@@ -74,6 +74,11 @@ All notable changes to wfpy are documented here. The format follows
   makes (`s = _source("a")`), or whose call may give the argument through a
   `*args` / `**kwargs`, is refused as `arguments_elsewhere`; the export no
   longer shows the helper's call text as the node's.
+- An argument written over several lines is exported (`expression`) with
+  its later lines as they read from its statement, not the file: written
+  back, the statement's indentation is added again, and an unchanged
+  Update indented them once more each time. A string's own lines are its
+  value and stay as written.
 - The run's live files are written whole: `run.wf-viewer.live.json`, the
   agent-context and context live files, and the final overlay, queue trace
   and run record go to a sibling file renamed over the target, so a reader

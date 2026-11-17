@@ -17,7 +17,9 @@ from __future__ import annotations
 
 import ast
 import inspect
+import io
 import os
+import tokenize
 import weakref
 from typing import Any
 
@@ -235,21 +237,65 @@ def call_expressions(
     if found is None:
         return {}
     text, call = found
+    lines = text.splitlines()
+    statement_line = lines[call.lineno - 1] if 0 < call.lineno <= len(lines) else ""
+    indent = statement_line[: len(statement_line) - len(statement_line.lstrip())]
+
+    def written_at(node: ast.AST) -> str | None:
+        return _unindented(segment(text, node), indent)
+
     expressions: dict[str, str] = {}
     for index, arg in enumerate(call.args):
         if isinstance(arg, ast.Starred):
             break
         if positional_names is not None and index < len(positional_names):
-            written = segment(text, arg)
+            written = written_at(arg)
             if written is not None:
                 expressions[positional_names[index]] = written
     for keyword in call.keywords:
         if keyword.arg is None:
             continue
-        written = segment(text, keyword.value)
+        written = written_at(keyword.value)
         if written is not None:
             expressions[keyword.arg] = written
     return expressions
+
+
+def _unindented(written: str | None, indent: str) -> str | None:
+    """``written``, an argument over several lines, with its later lines
+    as they read from its statement's indentation, not the file's: written
+    back where the statement is, they are indented by it again."""
+    if written is None or "\n" not in written or not indent:
+        return written
+    in_strings = _lines_in_strings(written)
+    if in_strings is None:
+        return written
+    lines = written.split("\n")
+    return "\n".join(
+        line[len(indent):] if index and index not in in_strings and line.startswith(indent) else line
+        for index, line in enumerate(lines)
+    )
+
+
+def _lines_in_strings(written: str) -> set[int] | None:
+    """The lines of ``written`` (from 0) that begin inside a string, a
+    triple-quoted one's later lines: they are the string's value, as
+    written. Nothing when ``written`` does not tokenize."""
+    inside: set[int] = set()
+    fstring_starts: list[int] = []
+    fstring_start = getattr(tokenize, "FSTRING_START", None)
+    fstring_end = getattr(tokenize, "FSTRING_END", None)
+    try:
+        for token in tokenize.generate_tokens(io.StringIO("(" + written + ")").readline):
+            if token.type == tokenize.STRING:
+                inside.update(range(token.start[0], token.end[0]))
+            elif fstring_start is not None and token.type == fstring_start:
+                fstring_starts.append(token.start[0])
+            elif fstring_end is not None and token.type == fstring_end and fstring_starts:
+                inside.update(range(fstring_starts.pop(), token.end[0]))
+    except (tokenize.TokenError, SyntaxError, IndentationError):
+        return None
+    return inside
 
 
 # ── the factory that builds a workflow ───────────────────────────────────
