@@ -818,6 +818,41 @@ def test_create_node_refuses_a_name_that_shadows(project: Path, name: str) -> No
     assert answer["diagnostic"]["code"] == "name_shadows", answer
 
 
+@pytest.mark.parametrize(("name", "line"), [("back", 18), ("name", 25)])
+def test_create_node_refuses_a_name_the_workflow_has(project: Path, name: str, line: int) -> None:
+    before = _text(project, "compile/flow.py")
+    answer = _send(project / "compile/flow.py", "createNode", workflow="flow", type="Text", name=name)
+    assert answer["status"] == "error"
+    assert answer["diagnostic"]["code"] == "name_exists", answer
+    assert answer["diagnostic"]["line"] == line
+    assert _text(project, "compile/flow.py") == before
+
+
+@pytest.mark.parametrize(
+    ("new", "code"),
+    [("Text", "name_shadows"), ("LABEL", "name_shadows"), ("pair", "name_shadows"), ("back", "name_exists"), ("name", "name_exists")],
+)
+def test_rename_node_refuses_a_name_the_workflow_has_or_reads(project: Path, new: str, code: str) -> None:
+    before = _text(project, "compile/flow.py")
+    answer = _send(project / "compile/flow.py", "renameNode", workflow="flow", old="spare", new=new)
+    assert answer["status"] == "error"
+    assert answer["diagnostic"]["code"] == code, answer
+    assert _text(project, "compile/flow.py") == before
+
+
+def test_rename_node_to_its_own_name_changes_nothing(project: Path) -> None:
+    before = _text(project, "compile/flow.py")
+    answer = _send(project / "compile/flow.py", "renameNode", workflow="flow", old="spare", new="spare")
+    assert answer["status"] == "ok", answer
+    assert _text(project, "compile/flow.py") == before
+
+
+def test_rename_node_refuses_a_name_a_factory_parameter_has(project: Path) -> None:
+    answer = _send(project / "compile/workflows/pair.py", "renameNode", workflow="pair", old="first", new="label")
+    assert answer["status"] == "error"
+    assert answer["diagnostic"]["code"] == "name_shadows"
+
+
 def test_create_node_refuses_a_name_a_factory_parameter_has(project: Path) -> None:
     answer = _send(
         project / "compile/workflows/pair.py",

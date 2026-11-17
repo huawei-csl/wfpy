@@ -1386,6 +1386,7 @@ class RewriteEngine:
             raise RewriteError(message=f"Invalid type name: {type_name}", diagnostic={"code": "invalid_type"})
         fn, body = self._get_workflow_body(workflow)
         self._refuse_shadowing(fn, name, type_name)
+        self._refuse_taken(fn, name)
         args: list[cst.Arg] = []
         written: set[str] = set()
         for key, value in (params or {}).items():
@@ -1553,6 +1554,132 @@ class RewriteEngine:
                 message=f"a node named '{name}' would hide {what}: choose another name",
                 diagnostic={"code": "name_shadows", "name": name, **({"line": line} if line is not None else {})},
             )
+
+    def _refuse_taken(self, fn: cst.FunctionDef, name: str) -> None:
+        """Refuse a node name workflow `fn` already binds: another instance,
+        a loop variable, a parameter. A second `x = ...` in one body leaves
+        one node where the diagram drew two, or rebinds what a `connect`
+        reads."""
+        bound = self._names_bound_in(fn)
+        if name in bound:
+            line = bound[name]
+            raise RewriteError(
+                message=f"'{name}' is already a name in this workflow"
+                + (f" (line {line})" if line is not None else "")
+                + ": choose another name",
+                diagnostic={"code": "name_exists", "name": name, **({"line": line} if line is not None else {})},
+            )
+
+    def _names_bound_in(self, fn: cst.FunctionDef) -> dict[str, int | None]:
+        """The names workflow `fn` binds itself, each with the line it is
+        bound at: its parameters, and what its body assigns -- an instance,
+        a loop or `with` variable, an import, a nested def or class. A
+        nested scope's own names (a helper's locals, a comprehension's
+        variable) are not the workflow's."""
+        engine = self
+        bound: dict[str, int | None] = {}
+        params = fn.params
+        every = [*params.posonly_params, *params.params, *params.kwonly_params]
+        for star in (params.star_arg, params.star_kwarg):
+            if isinstance(star, cst.Param):
+                every.append(star)
+        for param in every:
+            bound.setdefault(param.name.value, engine._line_of(param))
+
+        def bind(target: cst.BaseExpression, at: cst.CSTNode) -> None:
+            if isinstance(target, cst.Name):
+                bound.setdefault(target.value, engine._line_of(at))
+            elif isinstance(target, (cst.Tuple, cst.List)):
+                for element in target.elements:
+                    bind(element.value, at)
+            elif isinstance(target, cst.StarredElement):
+                bind(target.value, at)
+
+        class _Binds(cst.CSTVisitor):
+            def visit_FunctionDef(self, node: cst.FunctionDef) -> bool:
+                if node is fn:
+                    return True
+                bound.setdefault(node.name.value, engine._line_of(node))
+                return False
+
+            def visit_ClassDef(self, node: cst.ClassDef) -> bool:
+                bound.setdefault(node.name.value, engine._line_of(node))
+                return False
+
+            def visit_Lambda(self, node: cst.Lambda) -> bool:
+                return False
+
+            def visit_ListComp(self, node: cst.ListComp) -> bool:
+                return False
+
+            def visit_SetComp(self, node: cst.SetComp) -> bool:
+                return False
+
+            def visit_DictComp(self, node: cst.DictComp) -> bool:
+                return False
+
+            def visit_GeneratorExp(self, node: cst.GeneratorExp) -> bool:
+                return False
+
+            def visit_AssignTarget(self, node: cst.AssignTarget) -> None:
+                bind(node.target, node)
+
+            def visit_AnnAssign(self, node: cst.AnnAssign) -> None:
+                bind(node.target, node)
+
+            def visit_AugAssign(self, node: cst.AugAssign) -> None:
+                bind(node.target, node)
+
+            def visit_For(self, node: cst.For) -> None:
+                bind(node.target, node)
+
+            def visit_WithItem(self, node: cst.WithItem) -> None:
+                if node.asname is not None:
+                    bind(node.asname.name, node)
+
+            def visit_NamedExpr(self, node: cst.NamedExpr) -> None:
+                bind(node.target, node)
+
+            def visit_ExceptHandler(self, node: cst.ExceptHandler) -> None:
+                if node.name is not None:
+                    bind(node.name.name, node)
+
+            def visit_ImportAlias(self, node: cst.ImportAlias) -> None:
+                if node.asname is not None:
+                    bind(node.asname.name, node)
+                    return
+                head: cst.BaseExpression = node.name
+                while isinstance(head, cst.Attribute):
+                    head = head.value
+                bind(head, node)
+
+        fn.visit(_Binds())
+        return bound
+
+    def _instance_type_name(self, fn: cst.FunctionDef, name: str) -> str:
+        """The name instance `name` of workflow `fn` is made from: `Text`
+        for `name = Text(...)`, `pair` for `name = pair(...)()`; empty when
+        it is not a call of a name."""
+        found = ""
+
+        class _Made(cst.CSTVisitor):
+            def visit_FunctionDef(self, node: cst.FunctionDef) -> bool:
+                return node is fn
+
+            def visit_Assign(self, node: cst.Assign) -> None:
+                nonlocal found
+                if not any(isinstance(t.target, cst.Name) and t.target.value == name for t in node.targets):
+                    return
+                head: cst.BaseExpression = node.value
+                while isinstance(head, cst.Call):
+                    head = head.func
+                while isinstance(head, cst.Attribute):
+                    head = head.value
+                if isinstance(head, cst.Name) and not found:
+                    found = head.value
+
+        fn.visit(_Made())
+        return found
 
     def _enclosing_functions(self, fn: cst.FunctionDef) -> list[cst.FunctionDef]:
         """The defs `fn` is nested in, innermost first (a factory's)."""
@@ -3522,6 +3649,13 @@ class RewriteEngine:
             for use in uses:
                 use.engine.instance_port_mentions(use.workflow, use.instances, old, new, ordinal=use.ordinal)
             return
+        if new == old:
+            return
+        # The new name is the workflow's alone: not another of its names
+        # (`front = ...` twice), not one it reads (`Text = Text(...)`).
+        if self._body_assigns(fn, old):
+            self._refuse_taken(fn, new)
+            self._refuse_shadowing(fn, new, self._instance_type_name(fn, old))
 
         class _RenameNodeTransformer(_WorkflowBodyTransformer):
             def __init__(self, fn_node: cst.FunctionDef, old_name: str, new_name: str) -> None:

@@ -44,7 +44,9 @@ All notable changes to wfpy are documented here. The format follows
   written with their direction. An op on a workflow a factory builds edits
   the inner `@workflow`. `createNode` imports a type the module does not,
   from the package that re-exports it, and refuses a name that would hide
-  another. A class task's new parameter is an annotated field, never an
+  another; `createNode` and `renameNode` refuse a name the workflow already
+  has (`name_exists`: an instance, a loop variable, a parameter), and
+  `renameNode` one that would hide what the workflow reads (`Text = Text(...)`). A class task's new parameter is an annotated field, never an
   `__init__`; an annotation edit imports its decorator. A value that is not
   Python is refused as `invalid_expression`. An edit that writes several
   files writes them all or none.
