@@ -673,3 +673,42 @@ def test_python_environment_that_fails_is_an_error_answer_not_a_crash(monkeypatc
     assert response.status == "error"
     assert response.diagnostic == {"code": "internal_error"}
     assert "no interpreter today" in response.message
+
+
+def test_task_types_of_every_kind_without_a_kind(tmp_path: Path) -> None:
+    """A chat tool asks with no kind, and with the workflow it scopes every query to."""
+    src = tmp_path / "wf.py"
+    src.write_text(
+        """
+from wfpy import agent, source, task, workflow
+
+
+@task
+class Split:
+    pass
+
+
+@agent(prompt="p")
+class Summarize:
+    pass
+
+
+@source
+class Text:
+    pass
+
+
+@workflow
+def demo():
+    pass
+""",
+        encoding="utf-8",
+    )
+
+    resp = _handle_request({"file": str(src), "op": "wfpy.listTaskTypes", "args": {"workflow": "demo"}})
+    assert resp.status == "ok", resp
+    assert resp.diagnostic["types"] == ["Split", "Summarize", "Text"]
+    assert resp.diagnostic["byKind"] == {"task": ["Split"], "agent": ["Summarize"], "source": ["Text"]}
+
+    one = _handle_request({"file": str(src), "op": "wfpy.listTaskTypes", "args": {"kind": "agent"}})
+    assert one.diagnostic["types"] == ["Summarize"]
