@@ -18,16 +18,20 @@ name that tries to leave its root.
 from __future__ import annotations
 
 import os
+import stat
 import types
 from pathlib import Path
 
 import pytest
 
+import wfpy._agent_prompt_runtime as runtime
 from wfpy._agent_prompt_runtime import (
     _claude_agent_search_roots,
     _read_skill_md,
+    _read_skill_md_file,
     _resolve_skill_dir,
     _runtime_root_for_skills,
+    _skill_lookup_roots,
     _skill_search_roots,
 )
 from wfpy.sidecar import FEATURES
@@ -314,7 +318,8 @@ class TestOtherToolsSkillFolders:
         self, tmp_path, isolated_home
     ):
         """What was searched before the other tools' folders is searched in
-        the same order, ahead of all of them."""
+        the same order, ahead of all of them. A folder of another tool is
+        listed where it exists, so every one is made here."""
         project = tmp_path / "project"
         plan = self.workflow(project)
         runtime_root = (project / "flows").resolve()
@@ -344,8 +349,17 @@ class TestOtherToolsSkillFolders:
             home / ".config" / "opencode" / "skills",
             home / ".config" / "opencode" / "skill",
         ]
+        for folder in after:
+            folder.mkdir(parents=True, exist_ok=True)
 
         assert _skill_search_roots(plan) == before + after
+
+    def test_a_folder_that_does_not_exist_is_not_listed(self, tmp_path):
+        project = tmp_path / "project"
+        plan = self.workflow(project)
+
+        assert (project / ".agents" / "skills").resolve() not in _skill_search_roots(plan)
+        assert (Path.cwd() / ".wf" / "skills").resolve() in _skill_search_roots(plan)
 
     def test_a_name_in_claude_skills_and_codex_skills_keeps_resolving_to_claude(self, tmp_path):
         """The regression guard: a name that resolved before the other tools'
@@ -398,10 +412,26 @@ class TestOtherToolsSkillFolders:
 
         assert _resolve_skill_dir("wfroot-linked-tool", self.workflow(project)) == installed
 
-    def test_the_sidecar_says_so(self):
-        """An IDE offers what a run finds by asking which lookup it has."""
-        assert FEATURES["skillRootsList"] is True
-        assert FEATURES["agentSkillFolders"] is True
+    def test_the_sidecar_answers_the_lookup(self):
+        """An IDE offers what a run finds by asking the sidecar for it."""
+        assert FEATURES["agentSkillsQuery"] is True
+        assert "agentSkillFolders" not in FEATURES
+
+    def test_with_wf_skills_root_the_walk_starts_at_the_workflow(self, tmp_path, monkeypatch):
+        """`WF_SKILLS_ROOT` makes its first entry the runtime root, a folder of
+        skills; the other tools' folders are still the workflow's."""
+        explicit = tmp_path / "explicit"
+        explicit.mkdir()
+        beside_explicit = make_skill(explicit / ".agents" / "skills", "wfroot-beside-explicit")
+        project = tmp_path / "project"
+        in_project = make_skill(project / ".agents" / "skills", "wfroot-in-project")
+        monkeypatch.setenv("WF_SKILLS_ROOT", str(explicit))
+        plan = self.workflow(project)
+
+        assert _runtime_root_for_skills(plan) == explicit.resolve()
+        assert _resolve_skill_dir("wfroot-in-project", plan) == in_project
+        assert _resolve_skill_dir("wfroot-beside-explicit", plan) is None
+        assert beside_explicit.parent.resolve() not in _skill_search_roots(plan)
 
 
 class TestOtherToolsFoldersStopAtTheRepository:
@@ -489,10 +519,12 @@ class TestOtherToolsFoldersStopAtTheRepository:
         assert _resolve_skill_dir("wfroot-in-cwd", self.flow(repository / "flows")) == in_cwd
 
 
-class TestHomeIsNoProject:
-    """A workflow under the home directory: the walk, or `<cwd>`, can reach
-    `~`, whose tool folders are the user's. They are searched in the
-    user-level place, after every project folder, wherever they are reached.
+class TestHomeKeptInGit:
+    """A workflow under a home directory kept in git: the walk, or `<cwd>`,
+    reaches `~`. Its user-level folders (`~/.agents/skills`, and
+    `~/.codex/skills` when it is Codex's user folder) are searched once, in
+    the user-level place, after every project folder. Its other folders
+    (`~/.opencode/skills`) are a project's, as they are for OpenCode.
     """
 
     @pytest.fixture(autouse=True)
@@ -505,61 +537,95 @@ class TestHomeIsNoProject:
     @staticmethod
     def flow(home: Path) -> types.SimpleNamespace:
         flows = home / "work" / "flows"
-        flows.mkdir(parents=True)
+        flows.mkdir(parents=True, exist_ok=True)
         (flows / "flow.py").write_text("", encoding="utf-8")
         return make_plan(source_path=str(flows / "flow.py"))
 
-    def test_the_home_folders_come_after_the_working_directory(self, home, tmp_path, monkeypatch):
+    def test_the_user_folders_come_after_the_working_directory(self, home, tmp_path, monkeypatch):
         cwd = tmp_path / "cwd"
-        cwd.mkdir()
-        monkeypatch.chdir(cwd)
         codex_home = tmp_path / "codex-home"
         monkeypatch.setenv("CODEX_HOME", str(codex_home))
-        plan = self.flow(home)
-        roots = _skill_search_roots(plan)
-        flows = (home / "work" / "flows").resolve()
-        cwd = cwd.resolve()
-        home = home.resolve()
-
-        # The walk reached `~` and took `~/.claude/skills` as it always did;
-        # every root after `<cwd>`'s own is another tool's.
-        tool_roots = roots[roots.index(cwd / ".claude" / "skills") + 1 :]
-        assert tool_roots == [
+        flows = home / "work" / "flows"
+        expected_tools = [
             *(flows.joinpath(*parts) for parts in TOOLS),
             *((home / "work").joinpath(*parts) for parts in TOOLS),
+            # `~` as a project: `~/.agents/skills` is the user's, below;
+            # `~/.codex/skills` is not Codex's user folder, `CODEX_HOME` is.
+            *(home.joinpath(*parts) for parts in TOOLS if parts != (".agents", "skills")),
             *(cwd.joinpath(*parts) for parts in TOOLS),
             home / ".agents" / "skills",
-            codex_home.resolve() / "skills",
+            codex_home / "skills",
             home / ".config" / "opencode" / "skills",
             home / ".config" / "opencode" / "skill",
         ]
+        for folder in expected_tools:
+            folder.mkdir(parents=True, exist_ok=True)
+        monkeypatch.chdir(cwd)
+        roots = _skill_search_roots(self.flow(home))
+
+        # The walk reached `~` and took `~/.claude/skills` as it always did;
+        # every root after `<cwd>`'s own is another tool's.
+        tool_roots = roots[roots.index(cwd.resolve() / ".claude" / "skills") + 1 :]
+        assert tool_roots == [folder.resolve() for folder in expected_tools]
+
+    def test_an_opencode_folder_in_home_is_a_projects(self, home, tmp_path, monkeypatch):
+        """OpenCode reads `.opencode/skills` up to the git worktree, `~`
+        included when `~` is the worktree: before `<cwd>`'s folders."""
+        in_home = make_skill(home / ".opencode" / "skills", "wfroot-home-opencode")
+        make_skill(tmp_path / "cwd" / ".opencode" / "skills", "wfroot-home-opencode")
+        monkeypatch.chdir(tmp_path / "cwd")
+        plan = self.flow(home)
+        roots, _ = _skill_lookup_roots(plan)
+        [root] = [root for root in roots if root.path == in_home.parent.resolve()]
+
+        assert _resolve_skill_dir("wfroot-home-opencode", plan) == in_home
+        assert (root.folder, root.scope) == (".opencode/skills", "project")
 
     def test_a_working_directory_skill_outranks_the_users(self, home, tmp_path, monkeypatch):
         cwd = tmp_path / "cwd"
         preferred = make_skill(cwd / ".agents" / "skills", "wfroot-cwd-first")
         make_skill(home / ".agents" / "skills", "wfroot-cwd-first")
         monkeypatch.chdir(cwd)
+        plan = self.flow(home)
+        roots, _ = _skill_lookup_roots(plan)
+        [user] = [root for root in roots if root.path == (home / ".agents" / "skills").resolve()]
 
-        assert _resolve_skill_dir("wfroot-cwd-first", self.flow(home)) == preferred
+        assert _resolve_skill_dir("wfroot-cwd-first", plan) == preferred
+        assert (user.folder, user.scope) == ("~/.agents/skills", "user")
 
-    def test_codex_home_elsewhere_is_the_codex_folder_searched(self, home, tmp_path, monkeypatch):
+    def test_with_codex_home_elsewhere_the_home_codex_folder_is_a_projects(
+        self, home, tmp_path, monkeypatch
+    ):
         """With `CODEX_HOME` elsewhere, `~/.codex/skills` is not Codex's user
-        folder, and the walk does not take it for a project's."""
+        folder: it is searched as the home project's, before `$CODEX_HOME`."""
         codex_home = tmp_path / "codex-home"
-        preferred = make_skill(codex_home / "skills", "wfroot-codex-home")
-        make_skill(home / ".codex" / "skills", "wfroot-codex-home")
-        make_skill(home / ".codex" / "skills", "wfroot-only-in-home-codex")
+        make_skill(codex_home / "skills", "wfroot-codex-home")
+        in_home = make_skill(home / ".codex" / "skills", "wfroot-codex-home")
+        only_user = make_skill(codex_home / "skills", "wfroot-only-in-codex-home")
         monkeypatch.setenv("CODEX_HOME", str(codex_home))
         monkeypatch.chdir(tmp_path)
         plan = self.flow(home)
 
-        assert _resolve_skill_dir("wfroot-codex-home", plan) == preferred
-        assert _resolve_skill_dir("wfroot-only-in-home-codex", plan) is None
+        assert _resolve_skill_dir("wfroot-codex-home", plan) == in_home
+        assert _resolve_skill_dir("wfroot-only-in-codex-home", plan) == only_user
+
+    def test_with_codex_home_unset_the_home_codex_folder_is_the_users(
+        self, home, tmp_path, monkeypatch
+    ):
+        """`~/.codex/skills` is then Codex's user folder: searched last, so a
+        working directory's `.codex/skills` comes first."""
+        make_skill(home / ".codex" / "skills", "wfroot-codex-user")
+        in_cwd = make_skill(tmp_path / "cwd" / ".codex" / "skills", "wfroot-codex-user")
+        monkeypatch.chdir(tmp_path / "cwd")
+
+        assert _resolve_skill_dir("wfroot-codex-user", self.flow(home)) == in_cwd
 
     def test_started_in_home_the_user_folders_keep_their_place(self, home, tmp_path, monkeypatch):
-        """`<cwd>` is the home directory: its folders are still the user's."""
+        """`<cwd>` is the home directory: its user-level folders are still
+        the user's."""
         preferred = make_skill(home / "work" / ".agents" / "skills", "wfroot-project-first")
         make_skill(home / ".agents" / "skills", "wfroot-project-first")
+        (home / "work" / ".opencode" / "skill").mkdir(parents=True)
         monkeypatch.chdir(home)
         plan = self.flow(home)
         roots = _skill_search_roots(plan)
@@ -574,6 +640,8 @@ class TestHomeIsNoProject:
     ):
         project = home / "work"
         codex_home = project / ".codex"
+        (codex_home / "skills").mkdir(parents=True)
+        (home / ".agents" / "skills").mkdir(parents=True)
         monkeypatch.setenv("CODEX_HOME", str(codex_home))
         monkeypatch.chdir(tmp_path)
         roots = _skill_search_roots(self.flow(home))
@@ -596,3 +664,196 @@ class TestSkillMdThatIsNoFile:
         assert _resolve_skill_dir("wfroot-md-dir", plan) == (root / "wfroot-md-dir").resolve()
         with pytest.raises(FileNotFoundError, match="is not a file"):
             _read_skill_md("wfroot-md-dir", plan)
+
+
+class TestSkillMdChecks:
+    def test_a_skill_md_gone_since_the_lookup_is_missing_not_no_file(self, tmp_path):
+        """One `stat` tells a `SKILL.md` that is not there from one that is
+        no file."""
+        with pytest.raises(FileNotFoundError, match="does not exist"):
+            _read_skill_md_file("wfroot-gone", tmp_path / "wfroot-gone" / "SKILL.md")
+
+    def test_a_skill_not_found_computes_the_roots_once(self, tmp_path, monkeypatch):
+        """The error lists the roots the lookup searched, not a second
+        computation of them."""
+        calls = []
+        lookup_roots = runtime._skill_lookup_roots
+
+        def counted(plan, cwd=None):
+            calls.append(plan)
+            return lookup_roots(plan, cwd)
+
+        monkeypatch.setattr(runtime, "_skill_lookup_roots", counted)
+        monkeypatch.setenv("WF_SKILLS_ROOT", str(tmp_path / "skills"))
+
+        with pytest.raises(FileNotFoundError, match="was not found. Searched roots: "):
+            _read_skill_md("wfroot-nowhere", make_plan())
+        assert len(calls) == 1
+
+
+@pytest.fixture
+def owned_by(monkeypatch):
+    """Make `os.stat` report another owner for chosen paths: `owned_by(path,
+    uid)`. Everything else about the path is its own."""
+
+    owners: dict[Path, int] = {}
+    real_stat = os.stat
+
+    def fake_stat(path, *args, **kwargs):
+        status = real_stat(path, *args, **kwargs)
+        uid = owners.get(Path(os.fspath(path)))
+        if uid is None:
+            return status
+        fields = list(status)
+        fields[stat.ST_UID] = uid
+        return os.stat_result(fields)
+
+    monkeypatch.setattr(os, "stat", fake_stat)
+
+    def set_owner(path: Path, uid: int) -> None:
+        owners[path.resolve()] = uid
+
+    return set_owner
+
+
+ANOTHER_USER = 4242 if os.name != "posix" or os.getuid() != 4242 else 4243
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Windows has no owner and mode bits to check")
+class TestOnlyTrustedFoldersAreRead:
+    """Anyone can make `/tmp/.agents/skills`, or `/tmp/.git`, and what they
+    make is theirs. Another tool's folder is read, and a `.git` bounds the
+    walk, only if it is owned by the current user or root and writable by
+    no other user. Not checked on Windows.
+    """
+
+    @pytest.fixture(autouse=True)
+    def isolated_home(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.chdir(tmp_path)
+        return home
+
+    @staticmethod
+    def flow(directory: Path) -> types.SimpleNamespace:
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "flow.py").write_text("", encoding="utf-8")
+        return make_plan(source_path=str(directory / "flow.py"))
+
+    @pytest.mark.parametrize(("owner", "read"), [(None, True), (0, True), (ANOTHER_USER, False)])
+    def test_a_folder_at_the_working_directory_is_read_if_trusted(
+        self, owner, read, tmp_path, monkeypatch, owned_by
+    ):
+        """The `/tmp` case: started in `/tmp`, with `/tmp/.agents/skills`."""
+        shared_tmp = tmp_path / "tmp"
+        planted = make_skill(shared_tmp / ".agents" / "skills", "wfroot-planted")
+        if owner is not None:
+            owned_by(planted.parent, owner)
+        monkeypatch.chdir(shared_tmp)
+        plan = self.flow(shared_tmp / "job")
+        roots, ignored = _skill_lookup_roots(plan)
+
+        assert (_resolve_skill_dir("wfroot-planted", plan) == planted) is read
+        if not read:
+            assert [(root.path, root.reason) for root in ignored] == [
+                (planted.parent.resolve(), f"owned by another user (uid {ANOTHER_USER})")
+            ]
+            with pytest.raises(FileNotFoundError, match="Not read, as not trusted: "):
+                _read_skill_md("wfroot-planted", plan)
+
+    @pytest.mark.parametrize(("owner", "read"), [(None, True), (ANOTHER_USER, False)])
+    def test_a_git_bounds_the_walk_if_trusted(self, owner, read, tmp_path, owned_by):
+        """A `.git` another user owns is no repository: the walk does not
+        reach its directory's folders, trusted as they may be."""
+        outer = tmp_path / "outer"
+        (outer / ".git").mkdir(parents=True)
+        if owner is not None:
+            owned_by(outer / ".git", owner)
+        above = make_skill(outer / ".agents" / "skills", "wfroot-at-the-bound")
+        plan = self.flow(outer / "flows")
+
+        assert (_resolve_skill_dir("wfroot-at-the-bound", plan) == above) is read
+
+    def test_an_untrusted_git_does_not_widen_the_walk(self, tmp_path, owned_by):
+        """Nor does the walk go on past it to a repository around it."""
+        top = tmp_path / "top"
+        (top / ".git").mkdir(parents=True)
+        (top / "mid" / ".git").mkdir(parents=True)
+        owned_by(top / "mid" / ".git", ANOTHER_USER)
+        make_skill(top / ".agents" / "skills", "wfroot-around")
+        beside = make_skill(top / "mid" / "flows" / ".agents" / "skills", "wfroot-beside")
+        plan = self.flow(top / "mid" / "flows")
+
+        assert _resolve_skill_dir("wfroot-around", plan) is None
+        assert _resolve_skill_dir("wfroot-beside", plan) == beside
+
+    def test_a_folder_every_user_can_write_is_not_read(self, tmp_path):
+        project = tmp_path / "project"
+        (project / ".git").mkdir(parents=True)
+        shared = make_skill(project / ".opencode" / "skills", "wfroot-world-writable")
+        shared.parent.chmod(0o777)
+        plan = self.flow(project / "flows")
+        _, ignored = _skill_lookup_roots(plan)
+
+        assert _resolve_skill_dir("wfroot-world-writable", plan) is None
+        assert [root.reason for root in ignored] == ["writable by every user"]
+
+    def test_a_git_every_user_can_write_is_no_repository(self, tmp_path):
+        project = tmp_path / "project"
+        (project / ".git").mkdir(parents=True)
+        (project / ".git").chmod(0o777)
+        make_skill(project / ".codex" / "skills", "wfroot-loose-git")
+
+        assert _resolve_skill_dir("wfroot-loose-git", self.flow(project / "flows")) is None
+
+    @pytest.mark.parametrize(("private", "read"), [(True, True), (False, False)])
+    def test_a_folder_its_group_can_write_is_read_if_the_group_is_the_users_own(
+        self, private, read, tmp_path, monkeypatch
+    ):
+        """A umask of 002 makes every folder writable by the user's private
+        group, which only the user is in; any other group is other users."""
+        monkeypatch.setattr(runtime, "_is_private_group", lambda gid: private)
+        project = tmp_path / "project"
+        (project / ".git").mkdir(parents=True)
+        (project / ".git").chmod(0o755)
+        grouped = make_skill(project / ".agents" / "skills", "wfroot-group-writable")
+        grouped.parent.chmod(0o775)
+
+        assert (
+            _resolve_skill_dir("wfroot-group-writable", self.flow(project / "flows")) == grouped
+        ) is read
+
+    @pytest.mark.parametrize(
+        ("group_name", "members", "primary", "private"),
+        [
+            ("me", [], True, True),
+            ("me", ["me"], True, True),
+            ("me", ["someone"], True, False),
+            ("users", [], True, False),
+            ("me", [], False, False),
+        ],
+    )
+    def test_a_private_group_is_the_users_primary_named_after_them_alone(
+        self, group_name, members, primary, private, monkeypatch
+    ):
+        import grp
+        import pwd
+
+        user = types.SimpleNamespace(pw_name="me", pw_gid=1000)
+        group = types.SimpleNamespace(gr_name=group_name, gr_mem=members)
+        monkeypatch.setattr(pwd, "getpwuid", lambda uid: user)
+        monkeypatch.setattr(grp, "getgrgid", lambda gid: group)
+
+        assert runtime._is_private_group(1000 if primary else 1001) is private
+
+    def test_wfpy_own_folders_are_read_whoever_owns_them(self, tmp_path, owned_by):
+        """`.wf/skills` and `.claude/skills` are read as they always were,
+        up to the filesystem root and unchecked."""
+        theirs = make_skill(tmp_path / "tmp" / ".claude" / "skills", "wfroot-own-unchecked")
+        owned_by(theirs.parent, ANOTHER_USER)
+
+        assert (
+            _resolve_skill_dir("wfroot-own-unchecked", self.flow(tmp_path / "tmp" / "job"))
+            == theirs
+        )

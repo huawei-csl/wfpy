@@ -22,6 +22,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from wfpy._version import runtime_version
 from wfpy.workflow_identity import (
     detect_dynamic_workflow_identity_issues,
     format_dynamic_workflow_identity_error,
@@ -540,11 +541,36 @@ def _elaborate_factory_for_display(factory: Any) -> Any:
     return target
 
 
+class _PrintVersion(argparse.Action):
+    """`--version`: print `runtime_version()` on one line, as it is, and exit.
+
+    argparse's own `version` action wraps the line to the terminal's width,
+    and a program comparing two commands' lines must read them whole.
+    """
+
+    def __init__(self, option_strings: list[str], dest: str, **kwargs: Any) -> None:
+        kwargs.update(nargs=0, default=argparse.SUPPRESS)
+        super().__init__(option_strings, argparse.SUPPRESS, **kwargs)
+
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        values: Any,
+        option_string: str | None = None,
+    ) -> None:
+        print(runtime_version())
+        parser.exit()
+
+
 def main() -> None:
     """CLI entry point."""
     parser = argparse.ArgumentParser(
         prog="wfpy",
         description="wfpy — Pythonic agentic workflows on actor-dataflow semantics",
+    )
+    parser.add_argument(
+        "--version", action=_PrintVersion, help="print which wfpy this is, and exit"
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 

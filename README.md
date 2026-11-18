@@ -323,24 +323,40 @@ for Codex or OpenCode can be named too. They come after every folder above,
 so a name found above never resolves here:
 
 - `.agents/skills`, `.codex/skills`, `.opencode/skills` and
-  `.opencode/skill`, at the runtime root and each directory above it up to
-  the repository root (the nearest directory holding `.git`), then in
+  `.opencode/skill`, in the workflow's directory and each directory above it
+  up to the repository root (the nearest directory holding `.git`), then in
   `<cwd>`
 - `~/.agents/skills`
 - `$CODEX_HOME/skills` (`~/.codex/skills` when `CODEX_HOME` is unset)
 - `$XDG_CONFIG_HOME/opencode/skills` and `.../skill` (`~/.config` when
   `XDG_CONFIG_HOME` is unset)
 
-The walk stops at the repository root as Codex and OpenCode stop there;
-outside a repository only the runtime root is searched, so a folder that
-another user can write above a project, such as `/tmp/.agents/skills`, is
-not read for it. The home directory is no project: its folders are searched
-only in their user-level place, after `<cwd>`. A relative `CODEX_HOME` or
-`XDG_CONFIG_HOME` counts as unset.
+The walk starts at the workflow's directory even when `WF_SKILLS_ROOT` makes
+another directory the runtime root, and stops at the repository root as
+Codex and OpenCode stop there; outside a repository only the workflow's
+directory is searched, so a folder above a project, such as
+`/tmp/.agents/skills`, is not read for it. A user-level folder the walk or
+`<cwd>` reaches, as in a home directory kept in git, is searched once, in
+its user-level place; the home directory's other folders
+(`~/.opencode/skills`) are a project's, as they are for OpenCode. A relative
+`CODEX_HOME` or `XDG_CONFIG_HOME` counts as unset.
+
+On POSIX, one of these folders is read, and a `.git` bounds the walk, only
+if it is owned by you or by root and no other user can write it: neither
+every user nor a group, unless the group is your own private one (the group
+a umask of 002 makes your folders writable by). Anyone can create
+`/tmp/.agents/skills` or `/tmp/.git`; what they create is theirs. A `.git`
+that fails the check is no repository, and the walk does not go past it.
+Windows has no such check. wfpy's own folders above (`.wf/skills`,
+`.claude/skills`) are read as before, without it.
 
 A skill is found by its folder's name, `<folder>/<skill-name>/SKILL.md`, as
 in wfpy's own folders; a skill nested deeper in a collection is reached by
 naming the collection in `WF_SKILLS_ROOT`.
+
+An editor that offers skill names asks the sidecar which ones a run finds
+(`agentSkills`, see the [sidecar](docs/sidecar.md)) rather than repeating
+these rules.
 
 Prompt composition order:
 

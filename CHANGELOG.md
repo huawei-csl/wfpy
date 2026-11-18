@@ -24,21 +24,34 @@ All notable changes to wfpy are documented here. The format follows
   reported as not found unless `WF_SKILLS_ROOT` named its folder. wfpy now
   also searches `.agents/skills` (the folder the Agent Skills convention
   shares between tools), `.codex/skills`, `.opencode/skills` and
-  `.opencode/skill`, beside the workflow and above it up to the repository
-  root, and in the working directory, then `~/.agents/skills`,
+  `.opencode/skill`, in the workflow's directory and above it up to the
+  repository root, and in the working directory, then `~/.agents/skills`,
   `$CODEX_HOME/skills` (`~/.codex` by default) and
   `$XDG_CONFIG_HOME/opencode/skills` and `skill` (`~/.config` by default).
   They are searched after every folder searched before, `~/.claude/skills`
   included, so a name that resolved before resolves to the same folder:
-  these folders only add names. The walk up stops at the nearest directory
-  holding `.git`, and outside a repository at the runtime root itself,
-  as Codex and OpenCode stop: a folder above the project, which another
-  user may be able to write (`/tmp/.agents/skills`), is not read. The home
-  directory's folders are searched as the user's, after the working
-  directory's, however the walk reaches them. The sidecar's
-  `getCapabilities` says so (`features.agentSkillFolders`, and
-  `features.skillRootsList` for the list-valued `WF_SKILLS_ROOT` and the
-  symlinked skill), so an IDE offers the skills a run finds.
+  these folders only add names. The walk up starts at the workflow's
+  directory, `WF_SKILLS_ROOT` or not, and stops at the nearest directory
+  holding `.git`, or outside a repository at the workflow's directory, as
+  Codex and OpenCode stop: a folder above the project (`/tmp/.agents/skills`)
+  is not read. On POSIX such a folder is read, and a `.git` bounds the walk,
+  only if it is owned by the user or root and writable by no other user (a
+  group-writable one only by the user's private group), so a folder or a
+  `.git` another user planted in `/tmp` is not taken. A user-level folder
+  is searched in its user-level place however the walk reaches it; a home
+  directory kept in git has its other folders (`~/.opencode/skills`)
+  searched as a project's.
+- The sidecar answers `agentSkills` for a workflow file and a working
+  directory: the folders a run searches for skills and agent presets, the
+  folder each name resolves to, what reading its `SKILL.md` fails with, its
+  hooks as the runtime reads them, and the folders of other tools not read
+  as not trusted. It runs the runtime's own lookup, so an IDE offers the
+  skills a run finds without copying the rules
+  (`features.agentSkillsQuery`).
+- `wfpy --version` prints `wfpy <version> from <package directory>
+  (python X.Y)`, and the sidecar's `getCapabilities` returns the same line as
+  `runtimeVersion`, so an IDE can tell whether the sidecar it asks and the
+  `wfpy` it runs are the same.
 - The sidecar answers `pythonEnvironment` for a workflow file: the
   interpreter running it, the import roots `wfpy plan` loads the file with,
   and the folders its installed packages come from. An IDE configures its
