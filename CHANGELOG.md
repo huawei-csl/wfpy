@@ -49,9 +49,9 @@ All notable changes to wfpy are documented here. The format follows
   skills a run finds without copying the rules
   (`features.agentSkillsQuery`).
 - `wfpy --version` prints `wfpy <version> from <package directory>
-  (python X.Y)`, and the sidecar's `getCapabilities` returns the same line as
-  `runtimeVersion`, so an IDE can tell whether the sidecar it asks and the
-  `wfpy` it runs are the same.
+  (python X.Y)`, and the `agentSkills` answer and `getCapabilities` return
+  the same line as `runtimeVersion`, so an IDE can tell whether the sidecar
+  it asks and the `wfpy` it runs are the same.
 - The sidecar answers `pythonEnvironment` for a workflow file: the
   interpreter running it, the import roots `wfpy plan` loads the file with,
   and the folders its installed packages come from. An IDE configures its

@@ -145,6 +145,10 @@ parse. `features.agentSkillsQuery` advertises it.
 
 The answer's `diagnostic`:
 
+- `runtimeVersion`: the line `wfpy --version` prints (`wfpy 1.1.0 from
+  <package directory> (python 3.12)`). An editor that lists skills with the
+  sidecar and runs workflows with the `wfpy` command compares the two before
+  trusting the list for a run, with no other request.
 - `roots`: the folders searched, in order, each `{path, folder, scope}`:
   `folder` as a reader knows it (`.claude/skills`, `.agents/skills`,
   `~/.agents/skills`, `$CODEX_HOME/skills`, `WF_SKILLS_ROOT`), `scope` one of
@@ -163,7 +167,6 @@ The answer's `diagnostic`:
   ignoredFields, warnings}`, `skills` being the skills it preloads, each with
   the folder a run takes or the reason it fails.
 
-`getCapabilities` also returns `runtimeVersion`, the line `wfpy --version`
-prints (`wfpy 1.1.0 from <package directory> (python 3.12)`). An editor that
-lists skills with the sidecar and runs workflows with the `wfpy` command
-compares the two before trusting the list for a run.
+`getCapabilities` returns the same `runtimeVersion`. A sidecar without the
+op refuses it as an unknown op (`diagnostic.code` `unknown_operation`),
+which an editor reads as a wfpy that lists no skills this way.

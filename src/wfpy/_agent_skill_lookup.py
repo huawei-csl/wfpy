@@ -33,6 +33,7 @@ from wfpy._agent_prompt_runtime import (
     _skill_lookup_roots,
     _validate_skill_name,
 )
+from wfpy._version import runtime_version
 
 __all__ = ["agent_skill_lookup"]
 
@@ -95,6 +96,7 @@ def agent_skill_lookup(file_path: str, cwd: str | None = None) -> dict[str, Any]
             )
 
     return {
+        "runtimeVersion": runtime_version(),
         "cwd": str(run_cwd),
         "runtimeRoot": str(_runtime_root_for_skills(plan, run_cwd)),
         "roots": [_root(root) for root in roots],

@@ -278,6 +278,23 @@ class TestTheSidecarOp:
         capabilities = _handle_request({"op": "wfpy.getCapabilities"}).diagnostic
         assert capabilities["runtimeVersion"] == runtime_version()
 
+    def test_the_answer_says_which_wfpy_gave_it(self, tmp_path):
+        """So that an editor compares it with `wfpy --version` without asking
+        for the capabilities too."""
+        source = workflow(tmp_path / "project")
+
+        assert agent_skill_lookup(str(source))["runtimeVersion"] == runtime_version()
+
+    def test_a_sidecar_without_the_op_refuses_it_as_unknown(self, tmp_path):
+        """For a file that loads; one that does not is refused as such first."""
+        source = tmp_path / "flow.py"
+        source.write_text("x = 1\n", encoding="utf-8")
+
+        response = _handle_request({"op": "wfpy.noSuchQuery", "file": str(source), "args": {}})
+
+        assert response.status == "error"
+        assert response.diagnostic["code"] == "unknown_operation"
+
     def test_the_cli_prints_the_same_version_line(self, capsys, monkeypatch):
         from wfpy.cli import main
 
