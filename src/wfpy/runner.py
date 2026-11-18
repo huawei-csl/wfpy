@@ -2606,6 +2606,23 @@ def _feed_sub_plan(actor: RuntimeActor, sub_plan: FifoPlan) -> bool:
     return True
 
 
+def _nested_options(parent_options: dict[str, Any]) -> dict[str, Any]:
+    """The run's options as the agents of a nested workflow see them.
+
+    Every option but ``agent_debug_dir``. That one names the run's output
+    directory, where a top-level agent writes its files under its own instance
+    name; two instances of one workflow hold agents of the same name, so a
+    nested agent keeps writing below its own workflow's work directory.
+
+    A copy, not the parent's dict: an agent step stores its tool registry in
+    the options of the plan it runs in, and agents of different plans fire in
+    parallel.
+    """
+    options = dict(parent_options)
+    options.pop("agent_debug_dir", None)
+    return options
+
+
 def _run_sub_plan(
     actor: RuntimeActor,
     sub_plan: FifoPlan,
@@ -2626,6 +2643,10 @@ def _run_sub_plan(
     # Propagate source_path
     if parent_plan.source_path and not sub_plan.source_path:
         sub_plan.source_path = parent_plan.source_path
+
+    # `run()` sets the options on the top plan once every sub-plan is built,
+    # so a nested workflow receives them here, each time it fires.
+    sub_plan.options = _nested_options(parent_plan.options)
 
     # Its outputs are copied beside its siblings': name them for this
     # instance and firing, as a tool's outputs are.

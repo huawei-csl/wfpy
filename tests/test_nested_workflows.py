@@ -6,10 +6,11 @@ import argparse
 import json
 import textwrap
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-from wfpy import File, Port, Resource, action, config, connect, run, task, viewer, workflow
+from wfpy import File, Port, Resource, action, agent, config, connect, run, task, viewer, workflow
 from wfpy.cli import cmd_plan
 from wfpy.graph import export_graph_json
 from wfpy.runner import _build_workflow_graph, build_plan
@@ -53,6 +54,117 @@ def test_config_reaches_every_nesting_level(tmp_path: Path) -> None:
 
     assert grand_plan.search_paths == [str(tmp_path / "bin")]
     assert grand_plan.env["WFPY_DEPTH"] == "3"
+
+
+def _answering_agents(
+    monkeypatch: pytest.MonkeyPatch, answer: Any = None
+) -> dict[str, dict[str, Any]]:
+    """Stand in for the model. Returns the options each agent instance was
+    invoked with, by instance name; `answer` turns an agent's inputs into its
+    reply (default "ok")."""
+    seen: dict[str, dict[str, Any]] = {}
+
+    def fake_invoke(
+        agent_spec: Any, payload_text: str, verbose: bool, **kwargs: Any
+    ) -> tuple[str, list[dict[str, str]], None, dict[str, Any]]:
+        payload = json.loads(payload_text)
+        seen[payload["instance"]] = dict(kwargs.get("plan_options") or {})
+        return (answer(payload["inputs"]) if answer else "ok"), [], None, {}
+
+    monkeypatch.setattr("wfpy.runner._invoke_agent", fake_invoke)
+    return seen
+
+
+def test_the_runs_options_reach_agents_at_every_nesting_level(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`run()` sets the options on the top plan only. An agent inside a nested
+    workflow used to be invoked with none of them: not the connector, not the
+    stuck window, not the path its workspace connectors are found from."""
+    seen = _answering_agents(monkeypatch)
+
+    @agent(prompt="Answer.")
+    class Ask:
+        class Ports:
+            In = Port[str](direction="in")
+            Out = Port[str](direction="out")
+
+    @workflow(inputs={"In": str}, outputs={"Out": str})
+    def grandchild():
+        deep = Ask()
+        connect("In", deep.In)
+        connect(deep.Out, "Out")
+
+    @workflow(inputs={"In": str}, outputs={"Out": str})
+    def child():
+        mid = Ask()
+        g = grandchild()
+        connect("In", mid.In)
+        connect(mid.Out, g.In)
+        connect(g.Out, "Out")
+
+    @workflow(inputs={"In": str}, outputs={"Out": str})
+    def top():
+        first = Ask()
+        c = child()
+        connect("In", first.In)
+        connect(first.Out, c.In)
+        connect(c.Out, "Out")
+
+    run(
+        top,
+        inputs={"In": "x"},
+        out_dir=tmp_path / "out",
+        acp_connector="claude",
+        acp_stuck_timeout_ms=1_800_000,
+        agent_tool_policy="deny",
+        verbose=False,
+    )
+
+    assert set(seen) == {"first", "mid", "deep"}
+    for name in ("first", "mid", "deep"):
+        assert seen[name]["acp_connector"] == "claude", name
+        assert seen[name]["acp_stuck_timeout_ms"] == 1_800_000, name
+        assert seen[name]["agent_tool_policy"] == "deny", name
+        assert seen[name]["source_path"] == str(Path(__file__).resolve()), name
+
+
+def test_agents_of_two_instances_of_a_workflow_keep_their_files_apart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The one option a nested workflow does not receive is the directory a
+    top-level agent writes to: both instances hold an agent named `w`, and in
+    one directory the second would write over the first one's file."""
+    _answering_agents(monkeypatch, answer=lambda inputs: f"note for {inputs['In']}")
+
+    @agent(prompt="Write it down.")
+    class Note:
+        class Ports:
+            In = Port[str](direction="in")
+            Out = Port[File](direction="out", ext=".md")
+
+    @workflow(inputs={"In": str}, outputs={"Out": File(ext=".md")})
+    def notes():
+        w = Note()
+        connect("In", w.In)
+        connect(w.Out, "Out")
+
+    @workflow(
+        inputs={"A": str, "B": str},
+        outputs={"OutA": File(ext=".md"), "OutB": File(ext=".md")},
+    )
+    def top():
+        a = notes()
+        b = notes()
+        connect("A", a.In)
+        connect("B", b.In)
+        connect(a.Out, "OutA")
+        connect(b.Out, "OutB")
+
+    outputs = run(top, inputs={"A": "a", "B": "b"}, out_dir=tmp_path / "out", verbose=False)
+
+    assert [Path(p).read_text() for p in outputs["OutA"]] == ["note for a"]
+    assert [Path(p).read_text() for p in outputs["OutB"]] == ["note for b"]
 
 
 def test_sibling_workflow_outputs_keep_their_own_files(tmp_path: Path) -> None:
