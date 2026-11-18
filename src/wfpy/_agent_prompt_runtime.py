@@ -52,26 +52,58 @@ skills folder of a Codex project configuration (`.codex/`). OpenCode reads
 """
 
 
+def _absolute_dir_from_env(name: str) -> Path | None:
+    """The directory an environment variable names, if it names an absolute one.
+
+    A relative value is ignored, as the XDG Base Directory specification asks
+    of `XDG_CONFIG_HOME`: resolving it would make the folder depend on the
+    directory a run happens to start in.
+    """
+
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return None
+    path = Path(raw).expanduser()
+    return path if path.is_absolute() else None
+
+
 def _other_tool_user_skill_dirs() -> list[Path]:
     """Where other agent tools keep a user's skills, in the order searched.
 
     `~/.agents/skills` (the shared folder), Codex's `$CODEX_HOME/skills`
     (`~/.codex/skills` when `CODEX_HOME` is unset), then OpenCode's
     `$XDG_CONFIG_HOME/opencode/skills` and `.../skill` (`~/.config` when
-    `XDG_CONFIG_HOME` is unset).
+    `XDG_CONFIG_HOME` is unset). A relative `CODEX_HOME` or
+    `XDG_CONFIG_HOME` counts as unset.
     """
 
     home = Path.home()
-    codex_home = os.environ.get("CODEX_HOME", "").strip()
-    config_home = os.environ.get("XDG_CONFIG_HOME", "").strip()
-    codex = Path(codex_home).expanduser() if codex_home else home / ".codex"
-    config = Path(config_home).expanduser() if config_home else home / ".config"
+    codex = _absolute_dir_from_env("CODEX_HOME") or home / ".codex"
+    config = _absolute_dir_from_env("XDG_CONFIG_HOME") or home / ".config"
     return [
         home / ".agents" / "skills",
         codex / "skills",
         config / "opencode" / "skills",
         config / "opencode" / "skill",
     ]
+
+
+def _holds_repository(directory: Path) -> bool:
+    """Whether `directory` is the root of a repository: it holds `.git`.
+
+    `.git` may be a directory or, in a linked worktree or a submodule, a file.
+    A `.git` that cannot be examined counts as present, as in Codex: a nearer
+    marker that cannot be read must not widen the search to a parent
+    repository.
+    """
+
+    try:
+        os.stat(directory / ".git")
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    except OSError:
+        return True
+    return True
 
 
 def _runtime_root_for_skills(plan: Any) -> Path:
@@ -122,10 +154,18 @@ def _skill_search_roots(plan: Any) -> list[Path]:
     - `<cwd>/<folder>` for each of them
     - the user-level ones of `_other_tool_user_skill_dirs()`
 
-    The `<runtime-root>` entries walk up the tree as the `.wf` and `.claude`
-    ones do. Searching the other tools' folders last means a name found in
-    one of wfpy's own folders resolves exactly as it did before they were
-    searched; they only add names.
+    The `<runtime-root>` entries of wfpy's own folders walk up to the
+    filesystem root. Those of the other tools walk up only as far as the
+    tools themselves do: to the nearest directory holding `.git`, included,
+    and with no repository above, the runtime root alone. A folder above the
+    repository, say `/tmp/.agents/skills` for a workflow in `/tmp/job`, is
+    not read. The home directory is no project: a user-level folder is
+    searched in the user-level place wherever the walk or `<cwd>` reaches
+    it, and the home directory's other project folders not at all.
+
+    Searching the other tools' folders last means a name found in one of
+    wfpy's own folders resolves exactly as it did before they were searched;
+    they only add names.
 
     If `WF_SKILLS_ROOT` is set, each directory it names is treated as a
     highest-priority directory that directly contains skill folders. It may
@@ -136,23 +176,34 @@ def _skill_search_roots(plan: Any) -> list[Path]:
     seen: set[str] = set()
 
     def add_root(path: Path) -> None:
-        key = str(path.resolve())
+        resolved = path.resolve()
+        key = str(resolved)
         if key in seen:
             return
         seen.add(key)
-        roots.append(path.resolve())
+        roots.append(resolved)
 
     for explicit in _explicit_skills_roots():
         add_root(explicit)
 
+    # One walk up from the runtime root. wfpy's own folders are added at
+    # every level, as they always were; the levels where other tools' folders
+    # count are collected until the repository root.
     runtime_root = _runtime_root_for_skills(plan)
+    tool_levels: list[Path] = []
+    in_repository = False
     current = runtime_root
     while True:
         add_root(current / ".wf" / "skills")
         add_root(current / ".claude" / "skills")
+        if not in_repository:
+            tool_levels.append(current)
+            in_repository = _holds_repository(current)
         if current.parent == current:
             break
         current = current.parent
+    if not in_repository:
+        tool_levels = tool_levels[:1]
 
     cwd_root = Path.cwd().resolve()
     add_root(cwd_root / ".wf" / "skills")
@@ -163,16 +214,15 @@ def _skill_search_roots(plan: Any) -> list[Path]:
 
     # Other agent tools' folders come after every root above, so that a
     # skill already found keeps resolving to the same directory.
-    current = runtime_root
-    while True:
+    user_dirs = [user_dir.resolve() for user_dir in _other_tool_user_skill_dirs()]
+    for level in [*tool_levels, cwd_root]:
+        if level == home_root:
+            continue
         for parts in OTHER_TOOL_PROJECT_SKILL_DIRS:
-            add_root(current.joinpath(*parts))
-        if current.parent == current:
-            break
-        current = current.parent
-    for parts in OTHER_TOOL_PROJECT_SKILL_DIRS:
-        add_root(cwd_root.joinpath(*parts))
-    for user_dir in _other_tool_user_skill_dirs():
+            candidate = level.joinpath(*parts).resolve()
+            if candidate not in user_dirs:
+                add_root(candidate)
+    for user_dir in user_dirs:
         add_root(user_dir)
 
     return roots
@@ -274,14 +324,10 @@ def _read_skill_md(skill_name: str, plan: Any) -> tuple[str, Path]:
 
     skill_md = _resolve_skill_md_path(skill_name, plan)
     if not skill_md.exists() or not skill_md.is_file():
-        raise FileNotFoundError(
-            f"Skill '{skill_name}' not found at {skill_md}. "
-            "Expected in one of: <runtime>/.wf/skills, <runtime>/.claude/skills, "
-            "<cwd>/.wf/skills, <cwd>/.claude/skills, ~/.claude/skills, "
-            "then .agents/skills, .codex/skills, .opencode/skills, .opencode/skill "
-            "(at <runtime>, above it, in <cwd>), ~/.agents/skills, $CODEX_HOME/skills, "
-            "$XDG_CONFIG_HOME/opencode/skills"
-        )
+        # `_resolve_skill_md_path()` returned the first folder holding a
+        # `SKILL.md` and raised, listing the roots searched, if none did. So
+        # this `SKILL.md` exists and is no file, a directory for instance.
+        raise FileNotFoundError(f"Skill '{skill_name}': {skill_md} is not a file.")
     size = skill_md.stat().st_size
     if size > SKILL_MD_MAX_BYTES:
         raise ValueError(

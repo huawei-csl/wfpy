@@ -323,12 +323,20 @@ for Codex or OpenCode can be named too. They come after every folder above,
 so a name found above never resolves here:
 
 - `.agents/skills`, `.codex/skills`, `.opencode/skills` and
-  `.opencode/skill`, at the runtime root and each directory above it, then
-  in `<cwd>`
+  `.opencode/skill`, at the runtime root and each directory above it up to
+  the repository root (the nearest directory holding `.git`), then in
+  `<cwd>`
 - `~/.agents/skills`
 - `$CODEX_HOME/skills` (`~/.codex/skills` when `CODEX_HOME` is unset)
 - `$XDG_CONFIG_HOME/opencode/skills` and `.../skill` (`~/.config` when
   `XDG_CONFIG_HOME` is unset)
+
+The walk stops at the repository root as Codex and OpenCode stop there;
+outside a repository only the runtime root is searched, so a folder that
+another user can write above a project, such as `/tmp/.agents/skills`, is
+not read for it. The home directory is no project: its folders are searched
+only in their user-level place, after `<cwd>`. A relative `CODEX_HOME` or
+`XDG_CONFIG_HOME` counts as unset.
 
 A skill is found by its folder's name, `<folder>/<skill-name>/SKILL.md`, as
 in wfpy's own folders; a skill nested deeper in a collection is reached by

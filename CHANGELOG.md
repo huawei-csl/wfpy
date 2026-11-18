@@ -24,12 +24,18 @@ All notable changes to wfpy are documented here. The format follows
   reported as not found unless `WF_SKILLS_ROOT` named its folder. wfpy now
   also searches `.agents/skills` (the folder the Agent Skills convention
   shares between tools), `.codex/skills`, `.opencode/skills` and
-  `.opencode/skill`, beside the workflow, above it and in the working
-  directory, then `~/.agents/skills`, `$CODEX_HOME/skills` (`~/.codex`
-  by default) and `$XDG_CONFIG_HOME/opencode/skills` and `skill`
-  (`~/.config` by default). They are searched after every folder searched
-  before, `~/.claude/skills` included, so a name that resolved before
-  resolves to the same folder: these folders only add names. The sidecar's
+  `.opencode/skill`, beside the workflow and above it up to the repository
+  root, and in the working directory, then `~/.agents/skills`,
+  `$CODEX_HOME/skills` (`~/.codex` by default) and
+  `$XDG_CONFIG_HOME/opencode/skills` and `skill` (`~/.config` by default).
+  They are searched after every folder searched before, `~/.claude/skills`
+  included, so a name that resolved before resolves to the same folder:
+  these folders only add names. The walk up stops at the nearest directory
+  holding `.git`, and outside a repository at the runtime root itself,
+  as Codex and OpenCode stop: a folder above the project, which another
+  user may be able to write (`/tmp/.agents/skills`), is not read. The home
+  directory's folders are searched as the user's, after the working
+  directory's, however the walk reaches them. The sidecar's
   `getCapabilities` says so (`features.agentSkillFolders`, and
   `features.skillRootsList` for the list-valued `WF_SKILLS_ROOT` and the
   symlinked skill), so an IDE offers the skills a run finds.
