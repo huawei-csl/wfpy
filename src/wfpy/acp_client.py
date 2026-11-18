@@ -230,8 +230,45 @@ class SimpleClient:
         return {}
         
     async def ext_notification(self, method, params):
-        """Called for extension notifications."""
-        logger.warning(f"Extension notification not implemented: {method}")
+        """Called for extension notifications. None is acted on, and that is
+        no fault: a notification has no reply, and a client ignores the ones
+        it does not know (`claude-agent-acp` sends `auth/status_update` on
+        every turn)."""
+        logger.debug(f"Extension notification ignored: {method}")
+
+
+_METHOD_NOT_FOUND = -32601
+
+
+def _drop_unrouted_notifications(connection: Any) -> None:
+    """Drop, in silence, a notification the SDK has no route for.
+
+    A notification has no reply, so a client that does not know one ignores
+    it, and connectors count on that: `claude-agent-acp` pushes
+    `auth/status_update` on every turn. SDK 1.0 has no route for that method
+    and logs each one as an unhandled error with its traceback, three of them
+    on a run that succeeds.
+
+    The SDK offers no hook for this, so the handler of its connection is
+    wrapped. Should its layout change, nothing is wrapped and the tracebacks
+    come back; a run is unaffected either way. A request the SDK has no route
+    for still fails: it has a reply to carry the error.
+    """
+    conn = getattr(connection, "_conn", None)
+    handler = getattr(conn, "_handler", None)
+    if handler is None:
+        return
+
+    async def handle(method, params, is_notification):
+        try:
+            return await handler(method, params, is_notification)
+        except acp.RequestError as exc:
+            if is_notification and getattr(exc, "code", None) == _METHOD_NOT_FOUND:
+                logger.debug(f"Dropped a notification the SDK has no route for: {method}")
+                return None
+            raise
+
+    conn._handler = handle
 
 
 class ACPClient:
@@ -282,7 +319,8 @@ class ACPClient:
         
         # Enter the context manager
         self.connection, self.process = await self._context_manager.__aenter__()
-        
+        _drop_unrouted_notifications(self.connection)
+
         logger.info("ACP subprocess started, initializing connection...")
         
         # Initialize the connection

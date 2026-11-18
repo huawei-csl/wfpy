@@ -250,6 +250,84 @@ class TestThePrompt:
         ]
 
 
+class TestNotificationsTheSdkDoesNotKnow:
+    """A notification has no reply, so one the SDK has no route for is dropped
+    in silence. `claude-agent-acp` pushes `auth/status_update` on every turn,
+    and the SDK logged each as an unhandled error, traceback and all."""
+
+    @staticmethod
+    def _wrapped(handler):
+        from wfpy.acp_client import _drop_unrouted_notifications
+
+        connection = types.SimpleNamespace(_conn=types.SimpleNamespace(_handler=handler))
+        _drop_unrouted_notifications(connection)
+        return connection._conn._handler
+
+    @staticmethod
+    async def _router(method, params, is_notification):
+        import acp
+
+        if method == "session/update":
+            return "routed"
+        if method == "session/broken":
+            raise ValueError("the client's own handler failed")
+        raise acp.RequestError.method_not_found(method)
+
+    def test_an_unrouted_notification_is_dropped(self):
+        handle = self._wrapped(self._router)
+        assert asyncio.run(handle("auth/status_update", {}, True)) is None
+
+    def test_a_routed_one_is_handled_as_before(self):
+        handle = self._wrapped(self._router)
+        assert asyncio.run(handle("session/update", {}, True)) == "routed"
+
+    def test_an_unrouted_request_still_fails(self):
+        """It has a reply, and the error belongs in it."""
+        import acp
+
+        handle = self._wrapped(self._router)
+        with pytest.raises(acp.RequestError, match="Method not found"):
+            asyncio.run(handle("auth/status", {}, False))
+
+    def test_another_failure_in_a_notification_is_not_hidden(self):
+        handle = self._wrapped(self._router)
+        with pytest.raises(ValueError, match="own handler failed"):
+            asyncio.run(handle("session/broken", {}, True))
+
+    def test_a_connection_of_another_shape_is_left_alone(self):
+        from wfpy.acp_client import _drop_unrouted_notifications
+
+        _drop_unrouted_notifications(types.SimpleNamespace())
+
+    def test_the_sdks_own_connection_is_the_one_wrapped(self):
+        """Against the SDK itself: its router has no route for the method, and
+        its connection keeps the handler where the wrapper looks for it. When
+        an SDK release moves either, this is the test that says so."""
+        import acp
+        from acp.client.connection import ClientSideConnection
+
+        from wfpy.acp_client import SimpleClient, _drop_unrouted_notifications
+
+        class Transport:
+            async def send(self, message):
+                pass
+
+            async def receive(self):
+                return None
+
+            async def close(self):
+                pass
+
+        async def drive():
+            connection = ClientSideConnection(SimpleClient(), Transport(), listening=False)
+            with pytest.raises(acp.RequestError, match="Method not found"):
+                await connection._conn._handler("auth/status_update", {}, True)
+            _drop_unrouted_notifications(connection)
+            assert await connection._conn._handler("auth/status_update", {}, True) is None
+
+        asyncio.run(drive())
+
+
 class TestWhenAcpFails:
     """Only OpenCode has a CLI to fall back to; another agent's failure is the firing's error."""
 
