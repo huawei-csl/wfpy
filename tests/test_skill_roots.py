@@ -781,6 +781,27 @@ class TestGitDecidesTheRepository:
         assert _resolve_skill_dir("wfroot-dubious", self.flow(project / "flows")) is None
         assert (bin_dir / "ran").exists()
 
+    def test_git_itself_refuses_another_users_repository_unless_it_is_a_safe_directory(
+        self, tmp_path, monkeypatch
+    ):
+        """With git's own check: `GIT_TEST_ASSUME_DIFFERENT_OWNER` makes git
+        take every repository for another user's, as it would one planted
+        by someone else; `safe.directory` is how a user says it is theirs."""
+        project = tmp_path / "project"
+        git_init(project)
+        in_project = make_skill(project / ".agents" / "skills", "wfroot-not-yours")
+        monkeypatch.setenv("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1")
+        flows = (project / "flows").resolve()
+        flows.mkdir()
+        if runtime._repository_root(flows) is not None:
+            pytest.skip("this git has no GIT_TEST_ASSUME_DIFFERENT_OWNER")
+
+        assert _resolve_skill_dir("wfroot-not-yours", self.flow(project / "flows")) is None
+        monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+        monkeypatch.setenv("GIT_CONFIG_KEY_0", "safe.directory")
+        monkeypatch.setenv("GIT_CONFIG_VALUE_0", str(project.resolve()))
+        assert _resolve_skill_dir("wfroot-not-yours", self.flow(project / "flows")) == in_project
+
     def test_without_git_only_the_workflows_directory_is_searched(self, tmp_path, monkeypatch):
         project = tmp_path / "project"
         git_init(project)
