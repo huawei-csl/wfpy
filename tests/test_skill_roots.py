@@ -20,7 +20,9 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import time
 import types
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -324,6 +326,48 @@ class TestOtherToolsSkillFolders:
         assert _resolve_skill_dir("wfroot-default-codex-unread", plan) is None
         assert (root.path, root.scope) == (relative.parent.resolve(), "user")
 
+    def test_codex_bundled_skills_are_searched_after_codex_home(
+        self, tmp_path, isolated_home, monkeypatch
+    ):
+        """Codex installs the skills it ships in `$CODEX_HOME/skills/.system`
+        and reads that folder as a root of its own, ranked after the user's
+        skills; `.system` is no skill in `$CODEX_HOME/skills`."""
+        codex_home = tmp_path / "codex-home"
+        bundled = make_skill(codex_home / "skills" / ".system", "wfroot-bundled")
+        users = make_skill(codex_home / "skills", "wfroot-bundled-shadowed")
+        make_skill(codex_home / "skills" / ".system", "wfroot-bundled-shadowed")
+        monkeypatch.setenv("CODEX_HOME", str(codex_home))
+        plan = self.workflow(tmp_path / "project")
+        roots = _skill_lookup_roots(plan)
+        folders = [root.folder for root in roots]
+        system = roots[folders.index("$CODEX_HOME/skills/.system")]
+
+        assert _resolve_skill_dir("wfroot-bundled", plan) == bundled
+        assert _resolve_skill_dir("wfroot-bundled-shadowed", plan) == users
+        assert (
+            folders.index("$CODEX_HOME/skills/.system") == folders.index("$CODEX_HOME/skills") + 1
+        )
+        assert (system.path, system.scope) == (bundled.parent.resolve(), "user")
+
+    def test_a_codex_home_that_is_the_projects_codex_folder_is_the_users(
+        self, tmp_path, isolated_home, monkeypatch
+    ):
+        """Codex does not read a project's `.codex` that is `CODEX_HOME` as the
+        project's, only as `CODEX_HOME`, and ranks a user's skill after a
+        repository's. `CODEX_HOME=.codex`, started in the project, names that
+        folder: its skills come after the project's other folders."""
+        project = tmp_path / "project"
+        plan = self.workflow(project)
+        in_codex_home = make_skill(project / ".codex" / "skills", "wfroot-project-codex-home")
+        preferred = make_skill(project / ".opencode" / "skills", "wfroot-project-codex-home")
+        monkeypatch.chdir(project)
+        monkeypatch.setenv("CODEX_HOME", ".codex")
+        roots = _skill_lookup_roots(plan)
+        [root] = [root for root in roots if root.path == in_codex_home.parent.resolve()]
+
+        assert (root.folder, root.scope) == ("$CODEX_HOME/skills", "user")
+        assert _resolve_skill_dir("wfroot-project-codex-home", plan) == preferred
+
     def test_the_roots_searched_before_keep_their_order_and_come_first(
         self, tmp_path, isolated_home
     ):
@@ -354,6 +398,7 @@ class TestOtherToolsSkillFolders:
         ] + [
             home / ".agents" / "skills",
             home / ".codex" / "skills",
+            home / ".codex" / "skills" / ".system",
             home / ".config" / "opencode" / "skills",
             home / ".config" / "opencode" / "skill",
         ]
@@ -573,6 +618,7 @@ class TestHomeKeptInGit:
             *(cwd.joinpath(*parts) for parts in TOOLS),
             home / ".agents" / "skills",
             codex_home / "skills",
+            codex_home / "skills" / ".system",
             home / ".config" / "opencode" / "skills",
             home / ".config" / "opencode" / "skill",
         ]
@@ -871,6 +917,28 @@ class TestTheRootsAreWorkedOutOncePerPlan:
         other = make_plan(source_path=str(tmp_path / "flows" / "flow.py"))
         _resolve_skill_dir("wfroot-once", other)
         assert len(calls) == 2
+
+    def test_workers_firing_at_once_run_git_once(self, tmp_path, monkeypatch):
+        """Parallel workers fire on a thread pool and share the plan: the
+        first lookup runs git, and the others wait for its answer."""
+        calls: list[Path] = []
+
+        def slow(start: Path) -> Path | None:
+            calls.append(start)
+            time.sleep(0.2)
+            return None
+
+        monkeypatch.setattr(runtime, "_repository_root", slow)
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "flows").mkdir()
+        (tmp_path / "flows" / "flow.py").write_text("", encoding="utf-8")
+        plan = make_plan(source_path=str(tmp_path / "flows" / "flow.py"))
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            answers = list(pool.map(lambda _: _skill_search_roots(plan), range(8)))
+
+        assert len(calls) == 1
+        assert all(answer == answers[0] for answer in answers)
 
     def test_a_plan_asked_from_elsewhere_or_with_other_variables_gets_its_own(
         self, tmp_path, monkeypatch

@@ -18,8 +18,9 @@ from pathlib import Path
 
 import pytest
 
+import wfpy._agent_prompt_runtime as runtime
+import wfpy._agent_skill_lookup as lookup
 from wfpy._agent_prompt_runtime import (
-    AGENT_PRESET_MAX_BYTES,
     _claude_agent_search_roots,
     _load_claude_agent_profile,
     _read_skill_md,
@@ -77,6 +78,15 @@ def workflow(project: Path) -> Path:
 
 def by_name(entries: list[dict]) -> dict[str, dict]:
     return {entry["name"]: entry for entry in entries}
+
+
+def link_or_skip(link: Path, target: Path) -> None:
+    """Make `link` a symlink to `target`, or skip where links cannot be made."""
+
+    try:
+        link.symlink_to(target, target_is_directory=target.is_dir())
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks are not available here")
 
 
 class TestTheAnswerIsTheRuntimes:
@@ -156,6 +166,101 @@ class TestTheAnswerIsTheRuntimes:
             (tmp_path / "project").resolve()
         )
         assert agent_skill_lookup(str(loose / "flow.py"))["repository"] is None
+
+    def test_relative_paths_are_read_from_the_working_directory(self, tmp_path, monkeypatch):
+        """A relative file, `WF_SKILLS_ROOT` and `WF_CLAUDE_AGENTS_ROOT` are
+        read from the directory the run starts in, as a run started there
+        reads them, not from this process's."""
+        project = tmp_path / "project"
+        source = workflow(project)
+        skill(project / "own-skills", "named-relatively")
+        (project / "own-agents").mkdir()
+        (project / "own-agents" / "relative.md").write_text("Relative.\n", encoding="utf-8")
+        monkeypatch.setenv("WF_SKILLS_ROOT", "own-skills")
+        monkeypatch.setenv("WF_CLAUDE_AGENTS_ROOT", "own-agents")
+
+        answer = agent_skill_lookup(os.path.join("flows", "flow.py"), str(project))
+
+        assert answer["workflow"] == str(source.resolve())
+        assert answer["runtimeRoot"] == str((project / "own-skills").resolve())
+        assert answer["repository"] == str(project.resolve())
+        assert answer["roots"][0]["path"] == str((project / "own-skills").resolve())
+        assert answer["presetRoots"][0]["path"] == str((project / "own-agents").resolve())
+        assert "named-relatively" in by_name(answer["skills"])
+        assert "relative" in by_name(answer["presets"])
+        monkeypatch.chdir(project)
+        run = types.SimpleNamespace(source_path=os.path.join("flows", "flow.py"), work_dir=None)
+        assert [Path(root["path"]) for root in answer["roots"]] == _skill_search_roots(run)
+
+    def test_each_call_looks_again(self, tmp_path):
+        """A run keeps its lookup for its plan; `wfpy skills` answers what is
+        there now. A repository made and a folder added since the last call
+        are in the next answer."""
+        project = tmp_path / "project"
+        (project / "flows").mkdir(parents=True)
+        source = project / "flows" / "flow.py"
+        source.write_text("", encoding="utf-8")
+        skill(project / ".agents" / "skills", "above-the-workflow")
+
+        first = agent_skill_lookup(str(source))
+        git_init(project)
+        skill(project / "flows" / ".agents" / "skills", "beside-the-workflow")
+        second = agent_skill_lookup(str(source))
+
+        assert first["repository"] is None
+        assert "above-the-workflow" not in by_name(first["skills"])
+        assert second["repository"] == str(project.resolve())
+        assert {"above-the-workflow", "beside-the-workflow"} <= set(by_name(second["skills"]))
+
+    def test_git_is_asked_once(self, tmp_path, monkeypatch):
+        """The repository in the answer is the one the roots were built with."""
+        calls: list[Path] = []
+        real = runtime._repository_root
+
+        def counted(start: Path) -> Path | None:
+            calls.append(start)
+            return real(start)
+
+        monkeypatch.setattr(runtime, "_repository_root", counted)
+        monkeypatch.setattr(lookup, "_repository_root", counted, raising=False)
+        source = workflow(tmp_path / "project")
+
+        answer = agent_skill_lookup(str(source))
+
+        assert len(calls) == 1
+        assert answer["repository"] == str((tmp_path / "project").resolve())
+
+
+class TestHiddenEntries:
+    def test_a_hidden_entry_is_no_skill_and_no_preset(self, tmp_path, monkeypatch):
+        """A skills folder kept in git has a `.git`, Codex keeps the skills it
+        ships in `$CODEX_HOME/skills/.system`: a hidden entry is not offered,
+        as Codex does not take one either. `.system` is a folder of its own,
+        searched after `$CODEX_HOME/skills`."""
+        project = tmp_path / "project"
+        source = workflow(project)
+        codex_home = tmp_path / "codex-home"
+        skill(codex_home / "skills", "codex-users")
+        skill(codex_home / "skills" / ".system", "codex-bundled")
+        (codex_home / "skills" / ".system" / ".codex-system-skills.marker").write_text("v1")
+        root = project / ".agents" / "skills"
+        skill(root, "shown")
+        skill(root, ".hidden-with-skill-md")
+        (root / ".git").mkdir()
+        agents = project / ".claude" / "agents"
+        agents.mkdir(parents=True)
+        (agents / "shown.md").write_text("Shown.\n", encoding="utf-8")
+        (agents / ".hidden.md").write_text("Hidden.\n", encoding="utf-8")
+        monkeypatch.setenv("CODEX_HOME", str(codex_home))
+        plan = types.SimpleNamespace(source_path=str(source), work_dir=None)
+
+        answer = agent_skill_lookup(str(source))
+        skills = by_name(answer["skills"])
+
+        assert set(skills) == {"shown", "codex-users", "codex-bundled"}
+        assert skills["codex-bundled"]["folder"] == "$CODEX_HOME/skills/.system"
+        assert Path(skills["codex-bundled"]["dir"]) == _resolve_skill_dir("codex-bundled", plan)
+        assert [entry["name"] for entry in answer["presets"]] == ["shown"]
 
 
 class TestWhatTheRunReads:
@@ -284,19 +389,53 @@ class TestPresets:
         assert profile["meta"]["name"] == "careful, thorough"
         assert profile["meta"]["tools"] == ["Read", "Grep"]
 
-    def test_a_preset_over_the_size_limit_is_its_problem(self, tmp_path):
+    def test_a_large_preset_loads_as_it_always_has(self, tmp_path):
+        """A run reads a preset whole, whatever its size. The list reads one
+        within `PRESET_LIST_MAX_BYTES` for its description; a larger one is
+        listed, found, with a warning instead."""
         project = tmp_path / "project"
         source = workflow(project)
         agents = project / ".claude" / "agents"
         agents.mkdir(parents=True)
-        (agents / "huge.md").write_text("x" * (AGENT_PRESET_MAX_BYTES + 1), encoding="utf-8")
+        (agents / "huge.md").write_text(
+            "---\ndescription: large\n---\n" + "x" * lookup.PRESET_LIST_MAX_BYTES,
+            encoding="utf-8",
+        )
         plan = types.SimpleNamespace(source_path=str(source), work_dir=None)
 
         [huge] = agent_skill_lookup(str(source))["presets"]
 
-        with pytest.raises(ValueError, match="too large") as raised:
-            _load_claude_agent_profile("huge", plan)
-        assert huge["problem"] == str(raised.value)
+        assert _load_claude_agent_profile("huge", plan)["description"] == "large"
+        assert huge["path"] == str((agents / "huge.md").resolve())
+        assert huge["problem"] is None
+        assert huge["description"] is None
+        assert "a run reads it whole" in huge["warnings"][0]
+
+    def test_a_symlinked_preset_is_found(self, tmp_path):
+        """As a symlinked skill is: a preset installed as a link, a file or a
+        folder holding `AGENT.md`, resolves where the link points."""
+        project = tmp_path / "project"
+        source = workflow(project)
+        shared = tmp_path / "shared-agents"
+        (shared / "nested").mkdir(parents=True)
+        (shared / "linked.md").write_text("Linked.\n", encoding="utf-8")
+        (shared / "nested" / "AGENT.md").write_text("Nested and linked.\n", encoding="utf-8")
+        agents = project / ".claude" / "agents"
+        agents.mkdir(parents=True)
+        link_or_skip(agents / "linked.md", shared / "linked.md")
+        link_or_skip(agents / "nested-linked", shared / "nested")
+        plan = types.SimpleNamespace(source_path=str(source), work_dir=None)
+
+        presets = by_name(agent_skill_lookup(str(source))["presets"])
+
+        assert _resolve_claude_agent_path("linked", plan) == (shared / "linked.md").resolve()
+        assert (
+            _resolve_claude_agent_path("nested-linked", plan)
+            == (shared / "nested" / "AGENT.md").resolve()
+        )
+        assert _load_claude_agent_profile("linked", plan)["body"] == "Linked."
+        assert presets["linked"]["description"] == "Linked."
+        assert presets["nested-linked"]["description"] == "Nested and linked."
 
 
 class TestTheCommand:

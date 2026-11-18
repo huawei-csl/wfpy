@@ -23,25 +23,28 @@ from typing import Any
 from wfpy._agent_prompt_runtime import (
     CLAUDE_AGENT_IGNORED_FIELDS,
     LookupRoot,
-    _claude_agent_lookup_roots,
-    _claude_agent_profile_at,
+    _build_claude_agent_lookup_roots,
+    _build_skill_lookup_roots,
+    _claude_agent_profile_from,
     _find_claude_agent,
     _find_skill,
     _parse_skill_frontmatter,
     _read_skill_md_file,
-    _repository_root,
     _runtime_root_for_skills,
     _skill_hook_name,
     _skill_hook_script_in,
-    _skill_lookup_roots,
     _validate_skill_name,
-    _workflow_dir,
 )
 
 __all__ = ["agent_skill_lookup"]
 
 DESCRIPTION_MAX_CHARS = 180
 """A skill's description is cut to this many characters for a picker."""
+
+PRESET_LIST_MAX_BYTES = 256_000
+"""The largest preset this list reads for its description and the skills it
+preloads. A run reads a preset whole, whatever its size; a larger one is
+listed without them."""
 
 BLOCK_SCALAR = re.compile(r"[|>][+-]?[0-9]?|[|>][0-9][+-]")
 """A YAML block scalar's indicator: `|`, `>-`, `|2+`, ..."""
@@ -50,8 +53,12 @@ BLOCK_SCALAR = re.compile(r"[|>][+-]?[0-9]?|[|>][0-9][+-]")
 def agent_skill_lookup(file_path: str, cwd: str | None = None) -> dict[str, Any]:
     """The skills and agent presets a run of the workflow at `file_path`
     finds, started in `cwd` (this process's working directory when omitted),
-    with the environment of this process. The file is not loaded: one that
-    does not parse yet names its skills from the same folders.
+    with the environment of this process. A relative `file_path`, like a
+    relative `WF_SKILLS_ROOT`, is read from `cwd`. The file is not loaded:
+    one that does not parse yet names its skills from the same folders.
+
+    A run keeps its lookup roots for its plan (`_once_per_plan`); this
+    builds them on each call, so it answers what is there now.
 
     `roots` are the folders searched, in order, whether they exist or not.
     `repository` is the git repository that bounds other tools' folders, or
@@ -63,9 +70,10 @@ def agent_skill_lookup(file_path: str, cwd: str | None = None) -> dict[str, Any]
     `presetRoots`.
     """
 
-    plan = types.SimpleNamespace(source_path=file_path, work_dir=None)
     run_cwd = Path(cwd).resolve() if cwd else Path.cwd().resolve()
-    roots = _skill_lookup_roots(plan, run_cwd)
+    workflow = (run_cwd / file_path).resolve()
+    plan = types.SimpleNamespace(source_path=str(workflow), work_dir=None)
+    roots, repository = _build_skill_lookup_roots(plan, run_cwd)
     # A root that is no directory holds no skill: leaving it out changes no
     # answer of `_find_skill` and spares it most of the walk to `/`.
     root_paths = [root.path for root in roots if root.path.is_dir()]
@@ -85,7 +93,7 @@ def agent_skill_lookup(file_path: str, cwd: str | None = None) -> dict[str, Any]
             continue
         skills.append(_skill(name, by_path[found[0]], found[1]))
 
-    preset_roots = _claude_agent_lookup_roots(plan, run_cwd)
+    preset_roots = _build_claude_agent_lookup_roots(plan, run_cwd)
     preset_paths = [root.path for root in preset_roots if root.path.is_dir()]
     preset_by_path = {root.path: root for root in preset_roots}
     presets: list[dict[str, Any]] = []
@@ -100,9 +108,8 @@ def agent_skill_lookup(file_path: str, cwd: str | None = None) -> dict[str, Any]
                 _preset(name, preset_by_path[found_preset[0]], found_preset[1], root_paths)
             )
 
-    repository = _repository_root(_workflow_dir(plan, run_cwd))
     return {
-        "workflow": str(Path(file_path).resolve()),
+        "workflow": str(workflow),
         "cwd": str(run_cwd),
         "runtimeRoot": str(_runtime_root_for_skills(plan, run_cwd)),
         "repository": str(repository) if repository is not None else None,
@@ -123,7 +130,12 @@ def _root(root: LookupRoot, key: str = "path") -> dict[str, str]:
 def _names_in(roots: list[Path], suffix: str = "") -> list[str]:
     """Every name in the roots, each once, in the order first met; with
     `suffix` taken off an entry that has it (a preset is `<name>.md`, or a
-    directory `<name>` for `<name>/AGENT.md`)."""
+    directory `<name>` for `<name>/AGENT.md`).
+
+    A hidden entry is no name to offer: the `.git` of a skills folder kept
+    in git, Codex's `.system` (a root of its own). Codex does not take a
+    hidden folder as a skill either.
+    """
 
     names: dict[str, None] = {}
     for root in roots:
@@ -132,6 +144,8 @@ def _names_in(roots: list[Path], suffix: str = "") -> list[str]:
         except OSError:
             continue
         for entry in entries:
+            if entry.startswith("."):
+                continue
             names.setdefault(
                 entry[: -len(suffix)] if suffix and entry.endswith(suffix) else entry, None
             )
@@ -264,8 +278,15 @@ def _preset(name: str, root: LookupRoot, path: Path, skill_roots: list[Path]) ->
         "warnings": [],
     }
     try:
-        profile = _claude_agent_profile_at(name, path)
-    except (OSError, ValueError) as exc:
+        size = path.stat().st_size
+        if size > PRESET_LIST_MAX_BYTES:
+            entry["warnings"].append(
+                f"{size} bytes, more than this list reads ({PRESET_LIST_MAX_BYTES}): its"
+                " description and skills are not shown; a run reads it whole"
+            )
+            return entry
+        profile = _claude_agent_profile_from(name, path, path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:  # UnicodeDecodeError is a ValueError
         entry["problem"] = str(exc)
         return entry
     meta = profile["meta"]

@@ -28,8 +28,8 @@ All notable changes to wfpy are documented here. The format follows
   of its git repository, and in the working directory when it is in that
   repository, then `~/.agents/skills`, `$CODEX_HOME/skills` (`~/.codex` by
   default; a relative value read from the working directory, as Codex reads
-  it) and `$XDG_CONFIG_HOME/opencode/skills` and `skill` (`~/.config` by
-  default).
+  it), `$CODEX_HOME/skills/.system` (the skills Codex ships) and
+  `$XDG_CONFIG_HOME/opencode/skills` and `skill` (`~/.config` by default).
   They are searched after every folder searched before, `~/.claude/skills`
   included, so a name that resolved before resolves to the same folder:
   these folders only add names. The walk up starts at the workflow's
@@ -41,7 +41,8 @@ All notable changes to wfpy are documented here. The format follows
   project (`/tmp/.agents/skills`) is not read, whoever planted a `/tmp/.git`.
   A user-level folder is searched in its user-level place however the walk
   reaches it; a home directory kept in git has its other folders
-  (`~/.opencode/skills`) searched as a project's.
+  (`~/.opencode/skills`) searched as a project's. A `CODEX_HOME` that names
+  a project's `.codex` is the user's too, as Codex reads it.
 - `wfpy skills <workflow.py> [--json]` lists the skills and agent presets a
   run of the workflow started in the current directory finds: the folders
   searched, in order, the folder each name resolves to, what reading its
@@ -49,12 +50,15 @@ All notable changes to wfpy are documented here. The format follows
   presets with the skills they preload. It runs the runtime's own lookup
   and does not load the workflow, so an IDE that runs it with the command
   it runs workflows with offers the skills a run finds, without copying the
-  rules or asking another process.
+  rules or asking another process. A relative path is read from the
+  current directory, a hidden entry (`.git`, `.system`) is not listed, and
+  each call looks again. A preset over 256 kB is listed without its
+  description; a run reads it whole, as before.
 - The lookup roots are worked out once per plan, not on every skill read,
-  hook and preset lookup of every firing.
+  hook and preset lookup of every firing. Parallel workers wait for the
+  first to work them out rather than each run git.
 - An agent preset's `description` (and `name`) is read as text: one with a
-  comma was a list. A preset over 256 kB (the `SKILL.md` limit) is refused
-  as too large, as a `SKILL.md` is.
+  comma was a list.
 - The sidecar answers `pythonEnvironment` for a workflow file: the
   interpreter running it, the import roots `wfpy plan` loads the file with,
   and the folders its installed packages come from. An IDE configures its
@@ -90,6 +94,9 @@ All notable changes to wfpy are documented here. The format follows
   found. Containment is now checked on the path as written, which is where
   it was doing its work: `_validate_skill_name()` already refuses a name
   holding a path separator or `..`.
+- An agent preset installed as a symlink (`<name>.md`, or a `<name>` folder
+  holding `AGENT.md`) is found, as a symlinked skill is; the lookup
+  resolved it before checking containment and passed it over.
 - A run whose workflow holds a sub-workflow taking no input ends. The
   sub-workflow node had its inputs whenever it had none, so after its one
   firing the scheduler fired it again forever, each empty re-run counted as

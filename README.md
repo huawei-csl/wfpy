@@ -328,7 +328,8 @@ so a name found above never resolves here:
   that repository
 - `~/.agents/skills`
 - `$CODEX_HOME/skills` (`~/.codex/skills` when `CODEX_HOME` is unset; a
-  relative `CODEX_HOME` is read from `<cwd>`, as Codex reads it)
+  relative `CODEX_HOME` is read from `<cwd>`, as Codex reads it), then
+  `$CODEX_HOME/skills/.system`, where Codex installs the skills it ships
 - `$XDG_CONFIG_HOME/opencode/skills` and `.../skill` (`~/.config` when
   `XDG_CONFIG_HOME` is unset)
 
@@ -339,13 +340,16 @@ repository, as Codex and OpenCode stop there. git says where that is
 git refuses bounds nothing: a `.git` that is no repository, and a
 repository owned by a user git does not trust (add it to `safe.directory`,
 as for `git status`). Without a repository git accepts, or without git,
-only the workflow's directory is searched, and `<cwd>` only when it is the
-workflow's directory. So a folder above a project, such as
-`/tmp/.agents/skills`, is not read for a workflow in `/tmp/job`, nor for a
-run started in `/tmp`. A user-level folder the walk or `<cwd>` reaches, as
-in a home directory kept in git, is searched once, in its user-level place;
-the home directory's other folders (`~/.opencode/skills`) are a project's,
-as they are for OpenCode. A relative `XDG_CONFIG_HOME` counts as unset.
+only the workflow's directory is searched. So a folder above a project,
+such as `/tmp/.agents/skills`, is not read for a workflow in `/tmp/job`,
+nor for a run started in `/tmp`. A user-level folder the walk or `<cwd>`
+reaches, as in a home directory kept in git, is searched once, in its
+user-level place; the home directory's other folders (`~/.opencode/skills`)
+are a project's, as they are for OpenCode. The same holds for a
+`CODEX_HOME` that names a project's `.codex` (`CODEX_HOME=.codex`, started
+in the project): Codex reads that folder as `CODEX_HOME`, not as the
+project's, and ranks a user's skill after a repository's. A relative
+`XDG_CONFIG_HOME` counts as unset.
 wfpy's own folders above (`.wf/skills`, `.claude/skills`) are read as
 before, up to the filesystem root.
 
@@ -358,7 +362,11 @@ workflow started in the current directory finds, from the folder it takes,
 with what reading each fails with; `--json` prints the same as one JSON
 object. An editor that offers skill names runs it with the command it runs
 workflows with, from the directory it runs them in, rather than repeating
-these rules. The workflow is not loaded.
+these rules. The workflow is not loaded, and a relative path, in the
+argument or in `WF_SKILLS_ROOT`, is read from that directory. A hidden entry
+(`.git`, `.system`) is no skill and is not listed. A run works the folders
+out once and keeps them for its plan; `wfpy skills` works them out on each
+call.
 
 Prompt composition order:
 
@@ -392,6 +400,9 @@ Discovery roots (ordered):
 - `<runtime-root>/.claude/agents`
 - `<cwd>/.claude/agents`
 - `~/.claude/agents`
+
+A profile is `<name>.md` or `<name>/AGENT.md` in one of them, a symlink
+included, as for a skill.
 
 Supported profile fields in compatibility mode:
 
