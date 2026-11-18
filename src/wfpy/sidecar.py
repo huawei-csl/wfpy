@@ -17,10 +17,8 @@ from typing import Any
 
 import libcst as cst
 
-from wfpy._agent_skill_lookup import agent_skill_lookup
 from wfpy._project_index import port_uses, type_parameters
 from wfpy._python_environment import python_environment
-from wfpy._version import runtime_version
 from wfpy._workflow_instance import discover_workflow_instances
 from wfpy.package_exports import apply_package_export, find_package_export
 from wfpy.rewrite import (
@@ -65,10 +63,6 @@ _QUERY_OPS: dict[str, Callable[[RewriteEngine, dict[str, Any]], dict[str, Any]]]
     # The parameters a type takes, for the IDE to ask for before it creates
     # an instance of it.
     "typeParameters": lambda engine, args: _type_parameters(engine, args),
-    # The skills and agent presets a run of this file finds, from the
-    # runtime's own lookup (see `_agent_skill_lookup`). Listed here to be
-    # advertised; `_handle_request` answers it before the file is parsed.
-    "agentSkills": lambda engine, args: agent_skill_lookup(engine.file_path, _cwd_arg(args)),
 }
 
 
@@ -168,9 +162,6 @@ FEATURES = {
     "typeParameters": True,
     # createNode writes `expressions: {name: source}` as given.
     "createNodeExpressions": True,
-    # `agentSkills {cwd}`: the skills and agent presets a run of the file
-    # started in `cwd` finds, so an IDE offers those and no other.
-    "agentSkillsQuery": True,
 }
 
 SIDECAR_CONTRACTS = {
@@ -190,18 +181,8 @@ def _capabilities_response() -> "SidecarResponse":
             "supportedOps": SUPPORTED_OPS,
             "features": FEATURES,
             "contracts": SIDECAR_CONTRACTS,
-            # The wfpy answering, as `wfpy --version` prints it: an IDE that
-            # runs workflows with another command compares the two.
-            "runtimeVersion": runtime_version(),
         },
     )
-
-
-def _cwd_arg(args: dict[str, Any]) -> str | None:
-    """The `cwd` of an `agentSkills` request: an absolute directory, or none."""
-
-    cwd = args.get("cwd")
-    return cwd if isinstance(cwd, str) and Path(cwd).is_absolute() else None
 
 
 def _current_revision(file_path: str) -> str:
@@ -542,28 +523,6 @@ def _handle_request(payload: dict[str, Any]) -> SidecarResponse:
             revision="",
             message="Missing 'file' in request",
             diagnostic={"code": "parse_error"},
-        )
-
-    if op == "agentSkills":
-        # Asked of the folders around the file, not of its source: a workflow
-        # that does not parse yet names its skills from the same ones.
-        args = payload.get("args", {}) or {}
-        try:
-            lookup = agent_skill_lookup(file_path, _cwd_arg(args if isinstance(args, dict) else {}))
-        except Exception as exc:
-            return SidecarResponse(
-                status="error",
-                file=file_path,
-                revision=_current_revision(file_path),
-                message=f"Unhandled error: {exc}",
-                diagnostic={"code": "internal_error"},
-            )
-        return SidecarResponse(
-            status="ok",
-            file=file_path,
-            revision=_current_revision(file_path),
-            message="ok",
-            diagnostic=lookup,
         )
 
     if op == "pythonEnvironment":

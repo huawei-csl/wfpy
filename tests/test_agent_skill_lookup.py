@@ -1,4 +1,4 @@
-"""The sidecar's `agentSkills`: what a run of a workflow finds, for an IDE to offer.
+"""`wfpy skills`: what a run of a workflow finds, for an IDE to offer.
 
 The answer is the runtime's own lookup, so each test holds it against what
 the runtime resolves (`_skill_search_roots`, `_resolve_skill_dir`,
@@ -8,7 +8,10 @@ rules.
 
 from __future__ import annotations
 
+import json
 import os
+import shutil
+import subprocess
 import sys
 import types
 from pathlib import Path
@@ -16,15 +19,16 @@ from pathlib import Path
 import pytest
 
 from wfpy._agent_prompt_runtime import (
+    AGENT_PRESET_MAX_BYTES,
     _claude_agent_search_roots,
+    _load_claude_agent_profile,
     _read_skill_md,
     _resolve_claude_agent_path,
     _resolve_skill_dir,
     _skill_search_roots,
 )
 from wfpy._agent_skill_lookup import agent_skill_lookup
-from wfpy._version import runtime_version
-from wfpy.sidecar import FEATURES, SUPPORTED_OPS, _handle_request
+from wfpy.cli import main
 
 
 @pytest.fixture(autouse=True)
@@ -34,6 +38,11 @@ def isolated(tmp_path, monkeypatch):
 
     for name in ("WF_SKILLS_ROOT", "WF_CLAUDE_AGENTS_ROOT", "CODEX_HOME", "XDG_CONFIG_HOME"):
         monkeypatch.delenv(name, raising=False)
+    # git finds no repository above the test's directory, and reads no
+    # configuration of the machine's.
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path.parent))
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
@@ -49,8 +58,17 @@ def skill(root: Path, name: str, text: str = "a skill\n") -> Path:
     return directory
 
 
+def git_init(directory: Path) -> None:
+    """Make `directory` a git repository, or skip without git."""
+
+    if shutil.which("git") is None:
+        pytest.skip("no git on PATH")
+    directory.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-q", str(directory)], check=True)
+
+
 def workflow(project: Path) -> Path:
-    (project / ".git").mkdir(parents=True, exist_ok=True)
+    git_init(project)
     (project / "flows").mkdir(exist_ok=True)
     source = project / "flows" / "flow.py"
     source.write_text("this is not python yet (\n", encoding="utf-8")
@@ -120,7 +138,7 @@ class TestTheAnswerIsTheRuntimes:
         assert _resolve_skill_dir("own-beside-workflow", plan) is None
         assert Path(skills["tool-in-project"]["dir"]) == _resolve_skill_dir("tool-in-project", plan)
 
-    def test_the_working_directory_is_the_runs_not_the_sidecars(self, tmp_path):
+    def test_the_working_directory_is_the_one_given_else_this_processs(self, tmp_path):
         source = workflow(tmp_path / "project")
         started_in = tmp_path / "started-in"
         skill(started_in / ".wf" / "skills", "in-run-cwd")
@@ -128,22 +146,16 @@ class TestTheAnswerIsTheRuntimes:
         assert "in-run-cwd" in by_name(agent_skill_lookup(str(source), str(started_in))["skills"])
         assert "in-run-cwd" not in by_name(agent_skill_lookup(str(source))["skills"])
 
-    @pytest.mark.skipif(os.name != "posix", reason="no owner check on Windows")
-    def test_an_untrusted_folder_is_named_with_why(self, tmp_path):
+    def test_the_repository_is_the_one_git_finds(self, tmp_path):
         source = workflow(tmp_path / "project")
-        loose = skill(tmp_path / "project" / ".agents" / "skills", "loose")
-        loose.parent.chmod(0o777)
+        loose = tmp_path / "loose"
+        loose.mkdir()
+        (loose / "flow.py").write_text("", encoding="utf-8")
 
-        answer = agent_skill_lookup(str(source), os.getcwd())
-
-        assert "loose" not in by_name(answer["skills"])
-        assert answer["ignored"] == [
-            {
-                "path": str(loose.parent.resolve()),
-                "folder": ".agents/skills",
-                "reason": "writable by every user",
-            }
-        ]
+        assert agent_skill_lookup(str(source))["repository"] == str(
+            (tmp_path / "project").resolve()
+        )
+        assert agent_skill_lookup(str(loose / "flow.py"))["repository"] is None
 
 
 class TestWhatTheRunReads:
@@ -250,57 +262,83 @@ class TestPresets:
         ]
         assert presets["nested"]["description"] == "Nested body."
 
-
-class TestTheSidecarOp:
-    def test_it_answers_for_a_file_that_does_not_parse(self, tmp_path):
-        source = workflow(tmp_path / "project")
-        skill(tmp_path / "project" / ".agents" / "skills", "from-op")
-
-        response = _handle_request(
-            {"op": "wfpy.agentSkills", "file": str(source), "args": {"cwd": os.getcwd()}}
+    def test_a_description_with_commas_is_one_text(self, tmp_path):
+        """The front-matter reader makes a comma value a list (`tools: Read,
+        Grep`), but a description is text."""
+        project = tmp_path / "project"
+        source = workflow(project)
+        agents = project / ".claude" / "agents"
+        agents.mkdir(parents=True)
+        (agents / "careful.md").write_text(
+            "---\nname: careful, thorough\ndescription: Reviews code, finds bugs, says why\n"
+            "tools: Read, Grep\n---\nbody\n",
+            encoding="utf-8",
         )
+        plan = types.SimpleNamespace(source_path=str(source), work_dir=None)
 
-        assert response.status == "ok"
-        assert "from-op" in by_name(response.diagnostic["skills"])
+        [careful] = agent_skill_lookup(str(source))["presets"]
 
-    def test_a_relative_cwd_is_no_cwd(self, tmp_path):
-        source = workflow(tmp_path / "project")
+        assert careful["description"] == "Reviews code, finds bugs, says why"
+        profile = _load_claude_agent_profile("careful", plan)
+        assert profile["description"] == "Reviews code, finds bugs, says why"
+        assert profile["meta"]["name"] == "careful, thorough"
+        assert profile["meta"]["tools"] == ["Read", "Grep"]
 
-        response = _handle_request(
-            {"op": "agentSkills", "file": str(source), "args": {"cwd": "elsewhere"}}
-        )
+    def test_a_preset_over_the_size_limit_is_its_problem(self, tmp_path):
+        project = tmp_path / "project"
+        source = workflow(project)
+        agents = project / ".claude" / "agents"
+        agents.mkdir(parents=True)
+        (agents / "huge.md").write_text("x" * (AGENT_PRESET_MAX_BYTES + 1), encoding="utf-8")
+        plan = types.SimpleNamespace(source_path=str(source), work_dir=None)
 
-        assert response.diagnostic["cwd"] == str(Path.cwd().resolve())
+        [huge] = agent_skill_lookup(str(source))["presets"]
 
-    def test_it_is_advertised(self):
-        assert "agentSkills" in SUPPORTED_OPS
-        assert FEATURES["agentSkillsQuery"] is True
-        capabilities = _handle_request({"op": "wfpy.getCapabilities"}).diagnostic
-        assert capabilities["runtimeVersion"] == runtime_version()
+        with pytest.raises(ValueError, match="too large") as raised:
+            _load_claude_agent_profile("huge", plan)
+        assert huge["problem"] == str(raised.value)
 
-    def test_the_answer_says_which_wfpy_gave_it(self, tmp_path):
-        """So that an editor compares it with `wfpy --version` without asking
-        for the capabilities too."""
-        source = workflow(tmp_path / "project")
 
-        assert agent_skill_lookup(str(source))["runtimeVersion"] == runtime_version()
+class TestTheCommand:
+    """`wfpy skills <file> [--json]`, run as an IDE runs it: from the
+    directory a run starts in, with the run's environment."""
 
-    def test_a_sidecar_without_the_op_refuses_it_as_unknown(self, tmp_path):
-        """For a file that loads; one that does not is refused as such first."""
-        source = tmp_path / "flow.py"
-        source.write_text("x = 1\n", encoding="utf-8")
-
-        response = _handle_request({"op": "wfpy.noSuchQuery", "file": str(source), "args": {}})
-
-        assert response.status == "error"
-        assert response.diagnostic["code"] == "unknown_operation"
-
-    def test_the_cli_prints_the_same_version_line(self, capsys, monkeypatch):
-        from wfpy.cli import main
-
-        monkeypatch.setattr(sys, "argv", ["wfpy", "--version"])
-        with pytest.raises(SystemExit) as exited:
+    def run(self, monkeypatch, capsys, *argv: str) -> tuple[int, str]:
+        monkeypatch.setattr(sys, "argv", ["wfpy", "skills", *argv])
+        code = 0
+        try:
             main()
+        except SystemExit as exited:
+            code = int(exited.code or 0)
+        return code, capsys.readouterr().out
 
-        assert exited.value.code == 0
-        assert capsys.readouterr().out == runtime_version() + "\n"
+    def test_json_is_the_lookup_from_the_working_directory(self, tmp_path, monkeypatch, capsys):
+        """For a file that does not parse: it is not loaded."""
+        project = tmp_path / "project"
+        source = workflow(project)
+        skill(project / ".agents" / "skills", "from-the-command")
+        monkeypatch.chdir(project)
+
+        code, out = self.run(monkeypatch, capsys, "--json", str(source.relative_to(project)))
+
+        assert code == 0
+        assert json.loads(out) == agent_skill_lookup(str(source), str(project))
+        assert "from-the-command" in by_name(json.loads(out)["skills"])
+
+    def test_a_table_without_json(self, tmp_path, monkeypatch, capsys):
+        project = tmp_path / "project"
+        source = workflow(project)
+        skill(project / ".agents" / "skills", "in-the-table")
+        monkeypatch.chdir(project)
+
+        code, out = self.run(monkeypatch, capsys, str(source))
+
+        assert code == 0
+        assert "in-the-table" in out
+        assert f"repository: {project.resolve()}" in out
+
+    def test_a_file_that_is_not_there_is_an_error(self, tmp_path, monkeypatch, capsys):
+        code, out = self.run(monkeypatch, capsys, "--json", str(tmp_path / "nowhere.py"))
+
+        assert code == 1
+        assert out == ""

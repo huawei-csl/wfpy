@@ -324,39 +324,41 @@ so a name found above never resolves here:
 
 - `.agents/skills`, `.codex/skills`, `.opencode/skills` and
   `.opencode/skill`, in the workflow's directory and each directory above it
-  up to the repository root (the nearest directory holding `.git`), then in
-  `<cwd>`
+  up to the top of its git repository, then in `<cwd>` when `<cwd>` is in
+  that repository
 - `~/.agents/skills`
-- `$CODEX_HOME/skills` (`~/.codex/skills` when `CODEX_HOME` is unset)
+- `$CODEX_HOME/skills` (`~/.codex/skills` when `CODEX_HOME` is unset; a
+  relative `CODEX_HOME` is read from `<cwd>`, as Codex reads it)
 - `$XDG_CONFIG_HOME/opencode/skills` and `.../skill` (`~/.config` when
   `XDG_CONFIG_HOME` is unset)
 
 The walk starts at the workflow's directory even when `WF_SKILLS_ROOT` makes
-another directory the runtime root, and stops at the repository root as
-Codex and OpenCode stop there; outside a repository only the workflow's
-directory is searched, so a folder above a project, such as
-`/tmp/.agents/skills`, is not read for it. A user-level folder the walk or
-`<cwd>` reaches, as in a home directory kept in git, is searched once, in
-its user-level place; the home directory's other folders
-(`~/.opencode/skills`) are a project's, as they are for OpenCode. A relative
-`CODEX_HOME` or `XDG_CONFIG_HOME` counts as unset.
-
-On POSIX, one of these folders is read, and a `.git` bounds the walk, only
-if it is owned by you or by root and no other user can write it: neither
-every user nor a group, unless the group is your own private one (the group
-a umask of 002 makes your folders writable by). Anyone can create
-`/tmp/.agents/skills` or `/tmp/.git`; what they create is theirs. A `.git`
-that fails the check is no repository, and the walk does not go past it.
-Windows has no such check. wfpy's own folders above (`.wf/skills`,
-`.claude/skills`) are read as before, without it.
+another directory the runtime root, and stops at the top of the git
+repository, as Codex and OpenCode stop there. git says where that is
+(`git rev-parse --show-toplevel` from the workflow's directory), so what
+git refuses bounds nothing: a `.git` that is no repository, and a
+repository owned by a user git does not trust (add it to `safe.directory`,
+as for `git status`). Without a repository git accepts, or without git,
+only the workflow's directory is searched, and `<cwd>` only when it is the
+workflow's directory. So a folder above a project, such as
+`/tmp/.agents/skills`, is not read for a workflow in `/tmp/job`, nor for a
+run started in `/tmp`. A user-level folder the walk or `<cwd>` reaches, as
+in a home directory kept in git, is searched once, in its user-level place;
+the home directory's other folders (`~/.opencode/skills`) are a project's,
+as they are for OpenCode. A relative `XDG_CONFIG_HOME` counts as unset.
+wfpy's own folders above (`.wf/skills`, `.claude/skills`) are read as
+before, up to the filesystem root.
 
 A skill is found by its folder's name, `<folder>/<skill-name>/SKILL.md`, as
 in wfpy's own folders; a skill nested deeper in a collection is reached by
 naming the collection in `WF_SKILLS_ROOT`.
 
-An editor that offers skill names asks the sidecar which ones a run finds
-(`agentSkills`, see the [sidecar](docs/sidecar.md)) rather than repeating
-these rules.
+`wfpy skills <workflow.py>` lists the skills and agent presets a run of the
+workflow started in the current directory finds, from the folder it takes,
+with what reading each fails with; `--json` prints the same as one JSON
+object. An editor that offers skill names runs it with the command it runs
+workflows with, from the directory it runs them in, rather than repeating
+these rules. The workflow is not loaded.
 
 Prompt composition order:
 

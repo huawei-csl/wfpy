@@ -1,9 +1,11 @@
-"""Which skills and agent presets a run of a workflow finds: the sidecar's
-`agentSkills` answer.
+"""Which skills and agent presets a run of a workflow finds: what
+`wfpy skills` prints.
 
 An editor that offers skill names must offer the ones a run resolves, from
 the folder the run takes, and none it cannot find. Rather than each editor
-copying the lookup's rules, it asks this one, which runs the runtime's own:
+copying the lookup's rules, it runs `wfpy skills --json` with the command it
+runs workflows with, from the directory it runs them in, and this answers
+with the runtime's own lookup:
 `_skill_lookup_roots` for the folders and their order, `_find_skill` for the
 folder a name resolves to, `_read_skill_md_file` and
 `_parse_skill_frontmatter` for what the run reads there, and the same for
@@ -27,13 +29,14 @@ from wfpy._agent_prompt_runtime import (
     _find_skill,
     _parse_skill_frontmatter,
     _read_skill_md_file,
+    _repository_root,
     _runtime_root_for_skills,
     _skill_hook_name,
     _skill_hook_script_in,
     _skill_lookup_roots,
     _validate_skill_name,
+    _workflow_dir,
 )
-from wfpy._version import runtime_version
 
 __all__ = ["agent_skill_lookup"]
 
@@ -47,27 +50,29 @@ BLOCK_SCALAR = re.compile(r"[|>][+-]?[0-9]?|[|>][0-9][+-]")
 def agent_skill_lookup(file_path: str, cwd: str | None = None) -> dict[str, Any]:
     """The skills and agent presets a run of the workflow at `file_path`
     finds, started in `cwd` (this process's working directory when omitted),
-    with the environment of this process.
+    with the environment of this process. The file is not loaded: one that
+    does not parse yet names its skills from the same folders.
 
-    `roots` are the folders searched, in order; `ignored`, the folders of
-    other agent tools reached but not trusted. Each of `skills` is a name a
-    run resolves, with the directory it takes (`dir`), the root that holds it
-    and, when the run takes it but cannot read its `SKILL.md`, the `problem`
-    it fails with. A name whose folders hold no `SKILL.md` is listed with
-    `found: false`: a run that names it fails. `presets` are the same for
-    agent presets, over `presetRoots`.
+    `roots` are the folders searched, in order, whether they exist or not.
+    `repository` is the git repository that bounds other tools' folders, or
+    None. Each of `skills` is a name a run resolves, with the directory it
+    takes (`dir`), the root that holds it and, when the run takes it but
+    cannot read its `SKILL.md`, the `problem` it fails with. A name whose
+    folders hold no `SKILL.md` is listed with `found: false`: a run that
+    names it fails. `presets` are the same for agent presets, over
+    `presetRoots`.
     """
 
     plan = types.SimpleNamespace(source_path=file_path, work_dir=None)
     run_cwd = Path(cwd).resolve() if cwd else Path.cwd().resolve()
-    roots, ignored = _skill_lookup_roots(plan, run_cwd)
+    roots = _skill_lookup_roots(plan, run_cwd)
     # A root that is no directory holds no skill: leaving it out changes no
     # answer of `_find_skill` and spares it most of the walk to `/`.
     root_paths = [root.path for root in roots if root.path.is_dir()]
     by_path = {root.path: root for root in roots}
 
     skills: list[dict[str, Any]] = []
-    for name in _entry_names(root_paths):
+    for name in _names_in(root_paths):
         try:
             _validate_skill_name(name)
         except ValueError:
@@ -84,7 +89,7 @@ def agent_skill_lookup(file_path: str, cwd: str | None = None) -> dict[str, Any]
     preset_paths = [root.path for root in preset_roots if root.path.is_dir()]
     preset_by_path = {root.path: root for root in preset_roots}
     presets: list[dict[str, Any]] = []
-    for name in _preset_names(preset_paths):
+    for name in _names_in(preset_paths, ".md"):
         try:
             _validate_skill_name(name)
         except ValueError:
@@ -95,42 +100,30 @@ def agent_skill_lookup(file_path: str, cwd: str | None = None) -> dict[str, Any]
                 _preset(name, preset_by_path[found_preset[0]], found_preset[1], root_paths)
             )
 
+    repository = _repository_root(_workflow_dir(plan, run_cwd))
     return {
-        "runtimeVersion": runtime_version(),
+        "workflow": str(Path(file_path).resolve()),
         "cwd": str(run_cwd),
         "runtimeRoot": str(_runtime_root_for_skills(plan, run_cwd)),
+        "repository": str(repository) if repository is not None else None,
         "roots": [_root(root) for root in roots],
-        "ignored": [
-            {"path": str(root.path), "folder": root.folder, "reason": root.reason}
-            for root in ignored
-        ],
         "skills": skills,
         "presetRoots": [_root(root) for root in preset_roots],
         "presets": presets,
     }
 
 
-def _root(root: LookupRoot) -> dict[str, str]:
-    return {"path": str(root.path), "folder": root.folder, "scope": root.scope}
+def _root(root: LookupRoot, key: str = "path") -> dict[str, str]:
+    """A root as the answer gives it: its path under `key`, the folder as a
+    reader knows it, and how the lookup reached it."""
+
+    return {key: str(root.path), "folder": root.folder, "scope": root.scope}
 
 
-def _entry_names(roots: list[Path]) -> list[str]:
-    """Every name in the roots, each once, in the order first met."""
-
-    names: dict[str, None] = {}
-    for root in roots:
-        try:
-            entries = sorted(os.listdir(root))
-        except OSError:
-            continue
-        for name in entries:
-            names.setdefault(name, None)
-    return list(names)
-
-
-def _preset_names(roots: list[Path]) -> list[str]:
-    """Every name a preset could be found by in the roots: `<name>.md`, or
-    a directory `<name>` (for `<name>/AGENT.md`)."""
+def _names_in(roots: list[Path], suffix: str = "") -> list[str]:
+    """Every name in the roots, each once, in the order first met; with
+    `suffix` taken off an entry that has it (a preset is `<name>.md`, or a
+    directory `<name>` for `<name>/AGENT.md`)."""
 
     names: dict[str, None] = {}
     for root in roots:
@@ -139,7 +132,9 @@ def _preset_names(roots: list[Path]) -> list[str]:
         except OSError:
             continue
         for entry in entries:
-            names.setdefault(entry[: -len(".md")] if entry.endswith(".md") else entry, None)
+            names.setdefault(
+                entry[: -len(suffix)] if suffix and entry.endswith(suffix) else entry, None
+            )
     return list(names)
 
 
@@ -148,7 +143,7 @@ def _without_skill_md(name: str, root: LookupRoot, skill_dir: Path) -> dict[str,
         "name": name,
         "found": False,
         "dir": str(skill_dir),
-        **_root_of(root),
+        **_root(root, "root"),
         "skillMd": None,
         "problem": f"no SKILL.md in {skill_dir}",
         "description": None,
@@ -156,10 +151,6 @@ def _without_skill_md(name: str, root: LookupRoot, skill_dir: Path) -> dict[str,
         "scripts": [],
         "warnings": [],
     }
-
-
-def _root_of(root: LookupRoot) -> dict[str, str]:
-    return {"root": str(root.path), "folder": root.folder, "scope": root.scope}
 
 
 def _skill(name: str, root: LookupRoot, skill_dir: Path) -> dict[str, Any]:
@@ -170,7 +161,7 @@ def _skill(name: str, root: LookupRoot, skill_dir: Path) -> dict[str, Any]:
         "name": name,
         "found": True,
         "dir": str(skill_dir),
-        **_root_of(root),
+        **_root(root, "root"),
         "skillMd": str(skill_md),
         "problem": None,
         "description": None,
@@ -265,7 +256,7 @@ def _preset(name: str, root: LookupRoot, path: Path, skill_roots: list[Path]) ->
     entry: dict[str, Any] = {
         "name": name,
         "path": str(path),
-        **_root_of(root),
+        **_root(root, "root"),
         "problem": None,
         "description": None,
         "skills": [],

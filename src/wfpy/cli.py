@@ -22,7 +22,6 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from wfpy._version import runtime_version
 from wfpy.workflow_identity import (
     detect_dynamic_workflow_identity_issues,
     format_dynamic_workflow_identity_error,
@@ -414,6 +413,38 @@ def cmd_connectors(args: argparse.Namespace) -> None:
     print(f"user file: {user_file()}" + (f"  workspace file: {workspace_file(root)}" if root else ""))
 
 
+def cmd_skills(args: argparse.Namespace) -> None:
+    """Execute the 'skills' sub-command: the skills and agent presets a run
+    of the file started here finds, with this environment.
+
+    The answer is the runtime's own lookup (`_agent_skill_lookup`), so an
+    editor that runs it with the command it runs workflows with, from the
+    directory it runs them in, offers what the run will find. The file is
+    not loaded.
+    """
+    import json as _json
+
+    from wfpy._agent_skill_lookup import agent_skill_lookup
+
+    if not Path(args.file).is_file():
+        print(f"Error: no such file: {args.file}", file=sys.stderr)
+        sys.exit(1)
+    lookup = agent_skill_lookup(args.file)
+    if args.json:
+        print(_json.dumps(lookup, indent=1))
+        return
+    print(f"{'skill':<24} {'folder':<20} directory")
+    for skill in lookup["skills"]:
+        problem = f"  ({skill['problem']})" if skill["problem"] else ""
+        print(f"{skill['name']:<24} {skill['folder']:<20} {skill['dir']}{problem}")
+    print(f"\n{'preset':<24} {'folder':<20} file")
+    for preset in lookup["presets"]:
+        problem = f"  ({preset['problem']})" if preset["problem"] else ""
+        print(f"{preset['name']:<24} {preset['folder']:<20} {preset['path']}{problem}")
+    repository = lookup["repository"] or "none (other tools' folders: the workflow's own only)"
+    print(f"\nworking directory: {lookup['cwd']}  repository: {repository}")
+
+
 def cmd_plan(args: argparse.Namespace) -> None:
     """Execute the 'plan' sub-command — export plan JSON."""
     from wfpy.runner import build_plan, export_plan_json, _build_workflow_graph
@@ -541,36 +572,11 @@ def _elaborate_factory_for_display(factory: Any) -> Any:
     return target
 
 
-class _PrintVersion(argparse.Action):
-    """`--version`: print `runtime_version()` on one line, as it is, and exit.
-
-    argparse's own `version` action wraps the line to the terminal's width,
-    and a program comparing two commands' lines must read them whole.
-    """
-
-    def __init__(self, option_strings: list[str], dest: str, **kwargs: Any) -> None:
-        kwargs.update(nargs=0, default=argparse.SUPPRESS)
-        super().__init__(option_strings, argparse.SUPPRESS, **kwargs)
-
-    def __call__(
-        self,
-        parser: argparse.ArgumentParser,
-        namespace: argparse.Namespace,
-        values: Any,
-        option_string: str | None = None,
-    ) -> None:
-        print(runtime_version())
-        parser.exit()
-
-
 def main() -> None:
     """CLI entry point."""
     parser = argparse.ArgumentParser(
         prog="wfpy",
         description="wfpy — Pythonic agentic workflows on actor-dataflow semantics",
-    )
-    parser.add_argument(
-        "--version", action=_PrintVersion, help="print which wfpy this is, and exit"
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -824,6 +830,19 @@ def main() -> None:
     connectors_parser.add_argument("--workspace", default=".", help="A path inside the workspace (default: .)")
     connectors_parser.add_argument("--json", action="store_true", help="One JSON list instead of a table")
     connectors_parser.set_defaults(func=cmd_connectors)
+
+    # ── skills ──
+    skills_parser = subparsers.add_parser(
+        "skills",
+        help="List the skills and agent presets a run of a workflow started here finds",
+    )
+    skills_parser.add_argument(
+        "file", help="Python file containing @workflow definitions (not loaded)"
+    )
+    skills_parser.add_argument(
+        "--json", action="store_true", help="One JSON object instead of a table"
+    )
+    skills_parser.set_defaults(func=cmd_skills)
 
     args = parser.parse_args()
     args.func(args)

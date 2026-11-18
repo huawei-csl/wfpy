@@ -24,34 +24,37 @@ All notable changes to wfpy are documented here. The format follows
   reported as not found unless `WF_SKILLS_ROOT` named its folder. wfpy now
   also searches `.agents/skills` (the folder the Agent Skills convention
   shares between tools), `.codex/skills`, `.opencode/skills` and
-  `.opencode/skill`, in the workflow's directory and above it up to the
-  repository root, and in the working directory, then `~/.agents/skills`,
-  `$CODEX_HOME/skills` (`~/.codex` by default) and
-  `$XDG_CONFIG_HOME/opencode/skills` and `skill` (`~/.config` by default).
+  `.opencode/skill`, in the workflow's directory and above it up to the top
+  of its git repository, and in the working directory when it is in that
+  repository, then `~/.agents/skills`, `$CODEX_HOME/skills` (`~/.codex` by
+  default; a relative value read from the working directory, as Codex reads
+  it) and `$XDG_CONFIG_HOME/opencode/skills` and `skill` (`~/.config` by
+  default).
   They are searched after every folder searched before, `~/.claude/skills`
   included, so a name that resolved before resolves to the same folder:
   these folders only add names. The walk up starts at the workflow's
-  directory, `WF_SKILLS_ROOT` or not, and stops at the nearest directory
-  holding `.git`, or outside a repository at the workflow's directory, as
-  Codex and OpenCode stop: a folder above the project (`/tmp/.agents/skills`)
-  is not read. On POSIX such a folder is read, and a `.git` bounds the walk,
-  only if it is owned by the user or root and writable by no other user (a
-  group-writable one only by the user's private group), so a folder or a
-  `.git` another user planted in `/tmp` is not taken. A user-level folder
-  is searched in its user-level place however the walk reaches it; a home
-  directory kept in git has its other folders (`~/.opencode/skills`)
-  searched as a project's.
-- The sidecar answers `agentSkills` for a workflow file and a working
-  directory: the folders a run searches for skills and agent presets, the
-  folder each name resolves to, what reading its `SKILL.md` fails with, its
-  hooks as the runtime reads them, and the folders of other tools not read
-  as not trusted. It runs the runtime's own lookup, so an IDE offers the
-  skills a run finds without copying the rules
-  (`features.agentSkillsQuery`).
-- `wfpy --version` prints `wfpy <version> from <package directory>
-  (python X.Y)`, and the `agentSkills` answer and `getCapabilities` return
-  the same line as `runtimeVersion`, so an IDE can tell whether the sidecar
-  it asks and the `wfpy` it runs are the same.
+  directory, `WF_SKILLS_ROOT` or not, and stops where git says the
+  repository ends (`git rev-parse --show-toplevel`), as Codex and OpenCode
+  stop there. A `.git` git does not take for a repository, or a repository
+  of dubious ownership git refuses, bounds nothing: with no repository, or
+  no git, only the workflow's directory is searched. So a folder above the
+  project (`/tmp/.agents/skills`) is not read, whoever planted a `/tmp/.git`.
+  A user-level folder is searched in its user-level place however the walk
+  reaches it; a home directory kept in git has its other folders
+  (`~/.opencode/skills`) searched as a project's.
+- `wfpy skills <workflow.py> [--json]` lists the skills and agent presets a
+  run of the workflow started in the current directory finds: the folders
+  searched, in order, the folder each name resolves to, what reading its
+  `SKILL.md` fails with, its hooks as the runtime reads them, and the
+  presets with the skills they preload. It runs the runtime's own lookup
+  and does not load the workflow, so an IDE that runs it with the command
+  it runs workflows with offers the skills a run finds, without copying the
+  rules or asking another process.
+- The lookup roots are worked out once per plan, not on every skill read,
+  hook and preset lookup of every firing.
+- An agent preset's `description` (and `name`) is read as text: one with a
+  comma was a list. A preset over 256 kB (the `SKILL.md` limit) is refused
+  as too large, as a `SKILL.md` is.
 - The sidecar answers `pythonEnvironment` for a workflow file: the
   interpreter running it, the import roots `wfpy plan` loads the file with,
   and the folders its installed packages come from. An IDE configures its
