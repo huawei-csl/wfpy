@@ -21,6 +21,8 @@ The file, one table per connector::
     model = "sonnet"                  # a session config option the agent offers
     mode = "acceptEdits"              # a session mode the agent offers
     http_api = false                  # OpenCode's HTTP API beside ACP
+    stuck_timeout_ms = 1800000        # silence before the agent is nudged (default 300000)
+    stuck_retries = 3                 # nudges before the turn is cancelled (default 5)
 
     [connectors.opencode]
     command = "/opt/opencode/bin/opencode acp"
@@ -57,6 +59,13 @@ KNOWN: dict[str, dict[str, Any]] = {
 
 DEFAULT_CONNECTOR = "opencode"
 
+#: How long an ACP agent may stream nothing before the stuck detector nudges it,
+#: and how many nudges it gets before the turn is cancelled. They live here, not
+#: in ``acp_client``, so ``wfpy connectors`` and the option resolution can name
+#: the defaults without importing the optional ``acp`` package.
+DEFAULT_STUCK_TIMEOUT_MS = 300_000
+DEFAULT_STUCK_RETRIES = 5
+
 
 @dataclasses.dataclass
 class Connector:
@@ -70,6 +79,12 @@ class Connector:
     model: str | None = None          # a session config option, if the agent offers one
     mode: str | None = None           # a session mode, if the agent offers one
     env: dict[str, str] = dataclasses.field(default_factory=dict)
+    # How long this agent may go silent before the stuck detector nudges it, and
+    # how many nudges before the turn is cancelled. None means wfpy's default.
+    # An agent that streams nothing during a long tool call (a compile, a device
+    # run) needs a window longer than that call, or it is nudged mid-work.
+    stuck_timeout_ms: int | None = None
+    stuck_retries: int | None = None
 
     @property
     def command(self) -> str:
@@ -84,6 +99,8 @@ class Connector:
             "http_api": self.http_api,
             "model": self.model,
             "mode": self.mode,
+            "stuck_timeout_ms": self.stuck_timeout_ms,
+            "stuck_retries": self.stuck_retries,
         }
 
 
@@ -130,7 +147,34 @@ def _from_table(name: str, table: dict[str, Any], source: str, base: Connector |
         model=table.get("model", base.model if base else None),
         mode=table.get("mode", base.mode if base else None),
         env=env,
+        stuck_timeout_ms=_positive_int(
+            name, source, "stuck_timeout_ms",
+            table.get("stuck_timeout_ms", base.stuck_timeout_ms if base else None),
+        ),
+        stuck_retries=_positive_int(
+            name, source, "stuck_retries",
+            table.get("stuck_retries", base.stuck_retries if base else None),
+        ),
     )
+
+
+def _positive_int(connector: str, source: str, key: str, value: Any) -> int | None:
+    """A connector's positive integer setting, or None. A zero, a negative or a
+    non-number is a mistake worth naming rather than silently falling back to
+    the default: the point of setting it was to change the behaviour."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(
+            f"connector '{connector}' in the {source} file: {key} must be a positive "
+            f"integer, not {value!r}"
+        )
+    if value <= 0:
+        raise ValueError(
+            f"connector '{connector}' in the {source} file: {key} must be greater "
+            f"than 0, not {value}"
+        )
+    return value
 
 
 def _read(path: Path | None) -> dict[str, dict[str, Any]]:

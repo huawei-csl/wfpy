@@ -11,18 +11,23 @@ import json
 import logging
 import os
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from typing import Any, AsyncGenerator, Callable, Optional
 
 import acp
 from acp.client.connection import ClientSideConnection
 from acp.schema import AllowedOutcome, DeniedOutcome
 
+from wfpy.connectors import DEFAULT_STUCK_RETRIES, DEFAULT_STUCK_TIMEOUT_MS
+
 logger = logging.getLogger(__name__)
 
-# Stuck detection configuration
-STUCK_TIMEOUT_SECONDS = 300  # 5 minutes
-MAX_RETRIES = 5
+# Stuck detection configuration. The defaults live in `connectors`, which has no
+# optional dependency, so the CLI and the option resolution can name them without
+# importing this module. A run overrides them per agent: `--acp-stuck-timeout-ms`
+# / `--acp-stuck-retries`, or a connector's `stuck_timeout_ms` / `stuck_retries`.
+STUCK_TIMEOUT_SECONDS = DEFAULT_STUCK_TIMEOUT_MS // 1000
+MAX_RETRIES = DEFAULT_STUCK_RETRIES
 CONTINUE_MESSAGE = "You appear stuck. Please continue with the task."
 
 
@@ -556,7 +561,16 @@ async def run_with_stuck_detection(
                         await prompt_task
                     except asyncio.CancelledError:
                         pass
-                    raise TimeoutError(f"Agent stuck after {max_retries} retries")
+                    # Name the window as well as the budget: an agent that is
+                    # working but silent (OpenCode during a long `bash` streams
+                    # nothing) is cancelled by exactly this path, and the fix is
+                    # to widen the window, not to retry more.
+                    raise TimeoutError(
+                        f"Agent stuck after {max_retries} retries "
+                        f"({stuck_timeout}s of silence each). If it was working, "
+                        f"not hung, raise --acp-stuck-timeout-ms above its longest "
+                        f"silent tool call."
+                    )
                     
                 # Send continue message
                 logger.info(f"Sending continue message: {CONTINUE_MESSAGE}")
@@ -569,16 +583,18 @@ async def run_with_stuck_detection(
                 
     except Exception as e:
         logger.error(f"Error during stuck detection: {e}")
+        # Shut both tasks down, then retrieve whatever they ended with and drop
+        # it. Awaiting them bare would be wrong twice over: `event_task` has
+        # usually *already* finished with the bare `asyncio.TimeoutError` that
+        # signalled the stuck turn, and since 3.11 that is `TimeoutError`, so
+        # awaiting it replaced the error above — the caller got an empty
+        # TimeoutError instead of the one naming the budget. Not retrieving it
+        # at all makes asyncio warn about an exception that was never retrieved.
         prompt_task.cancel()
         event_task.cancel()
-        try:
-            await prompt_task
-        except asyncio.CancelledError:
-            pass
-        try:
-            await event_task
-        except asyncio.CancelledError:
-            pass
+        for task in (prompt_task, event_task):
+            with suppress(BaseException):
+                await task
         raise
 
 

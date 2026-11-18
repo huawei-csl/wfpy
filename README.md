@@ -147,6 +147,47 @@ command = "claude-agent-acp"
 env = { ANTHROPIC_API_KEY = "..." }
 ```
 
+### When the agent goes quiet: the stuck window
+
+An ACP turn is watched by a stuck detector. If no session event arrives for
+`stuck_timeout_ms` (default 300000, five minutes), wfpy sends the agent a
+"You appear stuck. Please continue with the task." message; after
+`stuck_retries` of those (default 5) the turn is cancelled with a
+`TimeoutError`.
+
+The defaults suit an agent that streams as it works. They do **not** suit an
+agent that makes a long tool call which streams nothing. A measured case:
+OpenCode running `sleep 360` in `bash` emits no session event at all for the
+whole command, so the nudge fires at exactly 300s and lands in the session as
+a second, concurrent turn while the first is still working. A compile or a
+device run that is silent for over 25 minutes (5 × 300s) is cancelled outright.
+
+Note that `@agent(timeout_ms=...)` does not apply to ACP — this is the knob.
+
+Widen the window for the agents that need it:
+
+```toml
+[connectors.claude]
+command = "claude-agent-acp"
+stuck_timeout_ms = 1800000            # 30 min of silence is fine
+stuck_retries = 3
+```
+
+or per run, which wins over the connector:
+
+```bash
+wfpy run flow.py --acp-stuck-timeout-ms 1800000 --acp-stuck-retries 3
+```
+
+`wfpy connectors` prints the effective window in its `stuck` column. Set it
+longer than the longest silent tool call the agent makes; the cost of a
+generous window is only that a genuinely hung agent takes longer to notice.
+
+An alternative worth preferring where it fits: keep the long-running work out
+of the agent entirely. A compile or a test run in a plain `@task` with
+`subprocess.run(timeout=...)` never involves ACP, so no stuck detector watches
+it, and the timeout is yours.
+
 ### Replicate on another machine
 
 1. Install wfpy with `[agent]` and the same connectors (step 1 and step 2
