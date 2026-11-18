@@ -318,6 +318,22 @@ wfpy also searches Claude-compatible skill roots in order:
 - `<cwd>/.claude/skills/<skill-name>/SKILL.md`
 - `~/.claude/skills/<skill-name>/SKILL.md`
 
+Then the folders other agent tools install skills into, so a skill installed
+for Codex or OpenCode can be named too. They come after every folder above,
+so a name found above never resolves here:
+
+- `.agents/skills`, `.codex/skills`, `.opencode/skills` and
+  `.opencode/skill`, at the runtime root and each directory above it, then
+  in `<cwd>`
+- `~/.agents/skills`
+- `$CODEX_HOME/skills` (`~/.codex/skills` when `CODEX_HOME` is unset)
+- `$XDG_CONFIG_HOME/opencode/skills` and `.../skill` (`~/.config` when
+  `XDG_CONFIG_HOME` is unset)
+
+A skill is found by its folder's name, `<folder>/<skill-name>/SKILL.md`, as
+in wfpy's own folders; a skill nested deeper in a collection is reached by
+naming the collection in `WF_SKILLS_ROOT`.
+
 Prompt composition order:
 
 1. `SKILL.md` body (if `use_skill=True`)

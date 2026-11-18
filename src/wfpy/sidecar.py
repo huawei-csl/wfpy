@@ -162,6 +162,13 @@ FEATURES = {
     "typeParameters": True,
     # createNode writes `expressions: {name: source}` as given.
     "createNodeExpressions": True,
+    # Where an agent's skill is looked up (`_skill_search_roots`), so an IDE
+    # listing skills offers the ones a run finds. `skillRootsList`:
+    # `WF_SKILLS_ROOT` is an `os.pathsep` list and a symlinked skill directory
+    # is found. `agentSkillFolders`: other agent tools' skill folders
+    # (`.agents`, `.codex`, `.opencode`) are searched after wfpy's own.
+    "skillRootsList": True,
+    "agentSkillFolders": True,
 }
 
 SIDECAR_CONTRACTS = {

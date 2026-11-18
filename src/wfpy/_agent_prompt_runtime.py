@@ -36,6 +36,44 @@ def _explicit_skills_roots() -> list[Path]:
     return roots
 
 
+OTHER_TOOL_PROJECT_SKILL_DIRS: tuple[tuple[str, ...], ...] = (
+    (".agents", "skills"),
+    (".codex", "skills"),
+    (".opencode", "skills"),
+    (".opencode", "skill"),
+)
+"""Where other agent tools keep a project's skills, relative to a directory.
+
+`.agents/skills` is the folder the Agent Skills convention shares between
+tools, and the one Codex documents for a repository. `.codex/skills` is the
+skills folder of a Codex project configuration (`.codex/`). OpenCode reads
+`skills` and the older `skill` under `.opencode/`. Each holds
+`<skill-name>/SKILL.md`, the layout wfpy already reads.
+"""
+
+
+def _other_tool_user_skill_dirs() -> list[Path]:
+    """Where other agent tools keep a user's skills, in the order searched.
+
+    `~/.agents/skills` (the shared folder), Codex's `$CODEX_HOME/skills`
+    (`~/.codex/skills` when `CODEX_HOME` is unset), then OpenCode's
+    `$XDG_CONFIG_HOME/opencode/skills` and `.../skill` (`~/.config` when
+    `XDG_CONFIG_HOME` is unset).
+    """
+
+    home = Path.home()
+    codex_home = os.environ.get("CODEX_HOME", "").strip()
+    config_home = os.environ.get("XDG_CONFIG_HOME", "").strip()
+    codex = Path(codex_home).expanduser() if codex_home else home / ".codex"
+    config = Path(config_home).expanduser() if config_home else home / ".config"
+    return [
+        home / ".agents" / "skills",
+        codex / "skills",
+        config / "opencode" / "skills",
+        config / "opencode" / "skill",
+    ]
+
+
 def _runtime_root_for_skills(plan: Any) -> Path:
     """Resolve the runtime root used for `.wf/skills` discovery."""
 
@@ -79,6 +117,16 @@ def _skill_search_roots(plan: Any) -> list[Path]:
     - `<cwd>/.claude/skills`
     - `~/.claude/skills`
 
+    then the skill folders of other agent tools, after every root above:
+    - `<runtime-root>/<folder>` for each of `OTHER_TOOL_PROJECT_SKILL_DIRS`
+    - `<cwd>/<folder>` for each of them
+    - the user-level ones of `_other_tool_user_skill_dirs()`
+
+    The `<runtime-root>` entries walk up the tree as the `.wf` and `.claude`
+    ones do. Searching the other tools' folders last means a name found in
+    one of wfpy's own folders resolves exactly as it did before they were
+    searched; they only add names.
+
     If `WF_SKILLS_ROOT` is set, each directory it names is treated as a
     highest-priority directory that directly contains skill folders. It may
     name several, separated by `os.pathsep`, searched in the order written.
@@ -112,6 +160,20 @@ def _skill_search_roots(plan: Any) -> list[Path]:
 
     home_root = Path.home().resolve()
     add_root(home_root / ".claude" / "skills")
+
+    # Other agent tools' folders come after every root above, so that a
+    # skill already found keeps resolving to the same directory.
+    current = runtime_root
+    while True:
+        for parts in OTHER_TOOL_PROJECT_SKILL_DIRS:
+            add_root(current.joinpath(*parts))
+        if current.parent == current:
+            break
+        current = current.parent
+    for parts in OTHER_TOOL_PROJECT_SKILL_DIRS:
+        add_root(cwd_root.joinpath(*parts))
+    for user_dir in _other_tool_user_skill_dirs():
+        add_root(user_dir)
 
     return roots
 
@@ -214,7 +276,11 @@ def _read_skill_md(skill_name: str, plan: Any) -> tuple[str, Path]:
     if not skill_md.exists() or not skill_md.is_file():
         raise FileNotFoundError(
             f"Skill '{skill_name}' not found at {skill_md}. "
-            "Expected in one of: <runtime>/.wf/skills, <runtime>/.claude/skills, <cwd>/.wf/skills, <cwd>/.claude/skills, ~/.claude/skills"
+            "Expected in one of: <runtime>/.wf/skills, <runtime>/.claude/skills, "
+            "<cwd>/.wf/skills, <cwd>/.claude/skills, ~/.claude/skills, "
+            "then .agents/skills, .codex/skills, .opencode/skills, .opencode/skill "
+            "(at <runtime>, above it, in <cwd>), ~/.agents/skills, $CODEX_HOME/skills, "
+            "$XDG_CONFIG_HOME/opencode/skills"
         )
     size = skill_md.stat().st_size
     if size > SKILL_MD_MAX_BYTES:

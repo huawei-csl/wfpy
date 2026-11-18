@@ -29,6 +29,7 @@ from wfpy._agent_prompt_runtime import (
     _runtime_root_for_skills,
     _skill_search_roots,
 )
+from wfpy.sidecar import FEATURES
 
 
 def make_plan(source_path: str = "", work_dir: str = "") -> types.SimpleNamespace:
@@ -175,3 +176,178 @@ class TestAncestorWalk:
         plan = make_plan(source_path=str(project / "wf.py"))
 
         assert _resolve_skill_dir("wfroot-both", plan) == preferred
+
+
+class TestOtherToolsSkillFolders:
+    """Skills installed for other agent tools are found, after wfpy's own.
+
+    `.agents/skills` is the folder the Agent Skills convention shares between
+    tools and the one Codex documents for a repository; `.codex/skills` is a
+    Codex project configuration's; OpenCode reads `.opencode/skills` and the
+    older `.opencode/skill`. At user level: `~/.agents/skills`,
+    `$CODEX_HOME/skills`, `$XDG_CONFIG_HOME/opencode/skills` (and `skill`).
+    """
+
+    @pytest.fixture(autouse=True)
+    def isolated_home(self, tmp_path, monkeypatch):
+        """A home and a working directory of the test's own, so the real ones'
+        skills cannot answer for the fixture's."""
+        home = tmp_path / "home"
+        home.mkdir()
+        cwd = tmp_path / "cwd"
+        cwd.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.chdir(cwd)
+        return home
+
+    @staticmethod
+    def workflow(project: Path) -> types.SimpleNamespace:
+        nested = project / "flows"
+        nested.mkdir(parents=True, exist_ok=True)
+        (nested / "wf.py").write_text("", encoding="utf-8")
+        return make_plan(source_path=str(nested / "wf.py"))
+
+    @pytest.mark.parametrize(
+        "folder",
+        [
+            (".agents", "skills"),
+            (".codex", "skills"),
+            (".opencode", "skills"),
+            (".opencode", "skill"),
+        ],
+    )
+    def test_a_project_skill_of_another_tool_is_found(self, folder, tmp_path):
+        project = tmp_path / "project"
+        skill_dir = make_skill(project.joinpath(*folder), "wfroot-tool")
+        plan = self.workflow(project)
+
+        assert _resolve_skill_dir("wfroot-tool", plan) == skill_dir
+
+    def test_a_user_skill_of_another_tool_is_found(self, tmp_path, isolated_home, monkeypatch):
+        codex_home = tmp_path / "codex-home"
+        config_home = tmp_path / "config"
+        monkeypatch.setenv("CODEX_HOME", str(codex_home))
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
+        agents = make_skill(isolated_home / ".agents" / "skills", "wfroot-user-agents")
+        codex = make_skill(codex_home / "skills", "wfroot-user-codex")
+        opencode = make_skill(config_home / "opencode" / "skills", "wfroot-user-opencode")
+        legacy = make_skill(config_home / "opencode" / "skill", "wfroot-user-opencode-legacy")
+        plan = self.workflow(tmp_path / "project")
+
+        assert _resolve_skill_dir("wfroot-user-agents", plan) == agents
+        assert _resolve_skill_dir("wfroot-user-codex", plan) == codex
+        assert _resolve_skill_dir("wfroot-user-opencode", plan) == opencode
+        assert _resolve_skill_dir("wfroot-user-opencode-legacy", plan) == legacy
+
+    def test_codex_home_and_xdg_config_home_default_under_home(self, tmp_path, isolated_home):
+        codex = make_skill(isolated_home / ".codex" / "skills", "wfroot-default-codex")
+        opencode = make_skill(
+            isolated_home / ".config" / "opencode" / "skills", "wfroot-default-opencode"
+        )
+        plan = self.workflow(tmp_path / "project")
+
+        assert _resolve_skill_dir("wfroot-default-codex", plan) == codex
+        assert _resolve_skill_dir("wfroot-default-opencode", plan) == opencode
+
+    def test_the_roots_searched_before_keep_their_order_and_come_first(
+        self, tmp_path, isolated_home
+    ):
+        """What was searched before the other tools' folders is searched in
+        the same order, ahead of all of them."""
+        project = tmp_path / "project"
+        plan = self.workflow(project)
+        runtime_root = (project / "flows").resolve()
+        cwd = Path.cwd().resolve()
+        home = isolated_home.resolve()
+
+        before: list[Path] = []
+        for level in [runtime_root, *runtime_root.parents]:
+            for candidate in (level / ".wf" / "skills", level / ".claude" / "skills"):
+                if candidate not in before:
+                    before.append(candidate)
+        for candidate in (
+            cwd / ".wf" / "skills",
+            cwd / ".claude" / "skills",
+            home / ".claude" / "skills",
+        ):
+            if candidate not in before:
+                before.append(candidate)
+
+        after: list[Path] = []
+        tools = [
+            (".agents", "skills"),
+            (".codex", "skills"),
+            (".opencode", "skills"),
+            (".opencode", "skill"),
+        ]
+        for level in [runtime_root, *runtime_root.parents, cwd]:
+            for parts in tools:
+                candidate = level.joinpath(*parts)
+                if candidate not in after:
+                    after.append(candidate)
+        for candidate in (
+            home / ".agents" / "skills",
+            home / ".codex" / "skills",
+            home / ".config" / "opencode" / "skills",
+            home / ".config" / "opencode" / "skill",
+        ):
+            if candidate not in after:
+                after.append(candidate)
+
+        assert _skill_search_roots(plan) == before + after
+
+    def test_a_name_in_claude_skills_and_codex_skills_keeps_resolving_to_claude(self, tmp_path):
+        """The regression guard: a name that resolved before the other tools'
+        folders were searched resolves to the same directory now."""
+        project = tmp_path / "project"
+        preferred = make_skill(project / ".claude" / "skills", "wfroot-both-tools", body="claude")
+        make_skill(project / ".codex" / "skills", "wfroot-both-tools", body="codex")
+        plan = self.workflow(project)
+
+        assert _resolve_skill_dir("wfroot-both-tools", plan) == preferred
+
+    def test_a_user_claude_skill_outranks_a_project_skill_of_another_tool(
+        self, tmp_path, isolated_home
+    ):
+        """Every root searched before comes first, `~/.claude/skills` too: a
+        name it holds resolves there as it did, though a project folder of
+        another tool holds it as well."""
+        project = tmp_path / "project"
+        preferred = make_skill(isolated_home / ".claude" / "skills", "wfroot-home-first")
+        make_skill(project / "flows" / ".agents" / "skills", "wfroot-home-first")
+        plan = self.workflow(project)
+
+        assert _resolve_skill_dir("wfroot-home-first", plan) == preferred
+
+    def test_nearer_levels_and_the_shared_folder_win_among_other_tools(self, tmp_path):
+        project = tmp_path / "project"
+        nearer = make_skill(project / "flows" / ".opencode" / "skills", "wfroot-level")
+        make_skill(project / ".agents" / "skills", "wfroot-level")
+        shared = make_skill(project / ".agents" / "skills", "wfroot-same-level")
+        make_skill(project / ".codex" / "skills", "wfroot-same-level")
+        plan = self.workflow(project)
+
+        assert _resolve_skill_dir("wfroot-level", plan) == nearer
+        assert _resolve_skill_dir("wfroot-same-level", plan) == shared
+
+    def test_wf_skills_root_still_comes_first(self, tmp_path, monkeypatch):
+        explicit = tmp_path / "explicit"
+        preferred = make_skill(explicit, "wfroot-explicit-first")
+        project = tmp_path / "project"
+        make_skill(project / ".agents" / "skills", "wfroot-explicit-first")
+        monkeypatch.setenv("WF_SKILLS_ROOT", str(explicit))
+
+        assert _resolve_skill_dir("wfroot-explicit-first", self.workflow(project)) == preferred
+
+    def test_a_symlinked_skill_of_another_tool_is_found(self, tmp_path):
+        installed = make_skill(tmp_path / "checkout", "wfroot-linked-tool")
+        project = tmp_path / "project"
+        (project / ".agents" / "skills").mkdir(parents=True)
+        (project / ".agents" / "skills" / "wfroot-linked-tool").symlink_to(installed)
+
+        assert _resolve_skill_dir("wfroot-linked-tool", self.workflow(project)) == installed
+
+    def test_the_sidecar_says_so(self):
+        """An IDE offers what a run finds by asking which lookup it has."""
+        assert FEATURES["skillRootsList"] is True
+        assert FEATURES["agentSkillFolders"] is True

@@ -14,11 +14,25 @@ All notable changes to wfpy are documented here. The format follows
   (`pypto-op-perf-tune/tune-swimlane`) is only reachable when its own
   directory is a root, which one value could not say while also naming the
   collection around it. It also lets an operator point wfpy at the skill
-  directories of several tools (`.claude/skills`, `.codex/skills`,
-  `.agents/skills`) without wfpy knowing any of their layouts. The first
+  directories of several tools, wherever they keep them. The first
   directory listed stays the runtime root: the base of the walk up the tree
   for `.wf/skills` and `.claude/skills`, and the directory a skill hook runs
   in.
+- A skill installed for another agent tool is found. A skill is the same
+  `SKILL.md` folder whichever tool installed it, but wfpy looked only in its
+  own and Claude's folders, so a skill installed for Codex or OpenCode was
+  reported as not found unless `WF_SKILLS_ROOT` named its folder. wfpy now
+  also searches `.agents/skills` (the folder the Agent Skills convention
+  shares between tools), `.codex/skills`, `.opencode/skills` and
+  `.opencode/skill`, beside the workflow, above it and in the working
+  directory, then `~/.agents/skills`, `$CODEX_HOME/skills` (`~/.codex`
+  by default) and `$XDG_CONFIG_HOME/opencode/skills` and `skill`
+  (`~/.config` by default). They are searched after every folder searched
+  before, `~/.claude/skills` included, so a name that resolved before
+  resolves to the same folder: these folders only add names. The sidecar's
+  `getCapabilities` says so (`features.agentSkillFolders`, and
+  `features.skillRootsList` for the list-valued `WF_SKILLS_ROOT` and the
+  symlinked skill), so an IDE offers the skills a run finds.
 - The sidecar answers `pythonEnvironment` for a workflow file: the
   interpreter running it, the import roots `wfpy plan` loads the file with,
   and the folders its installed packages come from. An IDE configures its
