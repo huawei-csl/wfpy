@@ -16,7 +16,7 @@ from typing import Any, AsyncGenerator, Callable, Optional
 
 import acp
 from acp.client.connection import ClientSideConnection
-from acp.schema import AllowedOutcome, DeniedOutcome
+from acp.schema import AllowedOutcome, DeniedOutcome, TextContentBlock
 
 from wfpy.connectors import DEFAULT_STUCK_RETRIES, DEFAULT_STUCK_TIMEOUT_MS
 
@@ -130,8 +130,9 @@ class SimpleClient:
                 self._emit({"type": "agent.message.delta", "field": "reasoning", "delta": content.text})
         elif hasattr(update, 'sessionUpdate') and update.sessionUpdate == 'tool_call':
             # An ACP tool call carries a title ("Write choice-a.txt") and a
-            # kind ("edit", "execute"), not a name: the title is what a
-            # viewer shows, the kind what it groups by.
+            # kind ("edit", "execute"): the title is what a viewer shows, the
+            # kind what it groups by. Since schema 1.23 (SDK 1.0) it may also
+            # carry the tool's own name, which is then the name reported.
             tool = _tool_call_fields(update)
             logger.info(f"Tool call: {tool['name']}")
             self._emit({"type": "agent.tool_call", **tool})
@@ -413,9 +414,9 @@ class ACPClient:
             
         logger.info(f"Sending prompt to session {session_id}: {prompt[:100]}...")
         
-        # Create text content block using helper
-        from acp import text_block
-        prompt_blocks = [text_block(prompt)]
+        # One text content block, built from the schema's own model: the
+        # `text_block` helper that used to build it was removed in SDK 1.0.
+        prompt_blocks = [TextContentBlock(type="text", text=prompt)]
         
         response = await self.connection.prompt(
             session_id=session_id,

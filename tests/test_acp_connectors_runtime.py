@@ -223,6 +223,33 @@ class TestSessionCwd:
         assert client.connection.cwds == [str(tmp_path)]
 
 
+class TestThePrompt:
+    """The prompt goes out as one text content block, built from the SDK's own
+    schema model: the `text_block` helper that used to build it was removed in
+    SDK 1.0, and with it every prompt failed before it was sent."""
+
+    class Connection:
+        def __init__(self):
+            self.prompts = []
+
+        async def prompt(self, session_id, prompt):
+            self.prompts.append((session_id, prompt))
+            return types.SimpleNamespace(stopReason="end_turn")
+
+    def test_the_prompt_is_one_text_block(self):
+        client = ACPClient()
+        client.connection = self.Connection()
+        client.client = types.SimpleNamespace(response_text="")
+        result = asyncio.run(client.send_prompt("s", "What is 2+2?"))
+        assert result == {"stop_reason": "end_turn", "text": ""}
+        [(session_id, blocks)] = client.connection.prompts
+        assert session_id == "s"
+        # What the protocol puts on the wire for it.
+        assert [b.model_dump(by_alias=True, exclude_none=True) for b in blocks] == [
+            {"type": "text", "text": "What is 2+2?"}
+        ]
+
+
 class TestWhenAcpFails:
     """Only OpenCode has a CLI to fall back to; another agent's failure is the firing's error."""
 
