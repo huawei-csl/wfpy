@@ -102,5 +102,8 @@ Public API is re-exported from `src/wfpy/__init__.py`.
 
 - `tests/conftest.py` provides env cleanup fixtures and `mock_invoke_agent`.
 - `test_acp_simple.py` is skipped unless the optional `agent` extra is installed.
+  With the extra, it drives a real OpenCode agent (three tests, real model
+  turns); pass `--ignore tests/test_acp_simple.py` to leave it out. CI installs
+  `.[dev]` only, so no ACP test runs there.
 - There are no `examples/` in this repo yet; nothing in `tests/` may depend on
   example files, or a missing example will abort collection for the whole suite.

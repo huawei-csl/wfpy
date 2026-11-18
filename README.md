@@ -39,6 +39,44 @@ For local development, clone and install editable: `pip install -e ".[dev]"`.
 wfpy run my_workflow.py          # run a workflow
 ```
 
+## Dependencies
+
+wfpy needs Python 3.10 or newer. What `pip` installs beside it depends on the
+extra:
+
+| Install | Package | Version | Used for |
+|---|---|---|---|
+| `wfpy` | `libcst` | `>=1.4` | the rewrite engine and the sidecar's source edits |
+| `wfpy` | `tomli` | `>=2.0`, on Python 3.10 only | reading `connectors.toml` (Python 3.11 has `tomllib`) |
+| `wfpy[agent]` | `httpx` | `>=0.27` | the HTTP API transport of an `@agent` |
+| `wfpy[agent]` | `mcp` | `>=1.9` | MCP tools for an agent |
+| `wfpy[agent]` | `agent-client-protocol` | `>=1.0,<2` | the ACP transport (the package is imported as `acp`) |
+| `wfpy[dev]` | `pytest`, `pytest-asyncio`, `mypy`, `ruff` | | the tests, the type check, the lint |
+
+A workflow of tasks and tools needs the core only. The `agent` extra adds what
+an `@agent` needs for the HTTP API transport, for MCP tools and for the ACP
+transport.
+
+An agent on the `acp` transport needs one thing more, which `pip` does not
+install: a connector, the command wfpy spawns. Most are Node.js packages; they
+are listed, with the Node.js version each needs, under
+[Agent connectors (ACP)](#agent-connectors-acp).
+
+**The ACP SDK is held to its 1.x releases.** `agent-client-protocol` 1.0.0
+removed an API that wfpy 1.1.0 and earlier call, and those releases accept any
+SDK from 0.10 up. A fresh `wfpy[agent]` install of one of them therefore fails
+at the first prompt of an ACP agent:
+
+```text
+ImportError: cannot import name 'text_block' from 'acp'
+```
+
+With those releases, keep the SDK below 1.0:
+
+```bash
+pip install "agent-client-protocol<1"
+```
+
 ## Agent connectors (ACP)
 
 An `@agent` on the `acp` transport, and the chat in the wfpy IDE, talk to a
