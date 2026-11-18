@@ -2647,6 +2647,10 @@ def _run_sub_plan(
     # `run()` sets the options on the top plan once every sub-plan is built,
     # so a nested workflow receives them here, each time it fires.
     sub_plan.options = _nested_options(parent_plan.options)
+    # The validator registry is built from those options (`validate`) and the
+    # source path, on the top plan as well. A sub-plan without one skips every
+    # validator its ports declare, in silence.
+    sub_plan.validator_registry = parent_plan.validator_registry
 
     # Its outputs are copied beside its siblings': name them for this
     # instance and firing, as a tool's outputs are.

@@ -167,6 +167,42 @@ def test_agents_of_two_instances_of_a_workflow_keep_their_files_apart(
     assert [Path(p).read_text() for p in outputs["OutB"]] == ["note for b"]
 
 
+def test_a_ports_validators_run_inside_a_nested_workflow(
+    tmp_path: Path, clean_validator_env: None
+) -> None:
+    """The validator registry is held by the top plan. A sub-plan had none, so
+    a validator declared on a port of a nested actor never ran: the same agent
+    that fails a run at the top level passed inside a nested workflow."""
+
+    @agent(prompt="Write JSON.", transport="mock", mock_outputs={"Out": "this is not json"})
+    class Writer:
+        class Ports:
+            In = Port[str](direction="in")
+            Out = Port[File](direction="out", ext=".json", validate=["json.parse"])
+
+    @workflow(inputs={"In": str}, outputs={"Out": File(ext=".json")})
+    def inner():
+        w = Writer()
+        connect("In", w.In)
+        connect(w.Out, "Out")
+
+    @workflow(inputs={"In": str}, outputs={"Out": File(ext=".json")})
+    def top():
+        child = inner()
+        connect("In", child.In)
+        connect(child.Out, "Out")
+
+    failure = r"Output validation failed on w\.Out \(validator=json\.parse\)"
+    with pytest.raises(RuntimeError, match=failure):
+        run(inner, inputs={"In": "x"}, out_dir=tmp_path / "top-level", verbose=False)
+    with pytest.raises(RuntimeError, match=failure):
+        run(top, inputs={"In": "x"}, out_dir=tmp_path / "nested", verbose=False)
+
+    # The run's `validate` option reaches the nested workflow through it.
+    outputs = run(top, inputs={"In": "x"}, out_dir=tmp_path / "off", validate="off", verbose=False)
+    assert [Path(p).read_text() for p in outputs["Out"]] == ["this is not json"]
+
+
 def test_sibling_workflow_outputs_keep_their_own_files(tmp_path: Path) -> None:
     raw = tmp_path / "raw"
     raw.mkdir()
