@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from wfpy import _source_text
 from wfpy.core import TaskMeta, WorkflowDef
 from wfpy.types import infer_resource_kind
 
@@ -33,14 +34,20 @@ def _upsert_definition_annotation(
     meta_obj: dict[str, Any],
     annotation_name: str,
     annotation_args: list[dict[str, Any]] | None = None,
+    derived: bool = False,
 ) -> None:
-    """Add or replace a definition annotation entry in meta_obj."""
+    """Add or replace a definition annotation entry in meta_obj.
+
+    ``derived``: wfpy works the annotation out (a source's `viewer`); the
+    class does not write it."""
     ann_list = meta_obj.setdefault("definitionAnnotations", [])
     if not isinstance(ann_list, list):
         ann_list = []
         meta_obj["definitionAnnotations"] = ann_list
 
     payload: dict[str, Any] = {"name": annotation_name}
+    if derived:
+        payload["derived"] = True
     if annotation_args is not None:
         payload["arguments"] = annotation_args
 
@@ -68,23 +75,140 @@ def _wf_string_list_expr(items: list[str]) -> str:
     return "[" + ", ".join(_wf_string_literal(item) for item in items) + "]"
 
 
-def _annotation_entries(ann: Any) -> list[dict[str, Any]]:
-    """Convert raw annotations dict to structured annotation entries."""
+def _annotation_entries(
+    ann: Any, written: dict[str, dict[str, Any]] | None = None
+) -> list[dict[str, Any]]:
+    """Convert raw annotations dict to structured annotation entries.
+
+    Each argument's ``value`` is a Python expression: the text the class's
+    decorator wrote for it, or the value written as a literal where the
+    decorator does not write it. ``written`` is the class's decorators
+    (``_source_text.class_decorators``); with it, an annotation no decorator
+    of the class writes, and an argument its decorator does not, are marked
+    ``derived``: wfpy worked them out, and writing them back would add what
+    the class never said."""
     entries: list[dict[str, Any]] = []
     if isinstance(ann, dict):
         for name, args in ann.items():
+            decorator = written.get(name) if written is not None else None
+            entry: dict[str, Any] = {"name": name}
+            if written is not None and decorator is None:
+                entry["derived"] = True
             if isinstance(args, dict):
-                entries.append(
-                    {
-                        "name": name,
-                        "arguments": [
-                            {"name": str(k), "value": str(v)} for k, v in args.items()
-                        ],
+                arguments: list[dict[str, Any]] = []
+                for k, v in args.items():
+                    text = decorator["keywords"].get(str(k)) if decorator is not None else None
+                    argument: dict[str, Any] = {
+                        "name": str(k),
+                        "value": text if text is not None else _source_text.python_literal(v),
                     }
-                )
-            else:
-                entries.append({"name": name})
+                    if decorator is not None and text is None and not decorator["starred"]:
+                        argument["derived"] = True
+                    arguments.append(argument)
+                entry["arguments"] = arguments
+            entries.append(entry)
     return entries
+
+
+# The `@viewer(...)` keywords each argument of the exported `viewer`
+# annotation comes from; one not listed (`source`, `path`, `kind`) wfpy
+# works out.
+_VIEWER_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "action": ("action_name",),
+    "inputs": ("inputs",),
+    "viewType": ("viewType",),
+    "command": ("command", "command_name"),
+    "args": ("args", "command_args"),
+}
+
+
+def _mark_viewer_arguments(
+    viewer_args: list[dict[str, Any]], written: dict[str, dict[str, Any]] | None
+) -> bool:
+    """Mark the arguments of a written `@viewer(...)` it does not write;
+    True when no `@viewer` is written on the class at all."""
+    if written is None:
+        return False
+    decorator = written.get("viewer")
+    if decorator is None:
+        return True
+    if decorator["starred"]:
+        return False
+    for argument in viewer_args:
+        keywords = _VIEWER_KEYWORDS.get(str(argument.get("name")), ())
+        if not any(k in decorator["keywords"] for k in keywords):
+            argument["derived"] = True
+    return False
+
+
+def _parameter_entries(rec: Any) -> list[dict[str, Any]]:
+    """A task node's parameters: each with the value it received (``value``)
+    and, where the call that made the node writes it, that text
+    (``expression``)."""
+    cls = getattr(rec.meta, "cls", None)
+    expressions = _source_text.call_expressions(
+        _source_text.instantiation_call(
+            getattr(rec.instance, "_wfpy_source", None),
+            getattr(cls, "__name__", None),
+        )
+    )
+    entries: list[dict[str, Any]] = []
+    for name, tp in rec.meta.parameters.items():
+        entry: dict[str, Any] = {
+            "name": name,
+            "kind": "value",
+            "type": _display_type(tp),
+            "value": repr(getattr(rec.instance, name, None)),
+        }
+        if name in expressions:
+            entry["expression"] = expressions[name]
+        entries.append(entry)
+    return entries
+
+
+def _factory_parameter_entries(
+    rec: Any,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]] | None:
+    """A node of a workflow a factory builds (`x = factory(...)()`): its
+    parameters -- the factory's, with the value the factory received where
+    wfpy knows it and the call's text where the call writes it -- and its
+    definition's parameters, the factory's signature (``defaultValue`` only
+    where it declares one)."""
+    wf_def: WorkflowDef = rec.meta
+    if not wf_def.factory_name:
+        return None
+    signature = _source_text.factory_signature(getattr(rec.instance, "_wfpy_definition", None))
+    received = {
+        str(item.get("name")): item
+        for item in getattr(rec.instance, "_wfpy_factory_parameters", None) or []
+        if isinstance(item, dict)
+    }
+    if signature is None:
+        signature = [{"name": name} for name in received]
+    expressions = _source_text.call_expressions(
+        _source_text.instantiation_call(
+            getattr(rec.instance, "_wfpy_source", None), wf_def.factory_name, factory=True
+        ),
+        _source_text.factory_positional_names(getattr(rec.instance, "_wfpy_definition", None)),
+    )
+    parameters: list[dict[str, Any]] = []
+    definition_params: list[dict[str, Any]] = []
+    for declared in signature:
+        name = declared["name"]
+        known = received.get(name)
+        known_type = str(known["type"]) if known and known.get("type") else "Any"
+        type_name = declared.get("type") or known_type
+        definition_param: dict[str, Any] = {"name": name, "kind": "value", "type": type_name}
+        if "defaultValue" in declared:
+            definition_param["defaultValue"] = declared["defaultValue"]
+        definition_params.append(definition_param)
+        parameter: dict[str, Any] = {"name": name, "kind": "value", "type": type_name}
+        if known is not None:
+            parameter["value"] = repr(known.get("value"))
+        if name in expressions:
+            parameter["expression"] = expressions[name]
+        parameters.append(parameter)
+    return parameters, definition_params
 
 
 def _build_task_meta(
@@ -94,9 +218,10 @@ def _build_task_meta(
 ) -> dict[str, Any]:
     """Build the meta dict for a task actor node."""
     meta: dict[str, Any] = {"taskKind": rec.meta.kind}
+    written = _source_text.class_decorators(rec.meta.cls)
 
     if rec.meta.annotations:
-        meta["definitionAnnotations"] = _annotation_entries(rec.meta.annotations)
+        meta["definitionAnnotations"] = _annotation_entries(rec.meta.annotations, written)
     if rec.meta.schedule is not None:
         schedule_args: list[dict[str, Any]] = [
             {"name": "initial", "value": _wf_string_literal(rec.meta.schedule.initial)}
@@ -213,16 +338,9 @@ def _build_task_meta(
                         "value": _wf_string_list_expr([str(item) for item in command_args]),
                     }
                 )
-        _upsert_definition_annotation(meta, "viewer", viewer_args)
-    meta["parameters"] = [
-        {
-            "name": name,
-            "kind": "value",
-            "type": _display_type(tp),
-            "value": repr(getattr(rec.instance, name, None)),
-        }
-        for name, tp in rec.meta.parameters.items()
-    ]
+        derived = _mark_viewer_arguments(viewer_args, written)
+        _upsert_definition_annotation(meta, "viewer", viewer_args, derived=derived)
+    meta["parameters"] = _parameter_entries(rec)
     meta["definitionParams"] = [
         {"name": name, "kind": "value", "type": _display_type(tp)}
         for name, tp in rec.meta.parameters.items()
@@ -767,6 +885,9 @@ def export_graph_json(graph: Any) -> dict[str, Any]:
                         "arguments": [{"name": "run", "value": _wf_string_literal(run_path)}],
                     }
                 ]
+            factory_entries = _factory_parameter_entries(rec)
+            if factory_entries is not None:
+                meta["parameters"], meta["definitionParams"] = factory_entries
             for port_name, port_type in rec.meta.input_names.items():
                 ports.append(
                     {
@@ -891,10 +1012,44 @@ def export_graph_json(graph: Any) -> dict[str, Any]:
     if graph.factory_name or graph.factory_parameters:
         graph_payload["meta"] = {
             **({"factoryName": graph.factory_name} if graph.factory_name else {}),
-            **({"parameters": graph.factory_parameters} if graph.factory_parameters else {}),
+            **(
+                {"parameters": _graph_factory_parameters(graph)}
+                if graph.factory_parameters
+                else {}
+            ),
         }
 
     return {
         "version": "1.1",
         "graph": graph_payload,
     }
+
+
+def _graph_factory_parameters(graph: Any) -> list[dict[str, Any]]:
+    """The values the factory that built this workflow received ({name,
+    value, type}), each with ``defaultValue``, the text of the default its
+    signature declares, only where it declares one: a value is what this
+    instance was given, not a default. One the signature declares with no
+    default says so (``required``): a reader cannot tell a parameter with
+    none from a producer that does not say."""
+    builder = getattr(graph, "factory_builder", None)
+    definition = None
+    if builder is not None:
+        from wfpy.graph import _definition_location
+
+        try:
+            definition = _definition_location(builder)
+        except (OSError, TypeError):
+            definition = None
+    signature = _source_text.factory_signature(definition) or []
+    defaults = {p["name"]: p["defaultValue"] for p in signature if "defaultValue" in p}
+    declared = {p["name"] for p in signature}
+    entries: list[dict[str, Any]] = []
+    for item in graph.factory_parameters:
+        entry = dict(item)
+        if entry.get("name") in defaults:
+            entry["defaultValue"] = defaults[entry["name"]]
+        elif entry.get("name") in declared:
+            entry["required"] = True
+        entries.append(entry)
+    return entries

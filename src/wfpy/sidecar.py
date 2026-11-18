@@ -17,6 +17,8 @@ from typing import Any
 
 import libcst as cst
 
+from wfpy._project_index import port_uses, type_parameters
+from wfpy._python_environment import python_environment
 from wfpy._workflow_instance import discover_workflow_instances
 from wfpy.package_exports import apply_package_export, find_package_export
 from wfpy.rewrite import (
@@ -43,14 +45,52 @@ _OP_ALIASES = {
 
 # Query ops (read-only): bare op name → callable(engine, args) -> diagnostic dict.
 _QUERY_OPS: dict[str, Callable[[RewriteEngine, dict[str, Any]], dict[str, Any]]] = {
-    "listTaskTypes": lambda engine, args: {"types": engine.list_task_types(**args)},
+    "listTaskTypes": lambda engine, args: _list_task_types(engine, args),
     "listInstanceNames": lambda engine, args: {"names": engine.list_instance_names(**args)},
     "listWorkflowTypes": lambda engine, args: {"types": engine.list_workflow_types()},
     "listWorkflowInstances": lambda engine, args: {
         "candidates": discover_workflow_instances(engine.file_path)
     },
     "exportWorkflowGraph": lambda engine, args: {"graph": _export_graph(engine, args)},
+    # Where this interpreter finds what the file imports: the IDE configures
+    # its Python language server from it (see `_python_environment`). Listed
+    # here to be advertised; `_handle_request` answers it before the file is
+    # parsed.
+    "pythonEnvironment": lambda engine, args: python_environment(engine.file_path),
+    # Which workflows of the project instantiate a class of this file: the
+    # `usedIn` of a rename or a delete of one of its ports.
+    "portUses": lambda engine, args: _port_uses(engine, args),
+    # The parameters a type takes, for the IDE to ask for before it creates
+    # an instance of it.
+    "typeParameters": lambda engine, args: _type_parameters(engine, args),
 }
+
+
+def _list_task_types(engine: RewriteEngine, args: dict[str, Any]) -> dict[str, Any]:
+    """The classes of the file of one kind, or of every kind, grouped by it.
+
+    A type belongs to the file, not to one workflow: a ``workflow`` scope the
+    caller adds to every query, as a chat tool does, is ignored here.
+    """
+    kind = str(args.get("kind") or "").strip()
+    if kind:
+        return {"types": engine.list_task_types(kind=kind)}
+    by_kind = engine.task_types_by_kind()
+    return {"types": sorted({name for types in by_kind.values() for name in types}), "byKind": by_kind}
+
+
+def _port_uses(engine: RewriteEngine, args: dict[str, Any]) -> dict[str, Any]:
+    entity = str(args.get("entity") or args.get("entityType") or "").strip()
+    if not entity:
+        raise RewriteError(message="missing entity for portUses", diagnostic={"code": "invalid_port_uses_args"})
+    return port_uses(engine.file_path, entity)
+
+
+def _type_parameters(engine: RewriteEngine, args: dict[str, Any]) -> dict[str, Any]:
+    type_name = str(args.get("type") or args.get("entityType") or "").strip()
+    if not type_name:
+        raise RewriteError(message="missing type for typeParameters", diagnostic={"code": "invalid_type_parameters_args"})
+    return type_parameters(engine.file_path, type_name)
 
 
 def _export_graph(engine: RewriteEngine, args: dict[str, Any]) -> dict[str, Any]:
@@ -113,6 +153,15 @@ FEATURES = {
     "layout": False,
     "expectedRevision": True,
     "partialGraph": True,
+    # A rename or a delete of a class's port follows, or is refused by, the
+    # workflows the IDE names as using the class (`usedIn`), in other files
+    # too; `portUses {entity}` answers which those are.
+    "portUsesAcrossFiles": True,
+    "portUsesQuery": True,
+    # `typeParameters {type}`: what to ask for before creating an instance.
+    "typeParameters": True,
+    # createNode writes `expressions: {name: source}` as given.
+    "createNodeExpressions": True,
 }
 
 SIDECAR_CONTRACTS = {
@@ -476,6 +525,27 @@ def _handle_request(payload: dict[str, Any]) -> SidecarResponse:
             diagnostic={"code": "parse_error"},
         )
 
+    if op == "pythonEnvironment":
+        # Asked of the interpreter, not of the source: a file that does not
+        # parse yet is imported from the same places.
+        try:
+            environment = python_environment(file_path)
+        except Exception as exc:
+            return SidecarResponse(
+                status="error",
+                file=file_path,
+                revision=_current_revision(file_path),
+                message=f"Unhandled error: {exc}",
+                diagnostic={"code": "internal_error"},
+            )
+        return SidecarResponse(
+            status="ok",
+            file=file_path,
+            revision=_current_revision(file_path),
+            message="ok",
+            diagnostic=environment,
+        )
+
     try:
         module, source_text, revision = load_module(file_path)
         engine = RewriteEngine(file_path, module, source_text)
@@ -575,7 +645,16 @@ def _handle_request(payload: dict[str, Any]) -> SidecarResponse:
         getattr(engine, method_name)(**args)
         engine.save()
 
-        changed = _export_created_class(file_path, created_name) if update_exports else None
+        # The other files the op wrote (the connections of a renamed port in
+        # the workflows that use its class), for the host's undo.
+        changed = [
+            {"file": other.file_path, "revision": _normalize_revision(other.revision)}
+            for other in engine.changed_companions()
+        ] or None
+        if update_exports:
+            exported = _export_created_class(file_path, created_name)
+            if exported:
+                changed = [*(changed or []), *exported]
         return SidecarResponse(
             status="ok",
             file=file_path,

@@ -15,10 +15,14 @@ from wfpy._agent_tools_runtime import (
 )
 
 
+# The HTTP transport's model when an agent names none.
+DEFAULT_HTTP_MODEL = "openai/gpt-4o"
+
+
 def _resolve_provider_model(spec: Any) -> tuple[str, str]:
     """Split ``spec.model`` into ``(provider, model)`` when encoded as ``provider/model``."""
 
-    model = spec.model
+    model = spec.model or DEFAULT_HTTP_MODEL
     provider = spec.provider
     if "/" in model and provider is None:
         provider, model = model.split("/", 1)

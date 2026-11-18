@@ -620,3 +620,111 @@ def test_partial_graph_renders_broken_edge_and_phantom_port(tmp_path: Path) -> N
 
     # (c) The consumer node still carries its node-level error flag.
     assert consumer["meta"]["isErrored"] is True
+
+
+def test_partial_graph_flags_a_node_given_whole_to_connect(tmp_path: Path) -> None:
+    """``connect(producer.Out, consumer)``: the message is the consumer's, not lost."""
+    from wfpy.partial import build_partial_graph
+
+    src = tmp_path / "wf.py"
+    src.write_text(_WF_PARTIAL_BAD_PORT.replace("consumer.Nope", "consumer"), encoding="utf-8")
+
+    data = build_partial_graph(str(src), "demo", RuntimeError("elaboration failed"))
+    consumer = next(n for n in data["graph"]["nodes"] if n["label"] == "consumer")
+    diagnostics = consumer["meta"]["diagnostics"]
+    assert [d["code"] for d in diagnostics] == ["node_not_port"]
+    assert "target is the node 'consumer'" in diagnostics[0]["message"]
+    assert "consumer.In" in diagnostics[0]["message"]
+    assert consumer["location"]["line"] == 20
+
+
+def test_python_environment_names_the_interpreter_and_the_files_import_roots(tmp_path):
+    import sys
+
+    from wfpy.sidecar import SUPPORTED_OPS, _handle_request
+
+    project = tmp_path / "project"
+    package = project / "flows"
+    package.mkdir(parents=True)
+    (project / "pyproject.toml").write_text("[project]\nname = 'p'\n", encoding="utf-8")
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    # Not a file that parses: the answer is the interpreter's, not the source's.
+    workflow = package / "main.py"
+    workflow.write_text("def broken(:\n", encoding="utf-8")
+
+    response = _handle_request({"op": "wfpy.pythonEnvironment", "file": str(workflow)})
+
+    assert response.status == "ok"
+    answer = response.diagnostic
+    assert answer["interpreter"] == sys.executable
+    assert answer["prefix"] == sys.prefix
+    assert answer["roots"][0] == str(package.resolve())
+    assert str(project.resolve()) in answer["roots"]
+    # Where wfpy itself is imported from, and no folder of the standard library.
+    import os
+    import sysconfig
+
+    import wfpy
+
+    wfpy_root = str(Path(wfpy.__file__).resolve().parent.parent)
+    assert wfpy_root in answer["libraryPaths"] or wfpy_root in answer["roots"]
+    assert os.path.realpath(sysconfig.get_paths()["stdlib"]) not in answer["libraryPaths"]
+    assert all(os.path.isdir(entry) for entry in answer["libraryPaths"])
+    assert not set(answer["roots"]) & set(answer["libraryPaths"])
+    # Not the folder this process was started in, nor the interpreter's own.
+    assert os.path.realpath(os.getcwd()) not in answer["libraryPaths"]
+    assert os.path.realpath(sys.prefix) not in answer["libraryPaths"]
+    assert "pythonEnvironment" in SUPPORTED_OPS
+
+
+def test_python_environment_that_fails_is_an_error_answer_not_a_crash(monkeypatch, tmp_path):
+    import wfpy.sidecar as sidecar
+
+    def broken(file_path):
+        raise RuntimeError("no interpreter today")
+
+    monkeypatch.setattr(sidecar, "python_environment", broken)
+    response = sidecar._handle_request({"op": "pythonEnvironment", "file": str(tmp_path / "w.py")})
+
+    assert response.status == "error"
+    assert response.diagnostic == {"code": "internal_error"}
+    assert "no interpreter today" in response.message
+
+
+def test_task_types_of_every_kind_without_a_kind(tmp_path: Path) -> None:
+    """A chat tool asks with no kind, and with the workflow it scopes every query to."""
+    src = tmp_path / "wf.py"
+    src.write_text(
+        """
+from wfpy import agent, source, task, workflow
+
+
+@task
+class Split:
+    pass
+
+
+@agent(prompt="p")
+class Summarize:
+    pass
+
+
+@source
+class Text:
+    pass
+
+
+@workflow
+def demo():
+    pass
+""",
+        encoding="utf-8",
+    )
+
+    resp = _handle_request({"file": str(src), "op": "wfpy.listTaskTypes", "args": {"workflow": "demo"}})
+    assert resp.status == "ok", resp
+    assert resp.diagnostic["types"] == ["Split", "Summarize", "Text"]
+    assert resp.diagnostic["byKind"] == {"task": ["Split"], "agent": ["Summarize"], "source": ["Text"]}
+
+    one = _handle_request({"file": str(src), "op": "wfpy.listTaskTypes", "args": {"kind": "agent"}})
+    assert one.diagnostic["types"] == ["Summarize"]

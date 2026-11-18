@@ -6,6 +6,112 @@ All notable changes to wfpy are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- The sidecar answers `pythonEnvironment` for a workflow file: the
+  interpreter running it, the import roots `wfpy plan` loads the file with,
+  and the folders its installed packages come from. An IDE configures its
+  Python language server from the answer, so a workflow that runs is not
+  drawn with its imports underlined because the editor looks elsewhere.
+- The graph export says what the source wrote beside what it evaluated to.
+  A node's parameter carries `expression`, the text of its keyword in the
+  call that made the node (`File(path=TESTBENCH)`, not the `File(...)` it
+  built); a node of a workflow a factory builds (`x = factory(...)()`) has
+  the factory's parameters, with the call's text, and the factory's
+  signature as `definitionParams` (`defaultValue` only where it declares
+  one). A nested workflow's `graph.meta.parameters` add `defaultValue` the
+  same way: `value` is what this instance was given, not a default.
+- An annotation argument's `value` is a Python expression, the decorator's
+  own text where it writes the argument (`network=NETWORK`), and an
+  annotation or argument wfpy works out (the `viewer` a source or a
+  StreamBlocks class gets, a source's `port`, a viewer's default `action`)
+  is marked `"derived": true`, so writing it back does not add what the
+  class never said.
+- The sidecar answers `portUses {entity}`: the project's workflows that
+  instantiate a class (or the workflow a factory builds), found by its
+  definition, read without running anything; `renamePort`,
+  `deleteEntityPort`, `deletePort` and a workflow port's rename take that
+  `usedIn` and follow or refuse every file (features `portUsesAcrossFiles`,
+  `portUsesQuery`). `typeParameters {type}` answers the parameters a type
+  takes. `createNode` takes `expressions`, written verbatim.
+
+### Fixed
+- A run whose workflow holds a sub-workflow taking no input ends. The
+  sub-workflow node had its inputs whenever it had none, so after its one
+  firing the scheduler fired it again forever, each empty re-run counted as
+  progress; it now fires once, as a workflow instance does.
+- `wfpy run` takes the workflow a file has of its own when it also imports
+  one to use as a node (`from pipeline import pipeline`); it said "Multiple
+  workflows found". A workflow is imported when the file imports its name, so
+  one a factory from elsewhere builds (`site = make_site(3)`) is the file's
+  own, and one bound under two names is one. `wfpy plan` takes it first too;
+  with several of the file's own, it still takes the first name, as before.
+- The sidecar's `listTaskTypes` without a `kind` lists the file's classes of
+  every kind, as `types` and grouped in `byKind`, and ignores the `workflow`
+  scope a caller adds to every query: a chat tool asking that way was told
+  "missing 1 required keyword-only argument: 'kind'".
+- `connect()` (and `>>`) given a node rather than one of its ports
+  (`connect(a, b)`) says so where it is written, naming the node and the
+  ports it has on that side, instead of "Invalid source" from the plan
+  builder. The diagram's partial graph flags that node with the message
+  (`node_not_port`); it took the error off the file and put it nowhere.
+- Diagram edits leave the project importable. `createPort` adds the port
+  to `@workflow(inputs=, outputs=)` (it replaced the module with the
+  workflow's body); `deletePort` and renaming a workflow's own port edit
+  that dict and its connects, and refuse, naming the line, a port used by
+  name elsewhere: any string of the port's name but a docstring, a
+  keyword's value and an instance's `getattr(x, "name")`. `renamePort` /
+  `updatePortType` take the IDE's arguments. `deleteEntityPort` refuses a
+  port an action or a workflow uses. A port a workflow may name some way an
+  edit cannot follow (`for p in ("Out",): getattr(a, p)`, `(a, b)[i].Out`,
+  `key = "Out"` in the class) is refused as `port_used_by_name`, naming the
+  file and line. Ports are written with their direction. An op on a
+  workflow a factory builds edits the inner `@workflow`. `createNode`
+  imports a type the module does not bind as it runs (an `if
+  TYPE_CHECKING:` import is not), from the package that re-exports it; a
+  project's `@workflow def filter` wins over the builtin. `createNode` and
+  `renameNode` refuse a name the workflow already has (`name_exists`: an
+  instance, a loop variable, a parameter), one that would hide what the
+  workflow reads (`name_shadows`: `Text = Text(...)`, a builtin, a star
+  import's name, a factory's local), and a Python keyword
+  (`invalid_identifier`). A class task's new parameter is an annotated
+  field, never an `__init__`; an annotation edit imports its decorator. A
+  value that is not Python is refused as `invalid_expression`, and a node's
+  argument that reads a name not bound where it is written (nothing binds
+  it, or the workflow binds it only below the node) as `name_not_bound`.
+  An edit that writes several files writes them all or none.
+- `renameNode` renames the local wherever Python reads it: `getattr(a, ...)`,
+  a tuple a loop goes over, a closure, an assignment that is not one call
+  (`a = X() if dry else Y()`). It renamed only `a = Call()`, `a.port` and a
+  connect's end, and the workflow then failed with a `NameError`. A local
+  bound by a definition or an import, or declared `nonlocal`, is refused as
+  `name_used_otherwise`. A node and a port of one workflow are not named
+  alike (`name_exists`): renamed by its name alone, the node was renamed for
+  the port.
+- `updateNodeParameter` writes an argument where the call that makes the
+  node gives it: in place when it is given by position (`make("a")`); it
+  appended a keyword, and the call got two values. A node a helper function
+  makes (`s = _source("a")`), or whose call may give the argument through a
+  `*args` / `**kwargs`, is refused as `arguments_elsewhere`; the export no
+  longer shows the helper's call text as the node's.
+- An argument written over several lines lands at the columns its text
+  gives its later lines, which are the file's as the export gives them
+  (`expression`) and the panel shows them. Written back, libcst indented
+  those inside brackets by the block once more, so each Update of the
+  field, even unchanged, moved them right. A value that is the argument as
+  it is, but for whitespace or its own parentheses, is not written at all.
+  An argument the file writes in parentheses over lines is exported with
+  them, which without them is no expression.
+- The run's live files are written whole: `run.wf-viewer.live.json`, the
+  agent-context and context live files, and the final overlay, queue trace
+  and run record go to a sibling file renamed over the target, so a reader
+  polling them (the IDE, every 400ms) never finds one half written. Before,
+  `Path.write_text` truncated the file first, and a read in between found it
+  empty or cut short: the IDE took that for no run and showed the previous
+  one, so the running ring and the queue sizes blinked all through a run.
+- The live files go only after the run's record is in `run-log.jsonl`, on
+  success as on failure. They went before it, and in between a reader found
+  only the previous run.
+
 ## [1.1.0] — 2026-10-14
 
 First release published to [PyPI](https://pypi.org/project/wfpy/):

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import errno
 import json
 import os
@@ -11,6 +12,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import types
 from typing import Any
 
 from wfpy.core import AgentSpec
@@ -820,6 +822,30 @@ def _invoke_agent_opencode_cli(
     return response_text, firing_messages, None, debug_meta
 
 
+def _with_opencode_model(config: str | None, model: str) -> str:
+    """OPENCODE_CONFIG_CONTENT with `model` set, the rest of a configuration
+    already there (a connector's `env` may carry providers) kept."""
+    try:
+        merged = json.loads(config) if config else {}
+    except ValueError:
+        merged = {}
+    if not isinstance(merged, dict):
+        merged = {}
+    merged["model"] = model
+    return json.dumps(merged)
+
+
+def _with_model(spec: Any, model: str | None) -> Any:
+    """`spec` with `model`, unchanged when it already has that one."""
+    if getattr(spec, "model", None) == model:
+        return spec
+    if dataclasses.is_dataclass(spec) and not isinstance(spec, type):
+        return dataclasses.replace(spec, model=model)
+    copy = types.SimpleNamespace(**vars(spec))
+    copy.model = model
+    return copy
+
+
 def _acp_connector(spec: AgentSpec, options: dict[str, Any]) -> Any:
     """The connector an ACP agent spawns: the agent's own `connector`, else the
     run's `acp_connector`, resolved among the connectors the workspace sees
@@ -1044,12 +1070,15 @@ def _invoke_agent_opencode_acp(
     agent_argv = _acp_agent_argv(options, spec)
     on_permission = _acp_permission_handler(spec, options)
     connector = _acp_connector(spec, options)
-    # The session's model and mode: the agent's, else the connector's. OpenCode
-    # takes its model from OPENCODE_CONFIG_CONTENT above; the others from the
-    # session's `model` config option, when they offer one.
-    session_model = None
-    if connector is not None and not connector.http_api:
-        session_model = (spec.model if spec.model and spec.model != "openai/gpt-4o" else None) or connector.model
+    # The model: the wfpy agent's, else the connector's; with neither, the ACP
+    # agent keeps the one it is set up with. OpenCode is told through
+    # OPENCODE_CONFIG_CONTENT (below), the others through the session's
+    # `model` config option, when they offer one. An explicit command line
+    # may run either, so it is told both ways.
+    chosen_model = spec.model or (connector.model if connector is not None else None)
+    explicit_command = bool(str(options.get("agent_cli_acp_command", "") or "").strip())
+    opencode_like = connector.http_api if connector is not None else True
+    session_model = chosen_model if (explicit_command or not opencode_like) else None
     session_mode = str(getattr(spec, "mode", "") or (connector.mode if connector else "") or "") or None
     
     # Get working directory
@@ -1059,9 +1088,9 @@ def _invoke_agent_opencode_acp(
     acp_env: dict[str, str] = {}
     if connector is not None:
         acp_env.update(connector.env)
-    if spec.model and (connector is None or connector.http_api):
-        acp_env["OPENCODE_CONFIG_CONTENT"] = json.dumps({"model": spec.model})
-        logger.info(f"Setting model via OPENCODE_CONFIG_CONTENT: {spec.model}")
+    if chosen_model and (explicit_command or opencode_like):
+        acp_env["OPENCODE_CONFIG_CONTENT"] = _with_opencode_model(acp_env.get("OPENCODE_CONFIG_CONTENT"), chosen_model)
+        logger.info(f"Setting model via OPENCODE_CONFIG_CONTENT: {chosen_model}")
     
     stuck_timeout_s, stuck_retries = _acp_stuck_policy(options, connector)
 
@@ -1157,9 +1186,9 @@ def _invoke_agent_opencode_acp(
         logger.warning(f"ACP invocation failed: {acp_exc}. Falling back to CLI mode.")
         debug_meta["acpFallbackToCli"] = True
 
-        # Fall back to CLI mode
+        # Fall back to CLI mode, on the model the ACP session would have used.
         return _invoke_agent_opencode_cli(
-            spec,
+            _with_model(spec, chosen_model),
             payload_text,
             verbose=False,
             effective_prompt=effective_prompt,

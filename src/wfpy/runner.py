@@ -19,6 +19,7 @@ import copy
 import json
 import logging
 import os
+import sys
 import re
 import shlex
 import shutil
@@ -797,6 +798,8 @@ def _build_workflow_graph(wf_def: WorkflowDef) -> WorkflowGraph:
     """Execute a @workflow builder function to produce its WorkflowGraph."""
     graph = WorkflowGraph(name=wf_def.name)
     graph.factory_name = wf_def.factory_name
+    if wf_def.factory_name:
+        graph.factory_builder = wf_def.builder_fn
     if wf_def.factory_parameters:
         graph.factory_parameters = copy.deepcopy(wf_def.factory_parameters)
     graph.input_names = dict(wf_def.input_names)
@@ -1865,7 +1868,7 @@ def _step_agent(
         agent_options["_wf_elicit"] = build_elicit_closure(
             plan.options,
             agent_name=actor.name,
-            model=agent_spec.model,
+            model=agent_spec.model or "",
             event_publish=agent_options.get("_wf_event_publish"),
         )
 
@@ -2560,6 +2563,12 @@ def _step_workflow(
     if sub_plan is None:
         return False
 
+    # A workflow with no inputs is a closed program: its one firing runs it to
+    # quiescence, and another would find nothing left to do yet count as
+    # progress, so the run around it would never end.
+    if not actor.in_queues and actor.fire_count > 0 and actor.pending is None:
+        return False
+
     # Resuming a firing a failure interrupted: its tokens are already in the
     # sub-plan, which carries on from where it stopped.
     if actor.pending is None:
@@ -3003,6 +3012,13 @@ def run(
         except (TypeError, OSError):
             pass
 
+    # The agent runtime resolves a run's ACP connectors from the workflow file's
+    # own location — the workspace's `.wfpy/connectors.toml` is the one at the
+    # project root above it. It reads the path out of the options, so it has to
+    # be in there; without it the workspace file is silently skipped and only
+    # the discovered connectors and the user file apply.
+    plan.options["source_path"] = plan.source_path
+
     # Load validator registry
     plan.validator_registry = load_validator_registry(
         plan.source_path,
@@ -3117,6 +3133,14 @@ def run(
             },
         )
 
+    def _cleanup_live_files() -> None:
+        """Delete the live files, once the run's record is written."""
+        overlay_writer.cleanup()
+        if agent_ctx_writer:
+            agent_ctx_writer.cleanup()
+        if context_live_writer:
+            context_live_writer.cleanup()
+
     # Resolve max_workers: run() arg → @workflow(...) → executor default
     _effective_max_workers = max_workers
     if _effective_max_workers is None and wf_def is not None:
@@ -3178,12 +3202,13 @@ def run(
             os.environ.pop("WF_RUN_OUT_DIR", None)
         else:
             os.environ["WF_RUN_OUT_DIR"] = run_out_token
-        # Always clean up live overlay files
-        overlay_writer.cleanup()
-        if agent_ctx_writer:
-            agent_ctx_writer.cleanup()
-        if context_live_writer:
-            context_live_writer.cleanup()
+        # The live files go after the run's record is in run-log.jsonl, never
+        # before: a reader that finds them gone looks for the record, and in
+        # between it found the previous run. A run that failed has its record
+        # by now (written above); one that succeeded gets it below, and its
+        # live files go after it there.
+        if sys.exc_info()[0] is not None:
+            _cleanup_live_files()
         if event_stream is not None:
             try:
                 event_stream.publish({"type": "run.finished"})
@@ -3196,13 +3221,16 @@ def run(
                 pass
 
     # Finalize run: write overlays, queue trace, agent/context artifacts
-    _run_finalization._finalize_run(
-        plan, rid, wf_def, run_out_dir, writers, outputs,
-        wdir=wdir, verbose=verbose,
-    )
+    try:
+        _run_finalization._finalize_run(
+            plan, rid, wf_def, run_out_dir, writers, outputs,
+            wdir=wdir, verbose=verbose,
+        )
 
-    finished_at = datetime.now(timezone.utc)
-    _persist_run_record(finished_at, outputs)
+        finished_at = datetime.now(timezone.utc)
+        _persist_run_record(finished_at, outputs)
+    finally:
+        _cleanup_live_files()
 
     return outputs
 
