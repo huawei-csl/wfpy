@@ -4,7 +4,7 @@ A connector is a named ACP agent: its command line, what it can do, and its
 defaults. The set a run sees is, in order of precedence:
 
 1. what wfpy DISCOVERS: the known agents whose binary is on the PATH
-   (``opencode acp``, Zed's ``claude-agent-acp`` for Claude Code,
+   (``opencode acp``, ``claude-agent-acp`` for Claude Code,
    ``codex-acp``, ``gemini --experimental-acp``);
 2. the USER's file, ``$XDG_CONFIG_HOME/wfpy/connectors.toml``
    (``~/.config/wfpy/connectors.toml``), adding connectors or overriding the
