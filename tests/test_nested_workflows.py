@@ -6,10 +6,11 @@ import argparse
 import json
 import textwrap
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-from wfpy import File, Port, Resource, action, config, connect, run, task, viewer, workflow
+from wfpy import File, Port, Resource, action, agent, config, connect, run, task, viewer, workflow
 from wfpy.cli import cmd_plan
 from wfpy.graph import export_graph_json
 from wfpy.runner import _build_workflow_graph, build_plan
@@ -53,6 +54,329 @@ def test_config_reaches_every_nesting_level(tmp_path: Path) -> None:
 
     assert grand_plan.search_paths == [str(tmp_path / "bin")]
     assert grand_plan.env["WFPY_DEPTH"] == "3"
+
+
+def _answering_agents(
+    monkeypatch: pytest.MonkeyPatch, answer: Any = None
+) -> dict[str, dict[str, Any]]:
+    """Stand in for the model. Returns the options each agent instance was
+    invoked with, by instance name; `answer` turns an agent's inputs into its
+    reply (default "ok")."""
+    seen: dict[str, dict[str, Any]] = {}
+
+    def fake_invoke(
+        agent_spec: Any, payload_text: str, verbose: bool, **kwargs: Any
+    ) -> tuple[str, list[dict[str, str]], None, dict[str, Any]]:
+        payload = json.loads(payload_text)
+        seen[payload["instance"]] = dict(kwargs.get("plan_options") or {})
+        return (answer(payload["inputs"]) if answer else "ok"), [], None, {}
+
+    monkeypatch.setattr("wfpy.runner._invoke_agent", fake_invoke)
+    return seen
+
+
+def test_the_runs_options_reach_agents_at_every_nesting_level(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`run()` sets the options on the top plan only. An agent inside a nested
+    workflow used to be invoked with none of them: not the connector, not the
+    stuck window, not the path its workspace connectors are found from."""
+    seen = _answering_agents(monkeypatch)
+
+    @agent(prompt="Answer.")
+    class Ask:
+        class Ports:
+            In = Port[str](direction="in")
+            Out = Port[str](direction="out")
+
+    @workflow(inputs={"In": str}, outputs={"Out": str})
+    def grandchild():
+        deep = Ask()
+        connect("In", deep.In)
+        connect(deep.Out, "Out")
+
+    @workflow(inputs={"In": str}, outputs={"Out": str})
+    def child():
+        mid = Ask()
+        g = grandchild()
+        connect("In", mid.In)
+        connect(mid.Out, g.In)
+        connect(g.Out, "Out")
+
+    @workflow(inputs={"In": str}, outputs={"Out": str})
+    def top():
+        first = Ask()
+        c = child()
+        connect("In", first.In)
+        connect(first.Out, c.In)
+        connect(c.Out, "Out")
+
+    run(
+        top,
+        inputs={"In": "x"},
+        out_dir=tmp_path / "out",
+        acp_connector="claude",
+        acp_stuck_timeout_ms=1_800_000,
+        agent_tool_policy="deny",
+        verbose=False,
+    )
+
+    assert set(seen) == {"first", "mid", "deep"}
+    for name in ("first", "mid", "deep"):
+        assert seen[name]["acp_connector"] == "claude", name
+        assert seen[name]["acp_stuck_timeout_ms"] == 1_800_000, name
+        assert seen[name]["agent_tool_policy"] == "deny", name
+        assert seen[name]["source_path"] == str(Path(__file__).resolve()), name
+
+
+def test_agents_of_two_instances_of_a_workflow_keep_their_files_apart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The one option a nested workflow does not receive is the directory a
+    top-level agent writes to: both instances hold an agent named `w`, and in
+    one directory the second would write over the first one's file."""
+    _answering_agents(monkeypatch, answer=lambda inputs: f"note for {inputs['In']}")
+
+    @agent(prompt="Write it down.")
+    class Note:
+        class Ports:
+            In = Port[str](direction="in")
+            Out = Port[File](direction="out", ext=".md")
+
+    @workflow(inputs={"In": str}, outputs={"Out": File(ext=".md")})
+    def notes():
+        w = Note()
+        connect("In", w.In)
+        connect(w.Out, "Out")
+
+    @workflow(
+        inputs={"A": str, "B": str},
+        outputs={"OutA": File(ext=".md"), "OutB": File(ext=".md")},
+    )
+    def top():
+        a = notes()
+        b = notes()
+        connect("A", a.In)
+        connect("B", b.In)
+        connect(a.Out, "OutA")
+        connect(b.Out, "OutB")
+
+    outputs = run(top, inputs={"A": "a", "B": "b"}, out_dir=tmp_path / "out", verbose=False)
+
+    assert [Path(p).read_text() for p in outputs["OutA"]] == ["note for a"]
+    assert [Path(p).read_text() for p in outputs["OutB"]] == ["note for b"]
+
+
+def test_a_ports_validators_run_inside_a_nested_workflow(
+    tmp_path: Path, clean_validator_env: None
+) -> None:
+    """The validator registry is held by the top plan. A sub-plan had none, so
+    a validator declared on a port of a nested actor never ran: the same agent
+    that fails a run at the top level passed inside a nested workflow."""
+
+    @agent(prompt="Write JSON.", transport="mock", mock_outputs={"Out": "this is not json"})
+    class Writer:
+        class Ports:
+            In = Port[str](direction="in")
+            Out = Port[File](direction="out", ext=".json", validate=["json.parse"])
+
+    @workflow(inputs={"In": str}, outputs={"Out": File(ext=".json")})
+    def inner():
+        w = Writer()
+        connect("In", w.In)
+        connect(w.Out, "Out")
+
+    @workflow(inputs={"In": str}, outputs={"Out": File(ext=".json")})
+    def top():
+        child = inner()
+        connect("In", child.In)
+        connect(child.Out, "Out")
+
+    failure = r"Output validation failed on w\.Out \(validator=json\.parse\)"
+    with pytest.raises(RuntimeError, match=failure):
+        run(inner, inputs={"In": "x"}, out_dir=tmp_path / "top-level", verbose=False)
+    with pytest.raises(RuntimeError, match=failure):
+        run(top, inputs={"In": "x"}, out_dir=tmp_path / "nested", verbose=False)
+
+    # The run's `validate` option reaches the nested workflow through it.
+    outputs = run(top, inputs={"In": "x"}, out_dir=tmp_path / "off", validate="off", verbose=False)
+    assert [Path(p).read_text() for p in outputs["Out"]] == ["this is not json"]
+
+
+def test_agents_of_nested_workflows_ask_through_the_runs_one_connection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One connection to the elicit socket serves the run. The handler that
+    holds it is cached in the options, and a nested workflow gets a copy of
+    them each time it fires: with the handler made in a copy, each firing
+    opened a connection of its own, and a listener that takes one answered
+    the first agent and let the others time out."""
+    import socket
+    import threading
+
+    path = str(tmp_path / "elicit.sock")
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(path)
+    server.listen(1)
+    asked: list[int] = []
+
+    def listen() -> None:
+        conn, _ = server.accept()  # one connection, the run's
+        with conn, conn.makefile("r", encoding="utf-8") as reader:
+            for line in reader:
+                question = json.loads(line)
+                asked.append(question["id"])
+                reply = {"id": question["id"], "answer": "yes"}
+                conn.sendall((json.dumps(reply) + "\n").encode())
+
+    threading.Thread(target=listen, daemon=True).start()
+    answers: dict[str, tuple[Any, bool]] = {}
+
+    def fake_invoke(
+        agent_spec: Any, payload_text: str, verbose: bool, **kwargs: Any
+    ) -> tuple[str, list[dict[str, str]], None, dict[str, Any]]:
+        reply = kwargs["plan_options"]["_wf_elicit"]("May I?")
+        answers[json.loads(payload_text)["inputs"]["In"]] = (reply.answer, reply.declined)
+        return "ok", [], None, {}
+
+    monkeypatch.setattr("wfpy.runner._invoke_agent", fake_invoke)
+
+    @agent(prompt="Ask first.", ask_user=True)
+    class Asker:
+        class Ports:
+            In = Port[str](direction="in")
+            Out = Port[str](direction="out")
+
+    @workflow(inputs={"In": str}, outputs={"Out": str})
+    def asking():
+        a = Asker()
+        connect("In", a.In)
+        connect(a.Out, "Out")
+
+    @workflow(
+        inputs={"A": str, "B": str, "C": str},
+        outputs={"OutA": str, "OutB": str, "OutC": str},
+    )
+    def top():
+        first, second, third = asking(), asking(), asking()
+        connect("A", first.In)
+        connect("B", second.In)
+        connect("C", third.In)
+        connect(first.Out, "OutA")
+        connect(second.Out, "OutB")
+        connect(third.Out, "OutC")
+
+    run(
+        top,
+        inputs={"A": "a", "B": "b", "C": "c"},
+        out_dir=tmp_path / "out",
+        elicit_socket=path,
+        elicit_timeout_ms=2000,
+        verbose=False,
+    )
+    server.close()
+
+    assert answers == {"a": ("yes", False), "b": ("yes", False), "c": ("yes", False)}
+    assert sorted(asked) == [1, 2, 3]
+
+
+def test_a_nested_agent_still_honours_wf_agent_debug(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`run()` passes `agent_debug=False` when nobody asked for it. Handed
+    down as it is, that would switch the environment variable off for a nested
+    agent, which wrote its debug files under it before."""
+    _answering_agents(monkeypatch)
+
+    @agent(prompt="Answer.")
+    class Ask:
+        class Ports:
+            In = Port[str](direction="in")
+            Out = Port[str](direction="out")
+
+    @workflow(inputs={"In": str}, outputs={"Out": str})
+    def inner():
+        w = Ask()
+        connect("In", w.In)
+        connect(w.Out, "Out")
+
+    @workflow(inputs={"In": str}, outputs={"Out": str})
+    def top():
+        child = inner()
+        connect("In", child.In)
+        connect(child.Out, "Out")
+
+    def debug_files(name: str) -> list[Path]:
+        return sorted((tmp_path / name).rglob("agent-debug/w__request__0.json"))
+
+    run(top, inputs={"In": "x"}, out_dir=tmp_path / "quiet", verbose=False)
+    assert debug_files("quiet") == []
+
+    monkeypatch.setenv("WF_AGENT_DEBUG", "1")
+    run(top, inputs={"In": "x"}, out_dir=tmp_path / "by-env", verbose=False)
+    assert len(debug_files("by-env")) == 1
+
+    monkeypatch.delenv("WF_AGENT_DEBUG")
+    run(top, inputs={"In": "x"}, out_dir=tmp_path / "by-option", agent_debug=True, verbose=False)
+    assert len(debug_files("by-option")) == 1
+
+
+def test_a_nested_workflow_is_checked_with_the_validators_of_its_own_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, clean_validator_env: None
+) -> None:
+    """The run's registry is found from the top workflow's file. A workflow
+    from a library names the validators registered beside the library, the
+    ones it is checked with on its own; nested, it has to find them still."""
+    import importlib.util
+
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    (lib / "check.py").write_text(
+        "def validate(ctx):\n"
+        "    text = open(ctx['filePath']).read()\n"
+        "    ok = text.startswith('note:')\n"
+        "    return {'ok': ok, 'diagnostics': [] if ok else\n"
+        "            [{'code': 'LIB', 'message': 'not a note'}]}\n"
+    )
+    registered = {"lib.note": {"kind": "module", "module": str(lib / "check.py")}}
+    (lib / "wf-validators.json").write_text(json.dumps({"validators": registered}))
+    (lib / "libwf.py").write_text(
+        textwrap.dedent(
+            """
+            from wfpy import File, Port, agent, connect, workflow
+
+            @agent(prompt="Write a note.")
+            class Writer:
+                class Ports:
+                    In = Port[str](direction="in")
+                    Out = Port[File](direction="out", ext=".md", validate=["lib.note"])
+
+            @workflow(inputs={"In": str}, outputs={"Out": File(ext=".md")})
+            def notes():
+                w = Writer()
+                connect("In", w.In)
+                connect(w.Out, "Out")
+            """
+        )
+    )
+    spec = importlib.util.spec_from_file_location("libwf_under_test", lib / "libwf.py")
+    assert spec is not None and spec.loader is not None
+    libwf = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(libwf)
+
+    @workflow(inputs={"In": str}, outputs={"Out": File(ext=".md")})
+    def top():
+        child = libwf.notes()
+        connect("In", child.In)
+        connect(child.Out, "Out")
+
+    _answering_agents(monkeypatch, answer=lambda inputs: inputs["In"])
+
+    outputs = run(top, inputs={"In": "note: bring milk"}, out_dir=tmp_path / "ok", verbose=False)
+    assert [Path(p).read_text() for p in outputs["Out"]] == ["note: bring milk"]
+
+    with pytest.raises(RuntimeError, match=r"failed on w\.Out \(validator=lib\.note\): not a note"):
+        run(top, inputs={"In": "bring milk"}, out_dir=tmp_path / "bad", verbose=False)
 
 
 def test_sibling_workflow_outputs_keep_their_own_files(tmp_path: Path) -> None:

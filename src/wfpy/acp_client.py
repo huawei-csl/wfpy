@@ -11,18 +11,23 @@ import json
 import logging
 import os
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from typing import Any, AsyncGenerator, Callable, Optional
 
 import acp
 from acp.client.connection import ClientSideConnection
-from acp.schema import AllowedOutcome, DeniedOutcome
+from acp.schema import AllowedOutcome, DeniedOutcome, TextContentBlock
+
+from wfpy.connectors import DEFAULT_STUCK_RETRIES, DEFAULT_STUCK_TIMEOUT_MS
 
 logger = logging.getLogger(__name__)
 
-# Stuck detection configuration
-STUCK_TIMEOUT_SECONDS = 300  # 5 minutes
-MAX_RETRIES = 5
+# Stuck detection configuration. The defaults live in `connectors`, which has no
+# optional dependency, so the CLI and the option resolution can name them without
+# importing this module. A run overrides them per agent: `--acp-stuck-timeout-ms`
+# / `--acp-stuck-retries`, or a connector's `stuck_timeout_ms` / `stuck_retries`.
+STUCK_TIMEOUT_SECONDS = DEFAULT_STUCK_TIMEOUT_MS // 1000
+MAX_RETRIES = DEFAULT_STUCK_RETRIES
 CONTINUE_MESSAGE = "You appear stuck. Please continue with the task."
 
 
@@ -51,12 +56,15 @@ def allow_once(title: str, options: list[dict[str, str]]) -> Optional[str]:
     return chosen
 
 
-def _tool_call_fields(update: Any) -> dict[str, Any]:
-    """What a run's observer sees of an ACP tool call: its title (or its
-    kind when it has none), the kind, the status, the id."""
+def _tool_call_fields(update: Any, known_name: Optional[str] = None) -> dict[str, Any]:
+    """What a run's observer sees of an ACP tool call: a name, the title,
+    the kind, the status, the id. The name is the tool's own where the agent
+    sends one (`name`, since schema 1.23), else the title, else the kind.
+    `known_name` is the tool's own name from an earlier update of the same
+    call, for an update that carries none."""
     title = getattr(update, "title", None)
     kind = getattr(update, "kind", None)
-    name = getattr(update, "name", None) or title or kind or "tool"
+    name = getattr(update, "name", None) or known_name or title or kind or "tool"
     call_id = getattr(update, "tool_call_id", None) or getattr(update, "toolCallId", None)
     return {"name": str(name), "title": title, "kind": kind,
             "status": getattr(update, "status", None), "id": call_id}
@@ -83,6 +91,17 @@ class SimpleClient:
         # Optional sink for structured, observer-facing events (live streaming to the
         # IDE). Called synchronously and best-effort; must never raise into the run.
         self.on_event = on_event
+        # The tool's own name of each call that gave one, by call id: a later
+        # update of the call need not repeat it, and is still named by it.
+        self._tool_names: dict[str, str] = {}
+
+    def _tool_call(self, update: Any) -> dict[str, Any]:
+        """The observer's fields of a tool call or of an update of one."""
+        call_id = getattr(update, "tool_call_id", None) or getattr(update, "toolCallId", None)
+        own_name = getattr(update, "name", None)
+        if call_id and own_name:
+            self._tool_names[str(call_id)] = str(own_name)
+        return _tool_call_fields(update, self._tool_names.get(str(call_id)) if call_id else None)
 
     def _emit(self, event: dict[str, Any]) -> None:
         if self.on_event is None:
@@ -125,14 +144,16 @@ class SimpleClient:
                 self._emit({"type": "agent.message.delta", "field": "reasoning", "delta": content.text})
         elif hasattr(update, 'sessionUpdate') and update.sessionUpdate == 'tool_call':
             # An ACP tool call carries a title ("Write choice-a.txt") and a
-            # kind ("edit", "execute"), not a name: the title is what a
-            # viewer shows, the kind what it groups by.
-            tool = _tool_call_fields(update)
+            # kind ("edit", "execute"): the title is what a viewer shows, the
+            # kind what it groups by. Since schema 1.23 (SDK 1.0) it may also
+            # carry the tool's own name ("Write"), which is then the name
+            # reported, for the call and for its updates alike.
+            tool = self._tool_call(update)
             logger.info(f"Tool call: {tool['name']}")
             self._emit({"type": "agent.tool_call", **tool})
         elif hasattr(update, 'sessionUpdate') and update.sessionUpdate == 'tool_call_update':
             logger.info("Tool call update")
-            self._emit({"type": "agent.tool_call_update", **_tool_call_fields(update)})
+            self._emit({"type": "agent.tool_call_update", **self._tool_call(update)})
         
         await self.events.put(event)
         
@@ -224,8 +245,67 @@ class SimpleClient:
         return {}
         
     async def ext_notification(self, method, params):
-        """Called for extension notifications."""
-        logger.warning(f"Extension notification not implemented: {method}")
+        """Called for extension notifications. None is acted on. One wfpy
+        knows to be routine is passed over quietly; another is still named,
+        since it may be the agent saying something that matters."""
+        if method in _ROUTINE_NOTIFICATIONS:
+            logger.debug(f"Extension notification ignored: {method}")
+        else:
+            logger.warning(f"Extension notification not implemented: {method}")
+
+
+_METHOD_NOT_FOUND = -32601
+
+# Notifications a connector sends as a matter of course and wfpy does not act
+# on. `claude-agent-acp` pushes its login state as `auth/status_update` on
+# every turn, under that name and as the extension `_auth/status_update`.
+_ROUTINE_NOTIFICATIONS = frozenset({"auth/status_update"})
+
+
+def _drop_unrouted_notifications(connection: Any) -> None:
+    """Drop a notification the SDK has no route for, without its traceback.
+
+    A notification has no reply, so a client that does not know one ignores
+    it, and connectors count on that. SDK 1.0 logs each one as an unhandled
+    error with its traceback instead: three of them on a run that succeeds,
+    for the `auth/status_update` of `claude-agent-acp`.
+
+    A routine one (`_ROUTINE_NOTIFICATIONS`) is dropped at debug; any other
+    is dropped with one warning line that names it. Only the SDK's own "no
+    route for this method" is taken for that: a request without a route still
+    fails (it has a reply to carry the error), and so does any other failure
+    inside a notification, a "method not found" for another method included.
+
+    The SDK offers no hook for this, so the handler of its connection is
+    wrapped. Should its layout change, nothing is wrapped and the tracebacks
+    come back; a run is unaffected either way.
+    """
+    conn = getattr(connection, "_conn", None)
+    handler = getattr(conn, "_handler", None)
+    if handler is None:
+        logger.debug("The ACP SDK's connection has no handler to wrap; "
+                     "notifications it has no route for keep their traceback")
+        return
+
+    async def handle(method, params, is_notification):
+        try:
+            return await handler(method, params, is_notification)
+        except acp.RequestError as exc:
+            data = getattr(exc, "data", None)
+            unrouted = (is_notification
+                        and getattr(exc, "code", None) == _METHOD_NOT_FOUND
+                        and isinstance(data, dict) and data.get("method") == method)
+            if not unrouted:
+                raise
+            if method in _ROUTINE_NOTIFICATIONS:
+                logger.debug(f"Notification ignored: {method}")
+            else:
+                logger.warning(
+                    f"The agent sent a notification wfpy does not know: {method} (ignored)"
+                )
+            return None
+
+    conn._handler = handle
 
 
 class ACPClient:
@@ -276,7 +356,8 @@ class ACPClient:
         
         # Enter the context manager
         self.connection, self.process = await self._context_manager.__aenter__()
-        
+        _drop_unrouted_notifications(self.connection)
+
         logger.info("ACP subprocess started, initializing connection...")
         
         # Initialize the connection
@@ -408,9 +489,9 @@ class ACPClient:
             
         logger.info(f"Sending prompt to session {session_id}: {prompt[:100]}...")
         
-        # Create text content block using helper
-        from acp import text_block
-        prompt_blocks = [text_block(prompt)]
+        # One text content block, built from the schema's own model: the
+        # `text_block` helper that used to build it was removed in SDK 1.0.
+        prompt_blocks = [TextContentBlock(type="text", text=prompt)]
         
         response = await self.connection.prompt(
             session_id=session_id,
@@ -556,7 +637,16 @@ async def run_with_stuck_detection(
                         await prompt_task
                     except asyncio.CancelledError:
                         pass
-                    raise TimeoutError(f"Agent stuck after {max_retries} retries")
+                    # Name the window as well as the budget: an agent that is
+                    # working but silent (OpenCode during a long `bash` streams
+                    # nothing) is cancelled by exactly this path, and the fix is
+                    # to widen the window, not to retry more.
+                    raise TimeoutError(
+                        f"Agent stuck after {max_retries} retries "
+                        f"({stuck_timeout}s of silence each). If it was working, "
+                        f"not hung, raise --acp-stuck-timeout-ms above its longest "
+                        f"silent tool call."
+                    )
                     
                 # Send continue message
                 logger.info(f"Sending continue message: {CONTINUE_MESSAGE}")
@@ -569,16 +659,18 @@ async def run_with_stuck_detection(
                 
     except Exception as e:
         logger.error(f"Error during stuck detection: {e}")
+        # Shut both tasks down, then retrieve whatever they ended with and drop
+        # it. Awaiting them bare would be wrong twice over: `event_task` has
+        # usually *already* finished with the bare `asyncio.TimeoutError` that
+        # signalled the stuck turn, and since 3.11 that is `TimeoutError`, so
+        # awaiting it replaced the error above — the caller got an empty
+        # TimeoutError instead of the one naming the budget. Not retrieving it
+        # at all makes asyncio warn about an exception that was never retrieved.
         prompt_task.cancel()
         event_task.cancel()
-        try:
-            await prompt_task
-        except asyncio.CancelledError:
-            pass
-        try:
-            await event_task
-        except asyncio.CancelledError:
-            pass
+        for task in (prompt_task, event_task):
+            with suppress(BaseException):
+                await task
         raise
 
 
