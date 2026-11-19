@@ -52,14 +52,16 @@ Nearly all the data. Almost none of the recording.
 | the firing journal | `_journal_runtime.py:112` — `actor`, `fireCount`, `consumed` (with sha256), `produced`, `state`, `seq` | no time and no cost. It can replay a firing but cannot tell you what repeating it saved |
 | the queue trace | `_run_artifacts.py:610` — `step`, actor, every queue's size and last token, `journalSeq` | the same: a complete causal record with no cost axis |
 | `wf-out/run-log.jsonl` | `_run_finalization.py:229` — runId, workflow, times, inputs, outputs, error, `resumedFrom` | already the right shape for a cross-run ledger, and carries neither duration nor cost |
-| twelve live agent events | published by `acp_client.SimpleClient._emit`: `agent.message.start/delta/end`, `agent.tool_call`, `agent.tool_call_update`, `agent.permission.requested/answered`, `agent.question.requested/answered`, `run.started/finished/stream.closing` | **never persisted.** The SSE stream (`_run_event_stream.py`) keeps a 512-event replay buffer in memory and dies with the run. The only `*events.jsonl` on disk is `validation-events.jsonl` |
+| twelve live agent events | published to the run's event stream from six places: `acp_client.SimpleClient._emit` (`agent.message.delta`, `agent.tool_call`, `agent.tool_call_update`, `agent.permission.requested/answered`), `_agent_cli_runtime` (`agent.message.start/end`), `_elicitation_runtime` (`agent.question.requested/answered`), `_run_finalization` (`run.started`), `runner` (`run.finished`) and `_run_event_stream` (`run.stream.closing`) | **never persisted.** The SSE stream (`_run_event_stream.py`) keeps a 512-event replay buffer in memory and dies with the run. The only `*events.jsonl` on disk is `validation-events.jsonl`. An agent inside a nested workflow publishes none of them: the stream is set on the top plan only (`_run_finalization.py:133`) |
 | an agent's context budget | `core.py:414` — `context_budget: int = 50`, trimmed by `trim_chat_history` (`_agent_io_runtime.py:203`) | counted in **messages**. The window that actually overflows is counted in tokens |
 
 ## Phase 1 — a firing records its time and its cost
 
 Everything else here waits on this, and it is the cheapest change in the
-proposal: the numbers are already in hand at the point where the journal entry
-and the trace step are written.
+proposal: the numbers already exist, one call below the point where the journal
+entry and the trace step are written. The entry is recorded in `_step_actor`
+from what the firing took and put; the duration and the usage are locals of
+`_step_internal` and `_step_agent`, and have to be carried up to it.
 
 1. **The journal entry** (`_journal_runtime.py:112`) gains `durationMs`, and for
    an agent firing `usage` — `{promptTokens, completionTokens, cacheReadTokens,
@@ -75,7 +77,13 @@ and the trace step are written.
    (`{instanceName, entityName, fireCount, durationMs, usage}`) rolled up from
    the journal. Writing it on the failure path too, as `run.wf-queues.json`
    already is, matters more than on the success path — a run that died at
-   minute thirty is exactly the one whose expense you want to see.
+   minute thirty is exactly the one whose expense you want to see. Two limits
+   of today's record carry over unless they are lifted with it. The journal is
+   written only with `queue_trace` on (the default), so a run without it has
+   nothing to roll up. And the record's `actors` are the top plan's
+   (`_run_finalization.py:194`): a nested workflow is one entry, so the
+   breakdown has to descend into the sub-plans to say which nested actor
+   spent what.
 4. **`run-log.jsonl`** (`_run_finalization.py:229`) gains `durationMs` and
    `costUsd`. One line per run, already append-only: that is the cross-run
    ledger, and it makes "this workflow got 40% more expensive last week" a
@@ -150,6 +158,14 @@ runs nine phases of Claude Code on, that is most of what happened.
 Persisting it gives a postmortem of an agent firing with no IDE attached, which
 is the CI and the headless case, and makes the `agent-debug` artifacts the
 opt-in *deep* record they were meant to be rather than the only record.
+
+One gap has to be closed with it. The stream is set on the top plan only, so an
+agent inside a nested workflow has no publisher: its events are not emitted at
+all, live or otherwise, and a log written at `publish()` would miss them. The
+log is complete once `_run_sub_plan` hands the stream to the sub-plan, as it
+does the journal and the overlay writer. An event of a nested agent then needs
+the path of its workflow instance beside the agent's name, since two instances
+of one workflow hold agents of the same name.
 
 What this still does not get is the external agent's **own** context: its
 system prompt, its file reads, its internal transcript. wfpy sees an ACP
