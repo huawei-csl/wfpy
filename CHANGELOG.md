@@ -308,6 +308,14 @@ All notable changes to wfpy are documented here. The format follows
   while its producer was firing was never asked again, and the run reached
   quiescence with no error. The race has been there since 1.0.0b1 and shows
   on a loaded machine. A sequential run (`max_workers=1`) was not affected.
+- An `@agent` that declares no input port fires once in a run, and
+  `fireable_without_input=N` in its decorator makes that N times. Such an
+  agent fired without end, whatever the decorator said: "a token on every
+  input port" holds at every step of an agent that has none, so its count
+  was never read. A run with one did not end, and on a real transport each
+  firing was a model turn. The count is for the run: the agent fires once
+  inside a child workflow that receives several tokens, and a resume does
+  not give the firing again. An agent that has input ports is unchanged.
 
 ## [1.1.0] — 2026-10-14
 

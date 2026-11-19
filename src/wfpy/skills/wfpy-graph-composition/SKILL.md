@@ -121,11 +121,9 @@ bound the total deliberately (`rounds × repairs`).
 A node with **no input port at all** is a cycle too: nothing has to arrive for it to fire,
 so nothing stops it. A `@task` action with `consumes={}` and no guard fires until the
 process is killed. Give it a latch, as `@source` does for you: a `Schedule` with one
-transition out of its initial state fires the action once. On an `@agent`,
-`fireable_without_input=N` is such a budget only when the agent declares an input port: it
-then fires N times with nothing on its inputs, and once more per token. An agent with no
-input port ignores the count and fires without end (measured, with
-`fireable_without_input=2`: over a thousand firings in twelve seconds).
+transition out of its initial state fires the action once. An `@agent` with no input port
+has the latch built in: it fires once, or as many times as `fireable_without_input` in its
+decorator says (see `wfpy-agent-nodes`).
 
 Make every exit route to a node that **writes something**. A loop whose exit leads nowhere
 reaches quiescence with no report, which looks exactly like a hang.

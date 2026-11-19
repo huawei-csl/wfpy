@@ -1,6 +1,6 @@
 ---
 name: wfpy-agent-nodes
-description: Put an LLM in a wfpy graph as an @agent - transport and connector, the model name, loading an Agent Skill into it, mapping that skill's declared inputs and outputs onto ports, and never trusting what it returns. Use when adding an agent node, wiring a skill into one, building an agentic loop, or debugging an agent that returned nothing. Triggers: @agent, acp, connector, mock_outputs, agent skill, WF_SKILLS_ROOT, agentic loop, model, transport, agent returned nothing.
+description: Put an LLM in a wfpy graph as an @agent - transport and connector, the model name, loading an Agent Skill into it, mapping that skill's declared inputs and outputs onto ports, and never trusting what it returns. Use when adding an agent node, wiring a skill into one, building an agentic loop, saying how many times an agent with no input fires, or debugging an agent that returned nothing. Triggers: @agent, acp, connector, mock_outputs, agent skill, WF_SKILLS_ROOT, agentic loop, model, transport, fireable_without_input, agent with no input, agent returned nothing.
 ---
 
 # Putting an agent in the graph
@@ -134,6 +134,27 @@ you split one agent into two, re-check that each still receives every input. A p
 substitute for the artifact it describes: a planner given the source produces a plan, and
 that plan does not contain the source, so an applier downstream of only the plan has not
 been shown the file it is supposed to edit.
+
+## An agent with no input port fires once
+
+Nothing arrives at it, so nothing triggers it. wfpy fires it once in a run, and the
+decorator says how many times instead:
+
+```python
+@agent(prompt="Propose a kernel.", fireable_without_input=3)   # three candidates
+class Propose:
+    class Ports:
+        Candidate = Port[File](direction="out", ext=".cpp")
+```
+
+- The count is for the run, not for each token of the workflow around it. Measured: such
+  an agent inside a sub-workflow that received three tokens fired once, and the node that
+  joined its output with them fired once too. An agent that has to answer each token needs
+  that token on an input port.
+- A run that is resumed does not give the firing again: the checkpoint carries what is left.
+- On an agent that **has** input ports the option means something else: how many times it
+  may fire with nothing on them, besides once for each token. With
+  `fireable_without_input=2` and one token it fires three times.
 
 ## Never trust the output
 

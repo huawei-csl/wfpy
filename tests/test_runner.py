@@ -8,6 +8,8 @@ import types
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from wfpy import agent, task, action, guard, workflow, connect, if_, loop, run, Port
 from wfpy.runner import build_plan, execute_plan, _build_workflow_graph, FifoPlan
 from wfpy.runner import (
@@ -3571,6 +3573,96 @@ class TestStepAgentBehavior:
         assert _step_agent(actor1, tmp_path, plan, verbose=False) is True
         assert _step_agent(actor1, tmp_path, plan, verbose=False) is False
         assert _step_agent(actor2, tmp_path, plan, verbose=False) is True
+
+    @pytest.mark.parametrize(("count", "firings"), [(None, 1), (0, 1), (1, 1), (3, 3)])
+    def test_an_agent_with_no_input_port_fires_as_often_as_its_decorator_says(
+        self,
+        count,
+        firings,
+        tmp_path,
+        make_task_meta,
+        make_port,
+        make_agent_spec,
+        mock_invoke_agent,
+    ):
+        """Nothing can arrive at it, so "a token on every port" held of it at
+        every step and it fired without end, whatever the decorator said."""
+        from wfpy.runner import _is_actor_maybe_ready, _step_agent
+
+        given = {} if count is None else {"fireable_without_input": count}
+        spec = make_agent_spec(prompt="p", model="m", **given)
+        meta = make_task_meta(
+            name="AgentTask",
+            kind="agent",
+            output_ports={"out": make_port("out", str, "out")},
+            agent_spec=spec,
+        )
+        actor = RuntimeActor(name="agent1", kind="agent", instance=object(), meta=meta)
+        actor.out_queues = {"out": [Queue(queue_id="q")]}
+        plan = FifoPlan(name="wf")
+        plan.options = {}
+
+        assert _is_actor_maybe_ready(actor) is True
+        fired = [_step_agent(actor, tmp_path, plan, verbose=False) for _ in range(firings + 2)]
+        assert fired == [True] * firings + [False, False]
+        assert mock_invoke_agent["calls"] == firings
+        # The scheduler does not offer it another turn.
+        assert _is_actor_maybe_ready(actor) is False
+
+    @pytest.mark.parametrize("max_workers", [1, None])
+    @pytest.mark.parametrize(("given", "firings"), [({}, 1), ({"fireable_without_input": 3}, 3)])
+    def test_a_run_with_an_agent_that_has_no_input_port_ends(
+        self, given, firings, max_workers, tmp_path, monkeypatch
+    ):
+        calls = []
+
+        def fake_invoke(agent_spec, payload_text, verbose, **kwargs):
+            calls.append(payload_text)
+            # A run that does not end is a test that does not end: fail it.
+            assert len(calls) <= 20, "the agent did not stop firing"
+            return "tick", [{"role": "assistant", "content": "tick"}], None, {}
+
+        monkeypatch.setattr("wfpy.runner._invoke_agent", fake_invoke)
+
+        @agent(prompt="Tick.", use_skill=False, **given)
+        class Ticker:
+            class Ports:
+                Out = Port[str](direction="out")
+
+        @workflow(inputs={}, outputs={"Out": str})
+        def wf():
+            connect(Ticker().Out, "Out")
+
+        outputs = run(wf, {}, out_dir=tmp_path, max_workers=max_workers)
+
+        assert outputs == {"Out": ["tick"] * firings}
+        assert len(calls) == firings
+
+    def test_an_agent_with_an_input_port_does_not_get_the_one_firing(
+        self, tmp_path, make_task_meta, make_port, make_agent_spec, mock_invoke_agent
+    ):
+        """The firing an agent gets for free is for one that can read nothing.
+        One that has an input port waits for its token, as before."""
+        from wfpy.runner import _step_agent
+
+        meta = make_task_meta(
+            name="AgentTask",
+            kind="agent",
+            input_ports={"in": make_port("in", str, "in")},
+            output_ports={"out": make_port("out", str, "out")},
+            agent_spec=make_agent_spec(prompt="p", model="m"),
+        )
+        actor = RuntimeActor(name="agent1", kind="agent", instance=object(), meta=meta)
+        actor.in_queues = {"in": [Queue(queue_id="in")]}
+        actor.out_queues = {"out": [Queue(queue_id="q")]}
+        plan = FifoPlan(name="wf")
+        plan.options = {}
+
+        assert _step_agent(actor, tmp_path, plan, verbose=False) is False
+        actor.in_queues["in"][0].enqueue("x")
+        assert _step_agent(actor, tmp_path, plan, verbose=False) is True
+        assert _step_agent(actor, tmp_path, plan, verbose=False) is False
+        assert mock_invoke_agent["calls"] == 1
 
     def test_step_agent_stages_file_inputs_for_cli_transports(
         self, tmp_path, make_task_meta, make_port, make_agent_spec, mock_invoke_agent

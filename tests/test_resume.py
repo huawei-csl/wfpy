@@ -20,7 +20,20 @@ from typing import Any
 
 import pytest
 
-from wfpy import File, Port, Resource, action, connect, guard, if_, loop, run, task, workflow
+from wfpy import (
+    File,
+    Port,
+    Resource,
+    action,
+    agent,
+    connect,
+    guard,
+    if_,
+    loop,
+    run,
+    task,
+    workflow,
+)
 from wfpy._checkpoint_runtime import NotResumable, decode, encode
 
 
@@ -184,6 +197,50 @@ def test_a_failed_run_resumes_without_repeating_what_it_did(tmp_path: Path) -> N
     assert broken.calls == {"count": 3, "pass": 3, "double": 3}
     record = json.loads((second / "run.wf-run.json").read_text())
     assert record["resumedFrom"] == "first"
+
+
+def test_an_agent_with_no_input_port_does_not_fire_again_on_resume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """It fires once, and a fresh plan gives it that firing again. The
+    checkpoint says it is spent."""
+    broken = Broken()
+
+    def fake_invoke(*args: Any, **kwargs: Any) -> Any:
+        broken.fired("tick")
+        assert broken.calls["tick"] <= 20, "the agent did not stop firing"
+        return "tick", [{"role": "assistant", "content": "tick"}], None, {}
+
+    monkeypatch.setattr("wfpy.runner._invoke_agent", fake_invoke)
+
+    @agent(prompt="Tick.", use_skill=False)
+    class Ticker:
+        class Ports:
+            Out = Port[str](direction="out")
+
+    @task
+    class Shout:
+        class Ports:
+            In = Port[str](direction="in")
+            Out = Port[str](direction="out")
+
+        @action(consumes={"In": 1}, produces={"Out": 1})
+        def go(self, text: str) -> str:
+            if broken.on:
+                raise ValueError("broken on 2")
+            return text.upper()
+
+    @workflow(outputs={"Out": str})
+    def wf():
+        ticker = Ticker()
+        shout = Shout()
+        connect(ticker.Out, shout.In)
+        connect(shout.Out, "Out")
+
+    outputs, _ = _fail_then_resume(wf, tmp_path, broken)
+
+    assert outputs["Out"] == ["TICK"]
+    assert broken.calls == {"tick": 1}
 
 
 def test_a_failure_in_a_loop_body_resumes_in_the_body(tmp_path: Path) -> None:

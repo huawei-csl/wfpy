@@ -867,6 +867,84 @@ class TestAgents:
         assert run(wf, {}, out_dir=tmp_path / "none") == {"Out": ["tick", "tick"]}
         assert run(wf, {"In": "x"}, out_dir=tmp_path / "one") == {"Out": ["tick"] * 3}
 
+    @pytest.fixture
+    def firings(self, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+        """The firings of the agents of a run, which fails when one does not stop."""
+        import wfpy.runner
+
+        invoke = wfpy.runner._invoke_agent
+        seen: list[str] = []
+
+        def counted(agent_spec: Any, payload_text: str, verbose: bool, **kwargs: Any) -> Any:
+            seen.append(payload_text)
+            assert len(seen) <= 20, "an agent did not stop firing"
+            return invoke(agent_spec, payload_text, verbose, **kwargs)
+
+        monkeypatch.setattr(wfpy.runner, "_invoke_agent", counted)
+        return seen
+
+    @pytest.mark.parametrize(("given", "times"), [({}, 1), ({"fireable_without_input": 3}, 3)])
+    def test_an_agent_with_no_input_port_fires_once_or_as_often_as_it_says(
+        self, given, times, tmp_path, firings
+    ):
+        @agent(prompt="Propose.", transport="mock", mock_outputs={"Candidate": "k"}, **given)
+        class Propose:
+            class Ports:
+                Candidate = Port[str](direction="out")
+
+        @workflow(inputs={}, outputs={"Out": str})
+        def wf() -> None:
+            connect(Propose().Candidate, "Out")
+
+        assert run(wf, {}, out_dir=tmp_path) == {"Out": ["k"] * times}
+        assert len(firings) == times
+
+    def test_that_firing_is_for_the_run_not_for_each_token_around_it(self, tmp_path, firings):
+        @agent(prompt="Tick.", transport="mock", mock_outputs={"Out": "tick"})
+        class Ticker:
+            class Ports:
+                Out = Port[str](direction="out")
+
+        @task
+        class Three:
+            _sent: int = 0
+
+            class Ports:
+                Out = Port[int](direction="out")
+
+            @action(consumes={}, produces={"Out": 1})
+            @guard(lambda self: self._sent < 3)
+            def emit(self) -> int:
+                self._sent += 1
+                return self._sent
+
+        @task
+        class Join:
+            class Ports:
+                Number = Port[int](direction="in")
+                Word = Port[str](direction="in")
+                Out = Port[str](direction="out")
+
+            @action(consumes={"Number": 1, "Word": 1}, produces={"Out": 1})
+            def join(self, number: int, word: str) -> str:
+                return f"{number}:{word}"
+
+        @workflow(inputs={"Number": int}, outputs={"Out": str})
+        def inner() -> None:
+            ticker, join = Ticker(), Join()
+            connect("Number", join.Number)
+            connect(ticker.Out, join.Word)
+            connect(join.Out, "Out")
+
+        @workflow(inputs={}, outputs={"Out": str})
+        def outer() -> None:
+            three, child = Three(), inner()
+            connect(three.Out, child.Number)
+            connect(child.Out, "Out")
+
+        assert run(outer, {}, out_dir=tmp_path, max_workers=1) == {"Out": ["1:tick"]}
+        assert len(firings) == 1
+
     def with_skill(self, tmp_path: Path, name: str) -> Any:
         @agent(prompt="Do it.", transport="mock", skill=name, mock_outputs={"Out": "x"})
         class Skilled:
