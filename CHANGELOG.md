@@ -16,15 +16,22 @@ All notable changes to wfpy are documented here. The format follows
   loaded into it). They are here rather than in a package of their own
   because they describe this code, down to behaviour that changed in a given
   release; a skill that versions separately from what it documents drifts.
-  `wfpy skills install` links rather than copies, so upgrading wfpy updates
-  the skills in place: `--scope user` (the default) links into
-  `~/.claude/skills`, which is wfpy's last search root and the folder the
-  Claude tools read, so one link serves a workflow and an editor alike, and
-  `--scope project` into `<workspace>/.wf/skills`. A link that points
-  somewhere else is kept unless `--force` says otherwise, and a real
-  directory of that name is never deleted, with or without it. `wfpy skills
-  path` prints the directory to use as `WF_SKILLS_ROOT` where a symlinked
-  skill is not resolved, and `wfpy skills list` says what is shipped.
+  What each says wfpy does is run by `tests/test_shipped_skill_claims.py`,
+  so a change that makes one wrong fails the suite; what needs a real agent
+  (a connector's model names, the lines an ACP turn logs) is not run there.
+  `install`, `path` and `list` are taken in place of the workflow file of
+  `wfpy skills <workflow.py>`, which keeps listing what a run finds; a file
+  of one of those names is written `./install`, and an option of one form
+  given with the other is refused. `wfpy skills install` links rather than
+  copies, so upgrading wfpy updates the skills in place: `--scope user` (the
+  default) links into `~/.claude/skills`, the user-level folder a run
+  searches after a project's own and the one the Claude tools read, so one
+  link serves a workflow and an editor alike, and `--scope project` into
+  `<workspace>/.wf/skills`. A link that points somewhere else is kept unless
+  `--force` says otherwise, one that points at nothing (its environment is
+  gone) is said to, and a real directory of that name is never deleted, with
+  or without `--force`. `wfpy skills path` prints the directory to use as
+  `WF_SKILLS_ROOT`, and `wfpy skills list` says what is shipped.
 - A skill-hook policy entry may name the skill folder it approves:
   `{"skill": "review", "hook": "pre", "interpreter": "sh", "dir": "<path>"}`,
   `interpreter` optional, `dir` read from the policy file's folder (a link

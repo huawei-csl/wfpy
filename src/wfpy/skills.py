@@ -15,9 +15,10 @@ not a copy, so an upgrade of wfpy updates the skills in place.
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
 from pathlib import Path
-import sys
+from typing import TextIO
 
 SKILLS_DIR = Path(__file__).resolve().parent / "skills"
 
@@ -32,23 +33,12 @@ class Skill:
 
 
 def _description(skill_md: Path) -> str:
-    """The `description:` line from the frontmatter, unwrapped."""
-    text = skill_md.read_text(encoding="utf-8")
-    lines = text.splitlines()
-    if not lines or lines[0].strip() != "---":
-        return ""
-    collected: list[str] = []
-    for line in lines[1:]:
-        if line.strip() == "---":
-            break
-        if collected and (line.startswith((" ", "\t")) or not line.strip()):
-            collected.append(line.strip())      # a folded continuation line
-            continue
-        if line.startswith("description:"):
-            collected = [line[len("description:"):].strip()]
-        elif collected:
-            break
-    return " ".join(p for p in collected if p)
+    """The `description` of a skill's front matter, read as a run reads it."""
+    from wfpy._agent_prompt_runtime import _parse_frontmatter_markdown
+
+    meta, _body = _parse_frontmatter_markdown(skill_md.read_text(encoding="utf-8"))
+    description = meta.get("description", "")
+    return description if isinstance(description, str) else ""
 
 
 def shipped() -> list[Skill]:
@@ -66,10 +56,13 @@ def shipped() -> list[Skill]:
 def install_root(scope: str, workspace: str | Path = ".") -> Path:
     """Where a tool looks for skills, for the given scope.
 
-    `user` is `~/.claude/skills`: wfpy's last search root, and the global one for
-    Claude Code and the tools that read its folder, so one link serves both.
-    `project` is `<workspace>/.wf/skills`, which wfpy checks ahead of
-    `.claude/skills` at the same level.
+    `user` is `~/.claude/skills`: the user-level folder a run searches after a
+    project's own folders, and the global one for Claude Code and the tools
+    that read its folder, so one link serves both. `project` is
+    `<workspace>/.wf/skills`, which wfpy checks ahead of `.claude/skills` at
+    the same level. A run finds it when the workspace is the directory the run
+    starts in, or lies between the workflow's directory and the top of its
+    project (`_agent_prompt_runtime._skill_lookup_roots`).
     """
     if scope == "project":
         return Path(workspace).resolve() / ".wf" / "skills"
@@ -79,22 +72,22 @@ def install_root(scope: str, workspace: str | Path = ".") -> Path:
 def install(root: Path, skills: list[Skill], force: bool = False) -> list[tuple[str, str]]:
     """Link each skill into `root`. Returns (name, what-happened) per skill.
 
-    A symlink rather than a copy, so `pip install -U wfpy` updates what the links
-    point at. Note that wfpy resolves a symlinked skill only from the release that
-    moved its containment check ahead of `.resolve()`; an earlier wfpy follows the
-    link, finds the target outside the root, and skips it in silence. For those,
-    `wfpy skills path` prints a directory to use as WF_SKILLS_ROOT instead.
+    A symlink rather than a copy, so `pip install -U wfpy` updates what the
+    links point at. A link made from an environment that has gone since (a
+    venv rebuilt on another Python) points at nothing. It is reported as such
+    and, like any link that is not this wfpy's, kept unless `force`.
     """
     root.mkdir(parents=True, exist_ok=True)
     results: list[tuple[str, str]] = []
     for skill in skills:
         link = root / skill.name
         if link.is_symlink():
-            if link.readlink() == skill.path:
+            if link.resolve() == skill.path.resolve():
                 results.append((skill.name, "already linked"))
                 continue
             if not force:
-                results.append((skill.name, "links elsewhere; --force to replace"))
+                where = "elsewhere" if link.exists() else "to a folder that is gone"
+                results.append((skill.name, f"links {where}; --force to replace"))
                 continue
             link.unlink()
         elif link.exists():
@@ -107,10 +100,15 @@ def install(root: Path, skills: list[Skill], force: bool = False) -> list[tuple[
     return results
 
 
-def print_install(root: Path, results: list[tuple[str, str]], out=sys.stdout) -> None:
+def print_install(root: Path, results: list[tuple[str, str]], out: TextIO | None = None) -> None:
+    """Say what `install` did, and how to check that a run finds the skills."""
+    out = sys.stdout if out is None else out
     for name, what in results:
         mark = "+" if what == "linked" else "=" if what == "already linked" else "!"
         print(f"  {mark} {name:<26} {what}", file=out)
     print(f"\ninstalled into {root}", file=out)
-    print("If a skill does not resolve, this wfpy may predate symlink support; "
-          "use the directory from `wfpy skills path` as WF_SKILLS_ROOT instead.", file=out)
+    print(
+        "`wfpy skills <workflow.py>` lists the skills a run of that workflow finds, "
+        "and the folder each comes from.",
+        file=out,
+    )
