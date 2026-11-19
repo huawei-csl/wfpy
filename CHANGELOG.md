@@ -9,18 +9,23 @@ All notable changes to wfpy are documented here. The format follows
 ### Added
 - A skill-hook policy entry may name the skill folder it approves:
   `{"skill": "review", "hook": "pre", "interpreter": "sh", "dir": "<path>"}`,
-  `interpreter` optional, `dir` read from the policy file's folder with `~`
-  expanded and compared, links resolved, with the folder the run resolved
-  the name to. An entry `review:pre` approves the hook of whichever
-  `review` a run finds, and which one that is depends on the working
-  directory, the variables and what a cloned repository holds: a
-  repository's own `.claude/skills/review` ran its `scripts/pre.sh` under
-  an approval given for another folder. Text entries keep approving by
-  name; `"requireDir": true` makes them, and object entries without `dir`,
-  count for nothing. An object entry with a key wfpy does not read is an
-  error, not an approval by name. The reason a hook ran or was refused
-  names its skill folder, and the hook's debug record gives it as
-  `skillDir`. The README now describes hooks and the policy file.
+  `interpreter` optional, `dir` read from the policy file's folder (a link
+  to the file followed) with `~` expanded and compared, links resolved,
+  with the folder the run resolved the name to. An entry `review:pre`
+  approves the hook of whichever `review` a run finds, and which one that
+  is depends on the working directory, the variables and what a cloned
+  repository holds: a repository's own `.claude/skills/review` ran its
+  `scripts/pre.sh` under an approval given for another folder. Text
+  entries keep approving by name, read as before; `"requireDir": true`
+  makes them, and object entries without `dir`, count for nothing. An
+  object entry wfpy cannot read (a key it does not take, a value that is
+  not text) approves nothing, not the hook by name, and a refusal lists
+  it. Both hooks of a firing run from the folder its skill was read from:
+  the post hook resolved the name again after the agent's turn, which could
+  have made another folder where the name resolves first. The reason a hook
+  ran or was refused names its skill folder, and the hook's debug record
+  gives it as `skillDir`. The README now describes hooks and the policy
+  file.
 - `WF_SKILLS_ROOT` names several skill directories, separated by
   `os.pathsep`, searched in the order written; a single directory still
   means what it always did, one whose own path holds the separator

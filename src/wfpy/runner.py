@@ -138,6 +138,7 @@ _parse_retry_after_ms = _agent_tools_runtime._parse_retry_after_ms
 
 _effective_max_tool_rounds = _agent_prompt_runtime._effective_max_tool_rounds
 _run_skill_hook = _agent_prompt_runtime._run_skill_hook
+_resolve_skill_dir = _agent_prompt_runtime._resolve_skill_dir
 _skill_hook_name = _agent_prompt_runtime._skill_hook_name
 _build_effective_agent_prompt = _agent_prompt_runtime._build_effective_agent_prompt
 
@@ -1676,6 +1677,14 @@ def _step_agent(
     pre_hook_result: dict[str, Any] | None = None
     post_hook_result: dict[str, Any] | None = None
     hook_timeout_ms = int(plan.options.get("skill_hook_timeout_ms", 30_000))
+    # Both hooks run from the folder the skill is taken from now, before the
+    # agent's turn: a folder the turn makes where the name resolves first is
+    # not the skill whose `SKILL.md` declared them.
+    hook_skill_dir = (
+        _resolve_skill_dir(skill_name, plan)
+        if agent_spec.use_skill and agent_spec.use_skill_hooks and skill_name
+        else None
+    )
     _mcp_available_servers: list[str] = []
     _mcp_discovered_tool_names: list[str] = []
     effective_prompt_with_runtime = effective_prompt
@@ -1697,6 +1706,7 @@ def _step_agent(
                 response_text=None,
                 plan=plan,
                 timeout_ms=hook_timeout_ms,
+                skill_dir=hook_skill_dir,
             )
             if pre_hook_result.get("ran") and (
                 pre_hook_result.get("error") or int(pre_hook_result.get("exitCode", 0)) != 0
@@ -2445,6 +2455,7 @@ def _step_agent(
                 response_text=response_text,
                 plan=plan,
                 timeout_ms=hook_timeout_ms,
+                skill_dir=hook_skill_dir,
             )
             if post_hook_result.get("ran") and (
                 post_hook_result.get("error") or int(post_hook_result.get("exitCode", 0)) != 0

@@ -958,6 +958,10 @@ def _load_skill_hook_policy(path_str: str) -> dict[str, Any]:
 SKILL_HOOK_POLICY_ENTRY_KEYS = ("skill", "hook", "interpreter", "dir")
 """The keys an object entry of a skill-hook policy's `allow` may hold."""
 
+SKILL_HOOK_INTERPRETERS = ("python", "sh")
+"""The interpreters a hook's script runs with: `scripts/<hook>.py` with
+`python3`, `scripts/<hook>.sh` with `bash`."""
+
 
 class HookApproval(NamedTuple):
     """An object entry of a skill-hook policy's `allow`, read."""
@@ -985,10 +989,38 @@ class SkillHookPolicy(NamedTuple):
     each approves a hook by name, in whichever folder the name resolves to."""
 
     approvals: tuple[HookApproval, ...]
-    """Its object entries."""
+    """Its object entries that it reads."""
+
+    unread: tuple[str, ...]
+    """Its object entries that it cannot read, and why: they approve nothing."""
 
     require_dir: bool
     """`requireDir`: an entry that names no folder approves nothing."""
+
+
+def _object_entry(entry: dict[Any, Any], base: Path) -> HookApproval | str:
+    """An object entry of `allow`, read; or why it cannot be. `base` is the
+    folder a relative `dir` is read from."""
+
+    unknown = sorted(str(key) for key in entry if key not in SKILL_HOOK_POLICY_ENTRY_KEYS)
+    if unknown:
+        return f"it holds {', '.join(unknown)}, which is not read"
+    for key in SKILL_HOOK_POLICY_ENTRY_KEYS:
+        if key not in entry and key in ("interpreter", "dir"):
+            continue
+        value = entry.get(key)
+        if not isinstance(value, str) or not value.strip():
+            return f"its {key} is not text"
+    interpreter = entry.get("interpreter")
+    if interpreter is not None and interpreter not in SKILL_HOOK_INTERPRETERS:
+        return f"its interpreter is not {' or '.join(SKILL_HOOK_INTERPRETERS)}"
+    folder: Path | None = None
+    if "dir" in entry:
+        try:
+            folder = (base / Path(entry["dir"]).expanduser()).resolve()
+        except (OSError, RuntimeError) as exc:
+            return f"its dir cannot be resolved: {exc}"
+    return HookApproval(entry["skill"], entry["hook"], interpreter, folder)
 
 
 def _read_skill_hook_policy(policy: Any, policy_path: str) -> SkillHookPolicy:
@@ -996,55 +1028,48 @@ def _read_skill_hook_policy(policy: Any, policy_path: str) -> SkillHookPolicy:
 
     `allow` holds text entries, `"<skill>:<hook>"` or
     `"<skill>:<hook>:<interpreter>"`, matched whole as they always were, and
-    object entries with `skill`, `hook`, and optionally `interpreter` and
-    `dir`. `dir` names the skill folder the entry approves: read from the
-    policy file's folder, `~` expanded, and resolved, so a link and the
-    folder it points at are one. An object entry the reader cannot take is
-    an error, not an approval by name: a misspelt `dir` would approve the
-    hook in every folder. Any other entry (a number, `null`) approves
-    nothing, as before objects were read.
+    object entries with `skill`, `hook`, and optionally `interpreter`
+    (`python` or `sh`) and `dir`. `dir` names the skill folder the entry
+    approves: read from the folder of the policy file (links resolved, so
+    a policy linked from a dotfiles checkout reads it from there), `~`
+    expanded, and resolved, so a link and the folder it points at are one.
+
+    An object entry it cannot read (a key it does not take, a value that is
+    not text, `null` included) approves nothing, and a refusal says so: a
+    misspelt `dir` read as no `dir` would approve the hook in every folder.
+    Any other entry (a number, `null`) approves nothing, as before objects
+    were read, and an `allow` that is an object has its keys read as text
+    entries, as they were. A policy that is no object, an `allow` of another
+    kind and a `requireDir` that is not true or false are an error.
     """
 
-    def unread(why: str) -> RuntimeError:
+    def unreadable(why: str) -> RuntimeError:
         return RuntimeError(f"Cannot read skill hook policy '{policy_path}': {why}")
 
     if not isinstance(policy, dict):
-        raise unread("it is not a JSON object")
+        raise unreadable("it is not a JSON object")
     require_dir = policy.get("requireDir", False)
     if not isinstance(require_dir, bool):
-        raise unread("`requireDir` is not true or false")
+        raise unreadable("`requireDir` is not true or false")
     allow = policy.get("allow", [])
+    if isinstance(allow, dict):
+        allow = list(allow)
     if not isinstance(allow, list):
-        raise unread("`allow` is not a list")
-    base = Path(policy_path).absolute().parent
+        raise unreadable("`allow` is not a list")
+    base = Path(policy_path).resolve().parent
     names: set[str] = set()
     approvals: list[HookApproval] = []
+    unread: list[str] = []
     for entry in allow:
         if isinstance(entry, str):
             names.add(entry)
-            continue
-        if not isinstance(entry, dict):
-            continue
-        unknown = sorted(str(key) for key in entry if key not in SKILL_HOOK_POLICY_ENTRY_KEYS)
-        if unknown:
-            raise unread(f"entry {entry!r} holds what it cannot read: {', '.join(unknown)}")
-        for key in SKILL_HOOK_POLICY_ENTRY_KEYS:
-            value = entry.get(key)
-            required = key in ("skill", "hook")
-            if (value is None and required) or (
-                value is not None and (not isinstance(value, str) or not value.strip())
-            ):
-                raise unread(f"entry {entry!r} has no {key} as text")
-        folder: Path | None = None
-        if entry.get("dir") is not None:
-            try:
-                folder = (base / Path(entry["dir"]).expanduser()).resolve()
-            except (OSError, RuntimeError) as exc:
-                raise unread(f"entry {entry!r}: {exc}") from exc
-        approvals.append(
-            HookApproval(entry["skill"], entry["hook"], entry.get("interpreter"), folder)
-        )
-    return SkillHookPolicy(frozenset(names), tuple(approvals), require_dir)
+        elif isinstance(entry, dict):
+            read = _object_entry(entry, base)
+            if isinstance(read, HookApproval):
+                approvals.append(read)
+            else:
+                unread.append(f"{json.dumps(entry)} ({read})")
+    return SkillHookPolicy(frozenset(names), tuple(approvals), tuple(unread), require_dir)
 
 
 def _authorize_skill_hook(
@@ -1063,7 +1088,8 @@ def _authorize_skill_hook(
     cloned repository holds, so an entry that names none approves the hook
     of whichever folder the run finds; `requireDir` makes such entries count
     for nothing. The reason names the folder, as the run's record does
-    (`_run_skill_hook`).
+    (`_run_skill_hook`), and a refusal says what else the policy holds for
+    the hook.
     """
 
     where = skill_dir.resolve()
@@ -1080,19 +1106,23 @@ def _authorize_skill_hook(
     by_name = bool(
         policy.names & {f"{skill_name}:{hook_name}", f"{skill_name}:{hook_name}:{interpreter}"}
     ) or any(approval.dir is None for approval in named)
-    hook = f"hook '{skill_name}:{hook_name}' of {where}"
     if any(approval.dir == where for approval in named):
         return True, f"allowed by policy '{policy_path}' by folder, for {where}"
     if by_name and not policy.require_dir:
         return True, f"allowed by policy '{policy_path}' by name, for {where}"
+    held: list[str] = []
     if by_name:
-        return False, (
-            f"{hook} is approved in policy '{policy_path}' by name only, which"
-            " requireDir makes count for nothing"
-        )
-    if named:
-        return False, f"{hook} is approved in policy '{policy_path}' for other folders only"
-    return False, f"{hook} not listed in policy '{policy_path}'"
+        held.append("by name only, which requireDir makes count for nothing")
+    if any(approval.dir is not None for approval in named):
+        held.append("for other folders only")
+    said = (
+        f"is approved in policy '{policy_path}' {', and '.join(held)}"
+        if held
+        else f"not listed in policy '{policy_path}'"
+    )
+    if policy.unread:
+        said += "; the policy's entries it cannot read: " + "; ".join(policy.unread)
+    return False, f"hook '{skill_name}:{hook_name}' of {where} {said}"
 
 
 def _resolve_skill_hook_script(
@@ -1132,16 +1162,21 @@ def _run_skill_hook(
     response_text: str | None,
     plan: Any,
     timeout_ms: int,
+    skill_dir: Path | None = None,
 ) -> dict[str, Any]:
     """Execute one skill hook script and return debug metadata.
 
-    The metadata names the skill folder the hook's script is taken from,
-    `skillDir`, the one its approval is checked against.
+    The script is taken from `skill_dir`, the folder the firing read the
+    skill from, when given; else from the folder `skill_name` resolves to
+    now. A firing passes it, so its post hook does not run a folder made
+    during the agent's turn where the name resolves first. The metadata
+    names that folder, `skillDir`, the one the approval is checked against.
     """
 
     _validate_skill_name(skill_name)
     _validate_skill_name(hook_name)
-    skill_dir = _resolve_skill_dir(skill_name, plan)
+    if skill_dir is None:
+        skill_dir = _resolve_skill_dir(skill_name, plan)
     resolved = _skill_hook_script_in(skill_dir, hook_name) if skill_dir is not None else None
     if skill_dir is None or resolved is None:
         return {

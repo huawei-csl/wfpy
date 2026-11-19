@@ -191,6 +191,40 @@ class TestFolderEntries:
 
         assert ran(result) is runs, result
 
+    def test_dir_is_read_from_the_folder_of_the_file_a_linked_policy_is(self, tmp_path):
+        """A policy kept in a dotfiles checkout and linked into place names
+        its folders from the checkout, where it is written."""
+        project = tmp_path / "project"
+        hooked_skill(project / ".claude" / "skills")
+        entry = {"skill": "review", "hook": "pre", "dir": "../project/.claude/skills/review"}
+        written = tmp_path / "dotfiles" / "policy.json"
+        written.parent.mkdir()
+        written.write_text(json.dumps({"allow": [entry]}), encoding="utf-8")
+        linked = tmp_path / "config" / "wfpy" / "policy.json"
+        linked.parent.mkdir(parents=True)
+        try:
+            linked.symlink_to(written)
+        except OSError as error:
+            pytest.skip(f"cannot create a symlink here: {error}")
+        plan = types.SimpleNamespace(
+            source_path=str(workflow(project)),
+            work_dir=None,
+            options={"skill_hook_auth": "policy", "skill_hook_policy": str(linked)},
+        )
+
+        result = _run_skill_hook(
+            skill_name="review",
+            hook_name="pre",
+            phase="pre",
+            actor_name="reviewer",
+            payload={},
+            response_text=None,
+            plan=plan,
+            timeout_ms=10_000,
+        )
+
+        assert ran(result), result
+
     def test_an_entry_for_another_hook_or_skill_approves_nothing(self, tmp_path):
         project = tmp_path / "project"
         skill_dir = hooked_skill(project / ".claude" / "skills")
@@ -243,27 +277,44 @@ class TestRequireDir:
 
 
 class TestAnEntryThatCannotBeRead:
-    """An entry the runtime cannot read is an error, not an approval by
-    name: `{"directory": ...}` misspelt would otherwise approve the hook in
-    every folder."""
+    """An object entry the runtime cannot read approves nothing, and the
+    refusal says so: read as an entry without `dir`, a misspelt
+    `{"directory": ...}` or a `"dir": null` would approve the hook in every
+    folder."""
 
     @pytest.mark.parametrize(
         "entry",
         [
             {"skill": "review", "hook": "pre", "directory": "/somewhere"},
-            {"skill": "review", "dir": "/somewhere"},
-            {"hook": "pre"},
+            {"skill": "review", "hook": "pre", "dir": None},
+            {"skill": "review", "hook": "pre", "interpreter": None},
+            {"skill": "review", "hook": "pre", "interpreter": "bash"},
             {"skill": "review", "hook": "pre", "dir": 3},
             {"skill": "review", "hook": "pre", "dir": ""},
             {"skill": "review", "hook": "pre", "interpreter": ""},
+            {"skill": "review", "dir": "/somewhere"},
+            {"hook": "pre"},
         ],
     )
-    def test_it_is_an_error(self, entry, tmp_path):
+    def test_it_approves_nothing_and_the_refusal_says_why(self, entry, tmp_path):
         project = tmp_path / "project"
         hooked_skill(project / ".claude" / "skills")
 
-        with pytest.raises(RuntimeError, match="skill hook policy"):
-            run_pre(workflow(project), {"allow": [entry]}, tmp_path / "policy.json")
+        result = run_pre(workflow(project), {"allow": [entry]}, tmp_path / "policy.json")
+
+        assert result["ran"] is False
+        assert "entries it cannot read" in result["reason"]
+        assert json.dumps(entry) in result["reason"]
+
+    def test_the_entries_it_reads_still_approve(self, tmp_path):
+        """A note beside the entries (`{"comment": ...}`) stops no run."""
+        project = tmp_path / "project"
+        hooked_skill(project / ".claude" / "skills")
+        policy = {"allow": [{"comment": "the lint hook is ours"}, "review:pre"]}
+
+        result = run_pre(workflow(project), policy, tmp_path / "policy.json")
+
+        assert ran(result), result
 
     def test_an_entry_that_is_neither_text_nor_an_object_approves_nothing(self, tmp_path):
         """As it did before object entries were read: it was never a name."""
@@ -274,6 +325,17 @@ class TestAnEntryThatCannotBeRead:
 
         assert result["ran"] is False
         assert "not listed" in result["reason"]
+
+    def test_an_allow_that_is_an_object_has_its_keys_read_as_before(self, tmp_path):
+        """`set(str(v) for v in allow)` took an object's keys."""
+        project = tmp_path / "project"
+        hooked_skill(project / ".claude" / "skills")
+
+        result = run_pre(
+            workflow(project), {"allow": {"review:pre": True}}, tmp_path / "policy.json"
+        )
+
+        assert ran(result), result
 
     @pytest.mark.parametrize("policy", [["review:pre"], {"allow": "review:pre"}])
     def test_a_policy_that_is_no_object_or_whose_allow_is_no_list_is_an_error(
@@ -286,6 +348,7 @@ class TestAnEntryThatCannotBeRead:
             run_pre(workflow(project), policy, tmp_path / "policy.json")
 
     def test_a_require_dir_that_is_not_true_or_false_is_an_error(self, tmp_path):
+        """Read either way, it would change what every entry approves."""
         project = tmp_path / "project"
         hooked_skill(project / ".claude" / "skills")
 
@@ -342,6 +405,77 @@ class TestTheListGivesTheFolderToApprove:
         result = run_pre(source, {"requireDir": True, "allow": [entry]}, tmp_path / "p.json")
 
         assert ran(result), result
+
+
+class TestTheRefusalSaysWhatThePolicyHolds:
+    def test_by_name_under_require_dir_and_for_another_folder(self, tmp_path, isolated):
+        project = tmp_path / "project"
+        hooked_skill(project / ".claude" / "skills")
+        policy = {
+            "requireDir": True,
+            "allow": [
+                "review:pre",
+                {"skill": "review", "hook": "pre", "dir": "~/.claude/skills/review"},
+            ],
+        }
+
+        result = run_pre(workflow(project), policy, tmp_path / "policy.json")
+
+        assert result["ran"] is False
+        assert "by name only, which requireDir makes count for nothing" in result["reason"]
+        assert "for other folders only" in result["reason"]
+
+
+class TestAFiringRunsItsHooksFromOneFolder:
+    def test_the_post_hook_runs_from_the_folder_the_skill_was_read_from(
+        self, tmp_path, isolated, make_agent_spec, make_task_meta, make_port, monkeypatch
+    ):
+        """The agent's turn makes `<project>/.claude/skills/review`, where the
+        name now resolves first, with a `post.sh` of its own; the post hook
+        the user's `review` declared runs from the user's folder."""
+        from wfpy.runner import FifoPlan, Queue, RuntimeActor, _step_agent
+
+        marker = tmp_path / "ran.txt"
+        users = isolated / ".claude" / "skills" / "review"
+        (users / "scripts").mkdir(parents=True)
+        (users / "SKILL.md").write_text(
+            "---\nhooks:\n  pre: pre\n  post: post\n---\nbody\n", encoding="utf-8"
+        )
+        for hook in ("pre", "post"):
+            (users / "scripts" / f"{hook}.sh").write_text(
+                f"echo users-{hook} >> '{marker}'\n", encoding="utf-8"
+            )
+        project = tmp_path / "project"
+        source = workflow(project)
+
+        def turn(agent_spec, payload_text, verbose, **kwargs):
+            planted = project / ".claude" / "skills" / "review"
+            (planted / "scripts").mkdir(parents=True)
+            (planted / "SKILL.md").write_text("planted\n", encoding="utf-8")
+            (planted / "scripts" / "post.sh").write_text(
+                f"echo planted-post >> '{marker}'\n", encoding="utf-8"
+            )
+            return "ok", [{"role": "assistant", "content": "ok"}], None, {}
+
+        monkeypatch.setattr("wfpy.runner._invoke_agent", turn)
+        spec = make_agent_spec(prompt="p", model="m", skill="review", use_skill=True)
+        meta = make_task_meta(
+            name="Reviewer",
+            kind="agent",
+            output_ports={"out": make_port("out", str, "out")},
+            agent_spec=spec,
+        )
+        actor = RuntimeActor(name="reviewer", kind="agent", instance=object(), meta=meta)
+        actor.out_queues = {"out": [Queue(queue_id="q")]}
+        plan = FifoPlan(name="wf")
+        plan.source_path = str(source)
+        plan.options = {"skill_hook_auth": "policy", "skill_hook_policy": str(tmp_path / "p.json")}
+        (tmp_path / "p.json").write_text(
+            json.dumps({"allow": ["review:pre", "review:post"]}), encoding="utf-8"
+        )
+
+        assert _step_agent(actor, tmp_path / "out", plan, verbose=False) is True
+        assert marker.read_text(encoding="utf-8").split() == ["users-pre", "users-post"]
 
 
 class TestTextEntriesAreReadAsBefore:

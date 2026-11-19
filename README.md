@@ -495,16 +495,19 @@ hook by name, in whichever folder the name resolves to. Which folder that is
 depends on the working directory, the variables and what a cloned repository
 holds, so such an entry also runs the `scripts/pre.sh` of a repository's own
 `.claude/skills/review`. An object entry may name the folder it approves,
-`dir`: read from the policy file's folder, with `~` expanded, and compared,
-links resolved, with the skill folder the run resolved. It approves that
-folder's hook and no other. `interpreter` (`python` or `sh`) is optional in
-both forms. `"requireDir": true`, beside `allow`, makes the entries that name
-no folder count for nothing, as `lint:pre` would above. An object entry with a key wfpy does
-not read, or a value that is not text, is an error rather than an approval
-by name. Why a hook ran or did not names the skill folder, and the hook's
-record in the firing's debug data (`WF_AGENT_DEBUG`) gives it as `skillDir`.
-`wfpy skills --json` gives each skill's folder as `dir`: the folder an
-approval names.
+`dir`: read from the folder of the policy file (a link to it followed), with
+`~` expanded, and compared, links resolved, with the skill folder the run
+resolved. It approves that folder's hook and no other. `interpreter`
+(`python` or `sh`) is optional in both forms. `"requireDir": true`, beside
+`allow`, makes the entries that name no folder count for nothing, as
+`lint:pre` would above. An object entry with a key wfpy does not read, or a
+value that is not text (`null` included), approves nothing rather than
+approving by name, and a refusal lists it. Both hooks of a firing run from
+the folder its skill was read from, though the agent's turn makes another
+where the name resolves first. Why a hook ran or did not names the skill
+folder, and the hook's record in the firing's debug data (`WF_AGENT_DEBUG`)
+gives it as `skillDir`. `wfpy skills --json` gives each skill's folder as
+`dir`: the folder an approval names.
 
 ## Claude agent format compatibility (draft)
 
