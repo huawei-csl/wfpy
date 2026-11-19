@@ -395,25 +395,41 @@ def cmd_run(args: argparse.Namespace) -> None:
             print(f"  {port_name}: {values}")
 
 
-def cmd_skills(args: argparse.Namespace) -> None:
-    """Install, locate or list the Agent Skills this wfpy ships."""
+# What `wfpy skills` takes in place of a workflow file. These act on the skills
+# wfpy ships; a file is asked which skills a run of it finds.
+SHIPPED_SKILLS_COMMANDS = ("install", "path", "list")
+
+
+def cmd_shipped_skills(args: argparse.Namespace) -> None:
+    """`wfpy skills install|path|list`: the Agent Skills this wfpy ships."""
     from wfpy.skills import SKILLS_DIR, install, install_root, print_install, shipped
+
+    command = args.file
+    if args.json:
+        print(f"Error: --json goes with a workflow file, not with '{command}'", file=sys.stderr)
+        sys.exit(2)
+    if command != "install" and (args.scope or args.workspace or args.force):
+        print(
+            f"Error: --scope, --workspace and --force go with 'install', not with '{command}'",
+            file=sys.stderr,
+        )
+        sys.exit(2)
 
     skills = shipped()
     if not skills:
         print("this wfpy ships no skills", file=sys.stderr)
         raise SystemExit(1)
 
-    if args.skills_command == "path":
+    if command == "path":
         print(SKILLS_DIR)
         return
 
-    if args.skills_command == "list":
+    if command == "list":
         for skill in skills:
             print(f"{skill.name:<26} {skill.description[:110]}")
         return
 
-    root = install_root(args.scope, args.workspace)
+    root = install_root(args.scope or "user", args.workspace or ".")
     results = install(root, skills, force=args.force)
     print_install(root, results)
     if any("--force" in what or "in the way" in what for _, what in results):
@@ -451,6 +467,56 @@ def cmd_connectors(args: argparse.Namespace) -> None:
         print(f"{r['name']:<10} {'yes' if r['available'] else 'no':<10} {r['source']:<11} "
               f"{r['model'] or '-':<10} {r['mode'] or '-':<12} {stuck:<12} {r['command']}")
     print(f"user file: {user_file()}" + (f"  workspace file: {workspace_file(root)}" if root else ""))
+
+
+def cmd_skills(args: argparse.Namespace) -> None:
+    """Execute the 'skills' sub-command: the skills and agent presets a run
+    of the file started here finds, with this environment.
+
+    The answer is the runtime's own lookup (`_agent_skill_lookup`), so an
+    editor that runs it with the command it runs workflows with, from the
+    directory it runs them in, offers what the run will find. The file is
+    not loaded.
+    """
+    import json as _json
+    from types import SimpleNamespace
+
+    from wfpy._agent_prompt_runtime import _project_top_outside_a_repository, _workflow_dir
+    from wfpy._agent_skill_lookup import agent_skill_lookup
+
+    if args.file in SHIPPED_SKILLS_COMMANDS:
+        cmd_shipped_skills(args)
+        return
+    if args.scope or args.workspace or args.force:
+        print(
+            "Error: --scope, --workspace and --force go with 'install', not with a workflow file",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    if not Path(args.file).is_file():
+        print(f"Error: no such file: {args.file}", file=sys.stderr)
+        sys.exit(1)
+    lookup = agent_skill_lookup(args.file)
+    if args.json:
+        print(_json.dumps(lookup, indent=1))
+        return
+    print(f"{'skill':<24} {'folder':<20} directory")
+    for skill in lookup["skills"]:
+        problem = f"  ({skill['problem']})" if skill["problem"] else ""
+        print(f"{skill['name']:<24} {skill['folder']:<20} {skill['dir']}{problem}")
+    print(f"\n{'preset':<24} {'folder':<20} file")
+    for preset in lookup["presets"]:
+        problem = f"  ({preset['problem']})" if preset["problem"] else ""
+        print(f"{preset['name']:<24} {preset['folder']:<20} {preset['path']}{problem}")
+    repository = lookup["repository"]
+    if repository is None:
+        # The lookup's own helpers, so the table cannot say a top the
+        # lookup did not use.
+        cwd = Path(lookup["cwd"])
+        plan = SimpleNamespace(source_path=lookup["workflow"], work_dir=None)
+        top = _project_top_outside_a_repository(_workflow_dir(plan, cwd), cwd)
+        repository = f"none (the project's top: {top})"
+    print(f"\nworking directory: {lookup['cwd']}  repository: {repository}")
 
 
 def cmd_plan(args: argparse.Namespace) -> None:
@@ -858,32 +924,38 @@ def main() -> None:
 
     # ── skills ──
     skills_parser = subparsers.add_parser(
-        "skills", help="The Agent Skills wfpy ships: install them, or say where they are"
+        "skills",
+        help="List the skills and agent presets a run of a workflow started here finds; "
+        "or install, locate and list the skills wfpy ships",
+        description="With a workflow file: the skills and agent presets a run of it started "
+        "here finds. With install, path or list in its place: the Agent Skills wfpy ships "
+        "for building a workflow. A file that has one of those names is written ./install.",
     )
-    skills_sub = skills_parser.add_subparsers(dest="skills_command", required=True)
-
-    skills_install = skills_sub.add_parser(
-        "install", help="Link the skills where a tool looks for them"
+    skills_parser.add_argument(
+        "file",
+        metavar="file | install | path | list",
+        help="Python file containing @workflow definitions (not loaded). "
+        "install: link the skills wfpy ships where a tool looks for them. "
+        "path: print their directory, to use as WF_SKILLS_ROOT. "
+        "list: say which skills wfpy ships",
     )
-    skills_install.add_argument(
-        "--scope", choices=("user", "project"), default="user",
-        help="user: ~/.claude/skills (default). project: <workspace>/.wf/skills",
+    skills_parser.add_argument(
+        "--json", action="store_true", help="With a file: one JSON object instead of a table"
     )
-    skills_install.add_argument(
-        "--workspace", default=".", help="Workspace root for --scope project (default: .)"
+    skills_parser.add_argument(
+        "--scope",
+        choices=("user", "project"),
+        default=None,
+        help="With install: user links into ~/.claude/skills (default), "
+        "project into <workspace>/.wf/skills",
     )
-    skills_install.add_argument(
-        "--force", action="store_true", help="Replace a link that points elsewhere"
+    skills_parser.add_argument(
+        "--workspace", default=None, help="With install --scope project: the workspace (default: .)"
     )
-    skills_install.set_defaults(func=cmd_skills)
-
-    skills_path = skills_sub.add_parser(
-        "path", help="Print the skills directory, to use as WF_SKILLS_ROOT"
+    skills_parser.add_argument(
+        "--force", action="store_true", help="With install: replace a link that points elsewhere"
     )
-    skills_path.set_defaults(func=cmd_skills)
-
-    skills_list = skills_sub.add_parser("list", help="List the skills wfpy ships")
-    skills_list.set_defaults(func=cmd_skills)
+    skills_parser.set_defaults(func=cmd_skills)
 
     args = parser.parse_args()
     args.func(args)

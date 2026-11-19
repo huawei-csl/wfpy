@@ -25,6 +25,25 @@ All notable changes to wfpy are documented here. The format follows
   directory of that name is never deleted, with or without it. `wfpy skills
   path` prints the directory to use as `WF_SKILLS_ROOT` where a symlinked
   skill is not resolved, and `wfpy skills list` says what is shipped.
+- A skill-hook policy entry may name the skill folder it approves:
+  `{"skill": "review", "hook": "pre", "interpreter": "sh", "dir": "<path>"}`,
+  `interpreter` optional, `dir` read from the policy file's folder (a link
+  to the file followed) with `~` expanded and compared, links resolved,
+  with the folder the run resolved the name to. An entry `review:pre`
+  approves the hook of whichever `review` a run finds, and which one that
+  is depends on the working directory, the variables and what a cloned
+  repository holds: a repository's own `.claude/skills/review` ran its
+  `scripts/pre.sh` under an approval given for another folder. Text
+  entries keep approving by name, read as before; `"requireDir": true`
+  makes them, and object entries without `dir`, count for nothing. An
+  object entry wfpy cannot read (a key it does not take, a value that is
+  not text) approves nothing, not the hook by name, and a refusal lists
+  it, as the log does. Both hooks of a firing run from the folder its skill was read from:
+  the post hook resolved the name again after the agent's turn, which could
+  have made another folder where the name resolves first. The reason a hook
+  ran or was refused names its skill folder, and the hook's debug record
+  gives it as `skillDir`. The README now describes hooks and the policy
+  file.
 - `WF_SKILLS_ROOT` names several skill directories, separated by
   `os.pathsep`, searched in the order written; a single directory still
   means what it always did, one whose own path holds the separator
@@ -34,13 +53,57 @@ All notable changes to wfpy are documented here. The format follows
   (`pypto-op-perf-tune/tune-swimlane`) is only reachable when its own
   directory is a root, which one value could not say while also naming the
   collection around it. It also lets an operator point wfpy at the skill
-  directories of several tools (`.claude/skills`, `.codex/skills`,
-  `.agents/skills`) without wfpy knowing any of their layouts. The first
+  directories of several tools, wherever they keep them. The first
   directory listed that exists is the runtime root: the base of the walk up
   the tree for `.wf/skills`, `.claude/skills` and `.claude/agents`, and the
   directory a skill hook runs in. The order therefore decides more than
   priority: a project's own `.wf/skills` and `.claude/agents` are found
   only when the walk starts in that project, so its directory goes first.
+- A skill installed for another agent tool is found. A skill is the same
+  `SKILL.md` folder whichever tool installed it, but wfpy looked only in its
+  own and Claude's folders, so a skill installed for Codex or OpenCode was
+  reported as not found unless `WF_SKILLS_ROOT` named its folder. wfpy now
+  also searches `.agents/skills` (the folder the Agent Skills convention
+  shares between tools), `.codex/skills`, `.opencode/skills` and
+  `.opencode/skill`, in the workflow's directory and above it up to the top
+  of its git repository, and in the working directory when it is in that
+  repository, then `~/.agents/skills`, `$CODEX_HOME/skills` (`~/.codex` by
+  default; a relative value read from the working directory, as Codex reads
+  it), `$CODEX_HOME/skills/.system` (the skills Codex ships) and
+  `$XDG_CONFIG_HOME/opencode/skills` and `skill` (`~/.config` by default).
+  They are searched after every folder searched before, `~/.claude/skills`
+  included, so a name that resolved before resolves to the same folder:
+  these folders only add names. The walk up starts at the workflow's
+  directory, `WF_SKILLS_ROOT` or not, and stops where git says the
+  repository ends (`git rev-parse --show-toplevel`), as Codex and OpenCode
+  stop there. A `.git` git does not take for a repository, or a repository
+  of dubious ownership git refuses, bounds nothing: with no repository, or
+  no git, the project is the working directory or the workflow's directory
+  (see Changed). So `/tmp/.agents/skills` is not read for a workflow in
+  `/tmp/job` started elsewhere, whoever planted a `/tmp/.git`.
+  git is not handed the variables that name another repository's parts,
+  which a git hook exports (`GIT_DIR`, `GIT_COMMON_DIR`, …); a git that does
+  not answer within 10 s is said in the log.
+  A user-level folder is searched in its user-level place however the walk
+  reaches it; a home directory kept in git has its other folders
+  (`~/.opencode/skills`) searched as a project's. A `CODEX_HOME` that names
+  a project's `.codex` is the user's too, as Codex reads it.
+- `wfpy skills <workflow.py> [--json]` lists the skills and agent presets a
+  run of the workflow started in the current directory finds: the folders
+  searched, in order, the folder each name resolves to, what reading its
+  `SKILL.md` fails with, its hooks as the runtime reads them, and the
+  presets with the skills they preload. It runs the runtime's own lookup
+  and does not load the workflow, so an IDE that runs it with the command
+  it runs workflows with offers the skills a run finds, without copying the
+  rules or asking another process. A relative path is read from the
+  current directory, a hidden entry (`.git`, `.system`) is not listed, and
+  each call looks again. A preset over 256 kB is listed without its
+  description; a run reads it whole, as before.
+- The lookup roots are worked out once per plan, not on every skill read,
+  hook and preset lookup of every firing. Parallel workers wait for the
+  first to work them out rather than each run git.
+- An agent preset's `description` (and `name`) is read as text: one with a
+  comma was a list.
 - The sidecar answers `pythonEnvironment` for a workflow file: the
   interpreter running it, the import roots `wfpy plan` loads the file with,
   and the folders its installed packages come from. An IDE configures its
@@ -67,6 +130,44 @@ All notable changes to wfpy are documented here. The format follows
   `usedIn` and follow or refuse every file (features `portUsesAcrossFiles`,
   `portUsesQuery`). `typeParameters {type}` answers the parameters a type
   takes. `createNode` takes `expressions`, written verbatim.
+
+### Changed
+- wfpy's own project folders, `.wf/skills`, `.claude/skills` and
+  `.claude/agents`, are searched up the tree only as far as the top of the
+  project, as the other agent tools' folders are. They were searched up to
+  the filesystem root, so a `/tmp/.claude/skills` another local user planted
+  handed a workflow in `/tmp/job` its prompt text and hook scripts. The
+  project is the workflow's git repository, as git says (a submodule or a
+  nested repository is a project of its own); with no repository git
+  accepts, the working directory when the workflow's directory is in it,
+  else the workflow's directory alone. The other tools' folders follow the
+  same rule, so outside a repository a run started in a directory that
+  holds the workflow searches them up to that directory, where it searched
+  the workflow's directory alone. The working directory's own folders, the
+  user's and what `WF_SKILLS_ROOT` and `WF_CLAUDE_AGENTS_ROOT` name are read
+  as before, and a name resolves to the folder it did when that folder is
+  in the project. When the runtime root (the first `WF_SKILLS_ROOT`
+  directory that exists, or `WF_CLAUDE_AGENTS_ROOT` for presets) is outside
+  the project, the walk from it is that directory alone: its own
+  `.wf/skills`, `.claude/skills` or `.claude/agents` are read, the
+  directories above it are not. **This changes what a run finds:** a skill
+  or preset kept above the top of the workflow's repository (a
+  superproject's, for a submodule), or above the workflow's directory in a
+  project with no `.git` (an unpacked archive) that the run is not started
+  in, is no longer found; name its folder in `WF_SKILLS_ROOT` (or
+  `WF_CLAUDE_AGENTS_ROOT`). For a workflow in a project below the home
+  directory, `~/.claude/skills` and `~/.claude/agents` come after the
+  working directory's folders, as the documented order has them; the walk
+  reached them first. `~/.wf/skills` is reached by no other rule — the
+  user's folders are `~/.claude/skills` and `~/.claude/agents` — so a
+  skill kept there is now found only by a run whose project is the home
+  directory; name it in `WF_SKILLS_ROOT`, or keep it in
+  `~/.claude/skills`. Which repository a directory is in is git's answer:
+  where git cannot be run (an image without it) or refuses the checkout
+  (another user's, not in `safe.directory`), there is no repository to
+  bound the search, so the folders of a checkout's top are not searched
+  and the log says so. `wfpy skills` lists the folders a run searches, its
+  answer made as before.
 
 ### Fixed
 - An ACP agent runs on `agent-client-protocol` 1.0. That release removed the
@@ -100,6 +201,9 @@ All notable changes to wfpy are documented here. The format follows
   found. Containment is now checked on the path as written, which is where
   it was doing its work: `_validate_skill_name()` already refuses a name
   holding a path separator or `..`.
+- An agent preset installed as a symlink (`<name>.md`, or a `<name>` folder
+  holding `AGENT.md`) is found, as a symlinked skill is; the lookup
+  resolved it before checking containment and passed it over.
 - A run whose workflow holds a sub-workflow taking no input ends. The
   sub-workflow node had its inputs whenever it had none, so after its one
   firing the scheduler fired it again forever, each empty re-run counted as
@@ -176,6 +280,19 @@ All notable changes to wfpy are documented here. The format follows
 - The live files go only after the run's record is in `run-log.jsonl`, on
   success as on failure. They went before it, and in between a reader found
   only the previous run.
+- A run refuses a skill, agent preset or hook name that starts with `.`,
+  saying why. `wfpy skills` does not list a hidden entry, as Codex and
+  Claude Code skip one, but `skill=".draft"` loaded
+  `.claude/skills/.draft`, which no list offers, and `skill=".system"` took
+  Codex's `.system` root for a skill. A preset that preloads such a skill
+  is warned about it, as one that preloads a missing skill is, and a hook
+  declared with such a name does not run. A name is also refused when it
+  begins or ends with whitespace, since a run reads one without it and so
+  can never resolve that folder. A hook's script is held inside the
+  skill's `scripts/`, as a skill is held inside its root: what validation
+  leaves is a Windows drive-relative name (`d:evil`), which joined outside
+  the folder. The list leaves such names out by the same
+  check, so what it offers and what a run takes cannot differ.
 
 ## [1.1.0] — 2026-10-14
 

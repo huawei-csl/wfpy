@@ -3,22 +3,52 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
+import stat
 import subprocess
+import threading
+from collections.abc import Callable, Iterable
 from pathlib import Path
-from typing import Any
+from typing import Any, Generic, NamedTuple, TypeVar, cast
 
 from wfpy.core import AgentSpec
 
+logger = logging.getLogger("wfpy")
+
 SKILL_MD_MAX_BYTES = 256_000
 """Maximum SKILL.md size accepted by the runtime loader."""
+
+GIT_TIMEOUT_SECONDS = 10
+"""How long the lookup waits for git to say which repository a workflow is in."""
+
+GIT_REPOSITORY_VARIABLES = (
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_COMMON_DIR",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_INDEX_FILE",
+    "GIT_GRAFT_FILE",
+    "GIT_SHALLOW_FILE",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_PREFIX",
+)
+"""The variables naming one repository's own parts, not passed on when the
+lookup asks git which repository a workflow is in: those `git rev-parse
+--local-env-vars` lists, which git clears itself before it runs a
+command in a submodule. Its configuration ones (`GIT_CONFIG_PARAMETERS`,
+`GIT_CONFIG_COUNT`) are passed on: they carry the user's choices, such
+as the `safe.directory` a container sets that way."""
 
 AGENT_MAX_TOOL_ROUNDS = 6
 """Maximum tool-call continuation rounds per single agent firing."""
 
 
-def _explicit_skills_roots() -> list[Path]:
+def _explicit_skills_roots(cwd: Path | None = None) -> list[Path]:
     """Parse `WF_SKILLS_ROOT` into the roots it names, in priority order.
 
     The variable holds one directory or several separated by `os.pathsep`
@@ -26,25 +56,300 @@ def _explicit_skills_roots() -> list[Path]:
     only form the variable used to take — parses to a one-element list, so
     an existing setting keeps behaving exactly as before. That includes a
     directory whose own path holds the separator (`skills:v2`): a value that
-    is itself a directory is that one directory, and is not split.
+    is itself a directory is that one directory, and is not split. A
+    relative entry is read from `cwd`, the run's working directory (this
+    process's when omitted).
     """
 
     raw = os.environ.get("WF_SKILLS_ROOT", "")
-    whole = Path(raw.strip()).expanduser()
+    whole = _from_cwd(Path(raw.strip()).expanduser(), cwd)
     if os.pathsep in raw and whole.is_dir():
         return [whole]
     roots: list[Path] = []
     for entry in raw.split(os.pathsep):
         entry = entry.strip()
         if entry:
-            roots.append(Path(entry).expanduser())
+            roots.append(_from_cwd(Path(entry).expanduser(), cwd))
     return roots
 
 
-def _runtime_root_for_skills(plan: Any) -> Path:
+def _from_cwd(path: Path, cwd: Path | None) -> Path:
+    """`path`, a relative one read from `cwd` when given."""
+
+    return cwd / path if cwd is not None and not path.is_absolute() else path
+
+
+OTHER_TOOL_PROJECT_SKILL_DIRS: tuple[tuple[str, ...], ...] = (
+    (".agents", "skills"),
+    (".codex", "skills"),
+    (".opencode", "skills"),
+    (".opencode", "skill"),
+)
+"""Where other agent tools keep a project's skills, relative to a directory.
+
+`.agents/skills` is the folder the Agent Skills convention shares between
+tools, and the one Codex documents for a repository. `.codex/skills` is the
+skills folder of a Codex project configuration (`.codex/`). OpenCode reads
+`skills` and the older `skill` under `.opencode/`. Each holds
+`<skill-name>/SKILL.md`, the layout wfpy already reads.
+"""
+
+
+class LookupRoot(NamedTuple):
+    """A directory a lookup searches, and how a reader knows it."""
+
+    path: Path
+    """The directory, resolved."""
+
+    folder: str
+    """The directory as a reader knows it: `.claude/skills`, `.agents/skills`,
+    `~/.agents/skills`, `$CODEX_HOME/skills`, `WF_SKILLS_ROOT`, ..."""
+
+    scope: str
+    """How the lookup reached it: `explicit` (named by `WF_SKILLS_ROOT` or
+    `WF_CLAUDE_AGENTS_ROOT`), `project` (the workflow's directory or one
+    above it), `cwd` (the working directory) or `user`."""
+
+
+class _Roots:
+    """Lookup roots in the order added, each directory once.
+
+    One rule places a user-level directory (`user_names`) that the walk or
+    the working directory reaches as a project's: it is the user's. Among
+    wfpy's own folders, which keep the order they always had, it is named
+    the user's where it is reached. Among the other tools' folders (added
+    after `others_from_here()`), it waits for its user-level place, after
+    every project folder, as Codex ranks a user's skill after a
+    repository's. A directory a variable names is taken as named.
+    """
+
+    def __init__(self, user_names: dict[Path, str]) -> None:
+        self.roots: list[LookupRoot] = []
+        self._seen: set[Path] = set()
+        self._user_names = user_names
+        self._others = False
+
+    def others_from_here(self) -> None:
+        """The directories added from now on are other tools' folders."""
+        self._others = True
+
+    def add(self, path: Path, folder: str, scope: str) -> None:
+        """Add a resolved directory."""
+        if path in self._seen:
+            return
+        if scope in ("project", "cwd") and path in self._user_names:
+            if self._others:
+                return  # the user's: added in its user-level place
+            folder, scope = self._user_names[path], "user"
+        self._seen.add(path)
+        self.roots.append(LookupRoot(path, folder, scope))
+
+
+def _xdg_config_home() -> Path | None:
+    """`XDG_CONFIG_HOME`, if it names an absolute directory.
+
+    A relative value is ignored, as the XDG Base Directory specification asks.
+    """
+
+    raw = os.environ.get("XDG_CONFIG_HOME", "").strip()
+    if not raw:
+        return None
+    path = Path(raw).expanduser()
+    return path if path.is_absolute() else None
+
+
+def _other_tool_user_skill_dirs(cwd: Path) -> list[tuple[Path, str]]:
+    """Where other agent tools keep a user's skills, in the order searched,
+    each with the name a reader knows it by.
+
+    `~/.agents/skills` (the shared folder), Codex's `$CODEX_HOME/skills`
+    (`~/.codex/skills` when `CODEX_HOME` is unset; a relative value is read
+    from the working directory `cwd`, as Codex reads it) and
+    `$CODEX_HOME/skills/.system`, where Codex installs the skills it ships
+    and which it ranks after the user's, then OpenCode's
+    `$XDG_CONFIG_HOME/opencode/skills` and `.../skill` (`~/.config` when
+    `XDG_CONFIG_HOME` is unset or relative).
+
+    `$CODEX_HOME` may name a project's `.codex`, as `CODEX_HOME=.codex` does
+    started in the project. Codex then reads that folder as `CODEX_HOME`
+    only, not as the project's, so it is searched here in the user-level
+    place too (`_Roots`).
+    """
+
+    home = Path.home()
+    raw_codex = os.environ.get("CODEX_HOME", "").strip()
+    codex, codex_name = (
+        (cwd / Path(raw_codex).expanduser(), "$CODEX_HOME")
+        if raw_codex
+        else (home / ".codex", "~/.codex")
+    )
+    config_home = _xdg_config_home()
+    config, config_name = (
+        (config_home, "$XDG_CONFIG_HOME") if config_home else (home / ".config", "~/.config")
+    )
+    return [
+        (home / ".agents" / "skills", "~/.agents/skills"),
+        (codex / "skills", f"{codex_name}/skills"),
+        (codex / "skills" / ".system", f"{codex_name}/skills/.system"),
+        (config / "opencode" / "skills", f"{config_name}/opencode/skills"),
+        (config / "opencode" / "skill", f"{config_name}/opencode/skill"),
+    ]
+
+
+def _repository_root(start: Path) -> Path | None:
+    """The top of the git work tree `start` is in, as git itself finds it
+    (`git -C <start> rev-parse --show-toplevel`); None when git finds none,
+    refuses the one it finds, or cannot be run.
+
+    git decides what a repository is: a `.git` directory, file (a linked
+    worktree, a submodule) or link that it accepts, owned by someone it
+    trusts. It refuses a repository of dubious ownership, such as a
+    `/tmp/.git` another user planted, unless the user lists it in
+    `safe.directory`, as containers and CI already do for their checkouts.
+    A git that does not answer, one that cannot be run and a repository it
+    refuses are said in the log: the project's folders are then searched as
+    outside a repository, which is a narrower search than the user expects
+    of a checkout, and nothing else would say why.
+
+    `GIT_DIR`, `GIT_WORK_TREE` and the other `GIT_REPOSITORY_VARIABLES` are
+    not passed on: a git hook, or a push git holds in quarantine, exports
+    its own repository's, and the question is which repository the
+    workflow's directory is in, not which one the environment names.
+
+    `cli._discover_project_root` answers another question: it also stops at
+    a `pyproject.toml`. The project folders bounded here (`_project`) are
+    wfpy's own and those of Codex and OpenCode, which stop at the git
+    repository.
+    """
+
+    env = {key: value for key, value in os.environ.items() if key not in GIT_REPOSITORY_VARIABLES}
+    try:
+        found = subprocess.run(
+            ["git", "-C", str(start), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            stdin=subprocess.DEVNULL,
+            env=env,
+            timeout=GIT_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        logger.warning(
+            "git did not say within %s s which repository %s is in: the project folders"
+            " are searched as outside a repository",
+            GIT_TIMEOUT_SECONDS,
+            start,
+        )
+        return None
+    except (OSError, subprocess.SubprocessError) as error:
+        logger.warning(
+            "git could not be run to say which repository %s is in (%s): the project"
+            " folders are searched as outside a repository, so a folder of the"
+            " repository's top is not searched; WF_SKILLS_ROOT names one that is",
+            start,
+            error,
+        )
+        return None
+    top = os.fsdecode(found.stdout).rstrip("\r\n")
+    if found.returncode != 0 or not top:
+        said = os.fsdecode(found.stderr)
+        if "dubious ownership" in said:
+            # A checkout owned by another user: a bind mount in a container,
+            # a CI checkout. git lists the remedy itself, and without this
+            # the run just stops finding the repository's own skills.
+            logger.warning(
+                "git refuses the repository %s is in: %s",
+                start,
+                " ".join(said.split()),
+            )
+        return None
+    try:
+        root = Path(top).resolve()
+    except (OSError, RuntimeError):
+        return None
+    return root if root == start or root in start.parents else None
+
+
+class Project(NamedTuple):
+    """The project a workflow is in: how far up its project folders are
+    searched (`_project`)."""
+
+    top: Path
+    """The project's top directory, resolved: no project folder above it is
+    searched."""
+
+    repository: Path | None
+    """The git repository that is the project, or None outside one."""
+
+
+def _project_top_outside_a_repository(workflow_dir: Path, cwd_root: Path) -> Path:
+    """The top of a project that is no git repository: the run's working
+    directory `cwd_root` when the workflow's directory is in it, else the
+    workflow's directory. Both are resolved."""
+
+    if cwd_root == workflow_dir or cwd_root in workflow_dir.parents:
+        return cwd_root
+    return workflow_dir
+
+
+def _project(workflow_dir: Path, cwd_root: Path) -> Project:
+    """The project the workflow in `workflow_dir` is in, for a run started
+    in `cwd_root`, both resolved.
+
+    A project is its git repository (`_repository_root`). With no
+    repository git accepts, it is the run's working directory, when the
+    workflow's directory is in it: the user started the run there, and its
+    own folders are searched anyway. Otherwise it is the workflow's
+    directory alone. Every project folder found by walking up, wfpy's own
+    (`.wf/skills`, `.claude/skills`, `.claude/agents`) and the other tools'
+    (`OTHER_TOOL_PROJECT_SKILL_DIRS`), is searched from where the walk
+    starts up to the project's top, included, and never above it
+    (`_levels_up_to`).
+    """
+
+    repository = _repository_root(workflow_dir)
+    if repository is not None:
+        return Project(repository, repository)
+    return Project(_project_top_outside_a_repository(workflow_dir, cwd_root), None)
+
+
+def _levels_up_to(start: Path, top: Path) -> list[Path]:
+    """`start` and the directories above it up to `top`, included; `start`
+    alone when `top` does not hold it.
+
+    The walk of a runtime root that `WF_SKILLS_ROOT` or
+    `WF_CLAUDE_AGENTS_ROOT` puts outside the project is that directory
+    alone: what is in it is what the variable names, and what is above it is
+    neither named nor the project's.
+    """
+
+    if start != top and top not in start.parents:
+        return [start]
+    levels = [start, *start.parents]
+    return levels[: levels.index(top) + 1]
+
+
+def _workflow_dir(plan: Any, cwd: Path | None = None) -> Path:
+    """The workflow's directory: its source file's, else the plan's work
+    directory, else the working directory. A relative path is read from
+    `cwd`, the run's working directory (this process's when omitted)."""
+
+    if plan.source_path:
+        try:
+            return _from_cwd(Path(plan.source_path), cwd).resolve().parent
+        except Exception:
+            pass
+    if plan.work_dir:
+        try:
+            return _from_cwd(Path(plan.work_dir), cwd).resolve()
+        except Exception:
+            pass
+    return (cwd or Path.cwd()).resolve()
+
+
+def _runtime_root_for_skills(plan: Any, cwd: Path | None = None) -> Path:
     """Resolve the runtime root used for `.wf/skills` discovery."""
 
-    explicit = _explicit_skills_roots()
+    explicit = _explicit_skills_roots(cwd)
     if explicit:
         # The runtime root is a single directory — it is the base of the
         # ancestor walk in `_skill_search_roots()` and the working directory
@@ -59,30 +364,99 @@ def _runtime_root_for_skills(plan: Any) -> Path:
         # single missing directory always was.
         present = next((root for root in explicit if root.is_dir()), explicit[0])
         return present.resolve()
-    if plan.source_path:
-        try:
-            return Path(plan.source_path).resolve().parent
-        except Exception:
-            pass
-    if plan.work_dir:
-        try:
-            return Path(plan.work_dir).resolve()
-        except Exception:
-            pass
-    return Path.cwd().resolve()
+    return _workflow_dir(plan, cwd)
 
 
-def _runtime_root_for_claude_agents(plan: Any) -> Path:
+def _runtime_root_for_claude_agents(plan: Any, cwd: Path | None = None) -> Path:
     """Resolve runtime root used for `.claude/agents` discovery."""
 
     explicit = os.environ.get("WF_CLAUDE_AGENTS_ROOT", "").strip()
     if explicit:
-        return Path(explicit).expanduser().resolve()
-    return _runtime_root_for_skills(plan)
+        return _from_cwd(Path(explicit).expanduser(), cwd).resolve()
+    return _runtime_root_for_skills(plan, cwd)
 
 
-def _skill_search_roots(plan: Any) -> list[Path]:
-    """Return ordered directories that can contain skill folders.
+LOOKUP_VARIABLES = ("WF_SKILLS_ROOT", "WF_CLAUDE_AGENTS_ROOT", "CODEX_HOME", "XDG_CONFIG_HOME")
+"""The environment variables the lookup roots depend on."""
+
+_ROOTS_ON_PLAN = "_wfpy_lookup_roots"
+
+_ROOTS_LOCK = threading.Lock()
+
+
+_T = TypeVar("_T")
+
+
+class _Once(Generic[_T]):
+    """A value worked out by the first caller; the others wait for it."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._value: tuple[_T] | None = None
+
+    def get(self, compute: Callable[[], _T]) -> _T:
+        with self._lock:
+            if self._value is None:
+                self._value = (compute(),)
+            return self._value[0]
+
+
+def _once_per_plan(plan: Any, kind: str, cwd_root: Path, compute: Callable[[], _T]) -> _T:
+    """`compute()`, worked out once per plan and kept on it.
+
+    A firing reads a skill, its hooks and an agent preset, each through the
+    lookup roots, and building them asks git and walks the tree. They are
+    built once per plan instead, and the project they are bounded by
+    (`_plan_project`) once for both. Parallel workers share the plan: the
+    first to ask builds them, and the others wait for that answer rather
+    than run git too. A value kept is not changed: the roots are kept as a
+    tuple.
+
+    What is kept is the list of folders, in order, and so the repository git
+    found when it was built. It is built again when something it is built
+    from differs: the working directory, the home directory, the variables
+    in `LOOKUP_VARIABLES`, the workflow's file or work directory. It is not
+    built again when the filesystem changes while the plan runs: a
+    repository made, removed or moved, or a folder turned into a link, is
+    seen by the next plan. What the folders hold is not kept: every folder
+    is listed whether it exists or not, and a name is looked for in them at
+    each firing, so a skill folder made while a run goes on is found.
+    `wfpy skills` keeps nothing: each call builds the list again.
+    """
+
+    key = (
+        kind,
+        cwd_root,
+        Path.home(),
+        plan.source_path,
+        plan.work_dir,
+        *(os.environ.get(name) for name in LOOKUP_VARIABLES),
+    )
+    with _ROOTS_LOCK:
+        kept: dict[tuple[Any, ...], _Once[Any]] | None = getattr(plan, _ROOTS_ON_PLAN, None)
+        if not isinstance(kept, dict):
+            kept = {}
+            try:
+                setattr(plan, _ROOTS_ON_PLAN, kept)
+            except (AttributeError, TypeError):
+                kept = None
+        once = kept.setdefault(key, _Once()) if kept is not None else None
+    if once is None:
+        return compute()
+    return cast("_Once[_T]", once).get(compute)
+
+
+def _plan_project(plan: Any, cwd_root: Path) -> Project:
+    """The project of the plan's workflow (`_project`), for a run started in
+    `cwd_root`; worked out once per plan, for skills and presets alike."""
+
+    return _once_per_plan(
+        plan, "project", cwd_root, lambda: _project(_workflow_dir(plan, cwd_root), cwd_root)
+    )
+
+
+def _skill_lookup_roots(plan: Any, cwd: Path | None = None) -> list[LookupRoot]:
+    """The directories a skill name is looked up in, in order.
 
     Supported roots:
     - `<runtime-root>/.wf/skills`
@@ -91,99 +465,199 @@ def _skill_search_roots(plan: Any) -> list[Path]:
     - `<cwd>/.claude/skills`
     - `~/.claude/skills`
 
+    then the skill folders of other agent tools, after every root above:
+    - `<workflow-dir>/<folder>` for each of `OTHER_TOOL_PROJECT_SKILL_DIRS`
+    - `<cwd>/<folder>` for each of them, when `<cwd>` is in the same project
+    - the user-level ones of `_other_tool_user_skill_dirs()`
+
+    The `<runtime-root>` and `<workflow-dir>` entries walk up the tree, and
+    only as far as the project's top, included (`_project`): the top of the
+    git repository (`_repository_root`), as Codex and OpenCode stop there;
+    with no repository git accepts, `<cwd>` when the workflow's directory is
+    in it, else the workflow's directory alone. So a folder above the
+    project, say `/tmp/.claude/skills` or `/tmp/.agents/skills` for a
+    workflow in `/tmp/job`, is not read. The walk of wfpy's own folders
+    starts at the runtime root, that of the other tools at the workflow's
+    own directory, `WF_SKILLS_ROOT` or not. A runtime root `WF_SKILLS_ROOT`
+    puts outside the project is searched at its own level alone
+    (`_levels_up_to`). `<cwd>`'s own folders are read wherever it is, as
+    they always were; its folders of other tools only when `<cwd>` is in
+    the workflow's repository.
+
+    A user-level folder reached by the walk or at `<cwd>`, as in a home
+    directory kept in git, is searched once, in the user-level place; the
+    home directory's other project folders (`~/.opencode/skills`) are a
+    project's, as they are for OpenCode.
+
+    Searching the other tools' folders last means a name found in one of
+    wfpy's own folders resolves exactly as it did before they were searched;
+    they only add names.
+
     If `WF_SKILLS_ROOT` is set, each directory it names is treated as a
     highest-priority directory that directly contains skill folders. It may
     name several, separated by `os.pathsep`, searched in the order written.
+
+    `cwd` is the working directory of the run; this process's when omitted.
+    The roots are worked out once per plan (`_once_per_plan`).
     """
 
-    roots: list[Path] = []
-    seen: set[str] = set()
+    cwd_root = (cwd or Path.cwd()).resolve()
+    roots = _once_per_plan(
+        plan,
+        "skills",
+        cwd_root,
+        lambda: tuple(_build_skill_lookup_roots(plan, cwd_root, _plan_project(plan, cwd_root))),
+    )
+    return list(roots)
 
-    def add_root(path: Path) -> None:
-        key = str(path.resolve())
-        if key in seen:
-            return
-        seen.add(key)
-        roots.append(path.resolve())
 
-    for explicit in _explicit_skills_roots():
-        add_root(explicit)
-
-    runtime_root = _runtime_root_for_skills(plan)
-    current = runtime_root
-    while True:
-        add_root(current / ".wf" / "skills")
-        add_root(current / ".claude" / "skills")
-        if current.parent == current:
-            break
-        current = current.parent
-
-    cwd_root = Path.cwd().resolve()
-    add_root(cwd_root / ".wf" / "skills")
-    add_root(cwd_root / ".claude" / "skills")
+def _build_skill_lookup_roots(plan: Any, cwd_root: Path, project: Project) -> list[LookupRoot]:
+    """`_skill_lookup_roots`, worked out, bounded by `project`."""
 
     home_root = Path.home().resolve()
-    add_root(home_root / ".claude" / "skills")
+    user_tool_dirs = [
+        (path.resolve(), name) for path, name in _other_tool_user_skill_dirs(cwd_root)
+    ]
+    user_names = {path: name for path, name in user_tool_dirs}
+    user_names[(home_root / ".claude" / "skills").resolve()] = "~/.claude/skills"
+    roots = _Roots(user_names)
 
-    return roots
+    for explicit in _explicit_skills_roots(cwd_root):
+        roots.add(explicit.resolve(), "WF_SKILLS_ROOT", "explicit")
+
+    runtime_root = _runtime_root_for_skills(plan, cwd_root)
+    for level in _levels_up_to(runtime_root, project.top):
+        roots.add((level / ".wf" / "skills").resolve(), ".wf/skills", "project")
+        roots.add((level / ".claude" / "skills").resolve(), ".claude/skills", "project")
+
+    roots.add((cwd_root / ".wf" / "skills").resolve(), ".wf/skills", "cwd")
+    roots.add((cwd_root / ".claude" / "skills").resolve(), ".claude/skills", "cwd")
+    roots.add((home_root / ".claude" / "skills").resolve(), "~/.claude/skills", "user")
+
+    # Other agent tools' folders come after every root above, so that a
+    # skill already found keeps resolving to the same directory.
+    roots.others_from_here()
+    places = [
+        (level, "project") for level in _levels_up_to(_workflow_dir(plan, cwd_root), project.top)
+    ]
+    repository = project.repository
+    if repository is not None and (cwd_root == repository or repository in cwd_root.parents):
+        places.append((cwd_root, "cwd"))
+    for level, scope in places:
+        for parts in OTHER_TOOL_PROJECT_SKILL_DIRS:
+            roots.add(level.joinpath(*parts).resolve(), "/".join(parts), scope)
+    for path, name in user_tool_dirs:
+        roots.add(path, name, "user")
+
+    return roots.roots
 
 
-def _claude_agent_search_roots(plan: Any) -> list[Path]:
-    """Return ordered directories that can contain Claude agent markdown files."""
+def _skill_search_roots(plan: Any, cwd: Path | None = None) -> list[Path]:
+    """Return ordered directories that can contain skill folders.
 
-    roots: list[Path] = []
-    seen: set[str] = set()
+    See `_skill_lookup_roots` for which, in which order.
+    """
 
-    def add_root(path: Path) -> None:
-        key = str(path.resolve())
-        if key in seen:
-            return
-        seen.add(key)
-        roots.append(path.resolve())
+    return [root.path for root in _skill_lookup_roots(plan, cwd)]
+
+
+def _claude_agent_lookup_roots(plan: Any, cwd: Path | None = None) -> list[LookupRoot]:
+    """The directories an agent preset is looked up in, in order: the one
+    `WF_CLAUDE_AGENTS_ROOT` names, `.claude/agents` from its runtime root up
+    to the project's top, included, as for a skill (`_skill_lookup_roots`),
+    then the working directory's and the user's. Worked out once per plan
+    (`_once_per_plan`)."""
+
+    cwd_root = (cwd or Path.cwd()).resolve()
+    roots = _once_per_plan(
+        plan,
+        "presets",
+        cwd_root,
+        lambda: tuple(
+            _build_claude_agent_lookup_roots(plan, cwd_root, _plan_project(plan, cwd_root))
+        ),
+    )
+    return list(roots)
+
+
+def _build_claude_agent_lookup_roots(
+    plan: Any, cwd_root: Path, project: Project
+) -> list[LookupRoot]:
+    """`_claude_agent_lookup_roots`, worked out, bounded by `project`."""
+
+    home_agents = (Path.home().resolve() / ".claude" / "agents").resolve()
+    roots = _Roots({home_agents: "~/.claude/agents"})
 
     explicit = os.environ.get("WF_CLAUDE_AGENTS_ROOT", "").strip()
     if explicit:
-        add_root(Path(explicit).expanduser())
+        roots.add(
+            _from_cwd(Path(explicit).expanduser(), cwd_root).resolve(),
+            "WF_CLAUDE_AGENTS_ROOT",
+            "explicit",
+        )
 
-    runtime_root = _runtime_root_for_claude_agents(plan)
-    current = runtime_root
-    while True:
-        add_root(current / ".claude" / "agents")
-        if current.parent == current:
-            break
-        current = current.parent
+    runtime_root = _runtime_root_for_claude_agents(plan, cwd_root)
+    for level in _levels_up_to(runtime_root, project.top):
+        roots.add((level / ".claude" / "agents").resolve(), ".claude/agents", "project")
 
-    cwd_root = Path.cwd().resolve()
-    add_root(cwd_root / ".claude" / "agents")
-
-    home_root = Path.home().resolve()
-    add_root(home_root / ".claude" / "agents")
-
-    return roots
+    roots.add((cwd_root / ".claude" / "agents").resolve(), ".claude/agents", "cwd")
+    roots.add(home_agents, "~/.claude/agents", "user")
+    return roots.roots
 
 
-def _validate_skill_name(skill_name: str) -> None:
-    """Validate user-provided skill names used for filesystem lookup."""
+def _claude_agent_search_roots(plan: Any, cwd: Path | None = None) -> list[Path]:
+    """Return ordered directories that can contain Claude agent markdown files."""
+
+    return [root.path for root in _claude_agent_lookup_roots(plan, cwd)]
+
+
+def _validate_skill_name(skill_name: str, what: str = "Skill name") -> None:
+    """Validate user-provided skill names used for filesystem lookup.
+
+    The same rule holds for an agent preset's name and a hook's, which name
+    a file or folder the same way; `what` names the kind in the error. A
+    name that starts with `.` names a hidden entry, which is no skill: the
+    `.git` of a skills folder kept in git, or Codex's `.system`, a root of
+    its own; `.` and `..` name a folder of the walk itself. Codex and
+    Claude Code skip hidden entries, `wfpy skills` does not list them, and
+    so a run does not take one either.
+
+    A name is taken without the whitespace around it everywhere a run reads
+    one (`spec.skill`, `claude_agent`, a preset's `skills`, a hook in
+    `SKILL.md`), so what reaches this with whitespace around it is a name
+    read from a folder, which no run can resolve: refusing it is what keeps
+    `wfpy skills` to the names a run takes.
+    """
 
     if not skill_name or not skill_name.strip():
-        raise ValueError("Skill name is empty.")
+        raise ValueError(f"{what} is empty.")
+    if skill_name != skill_name.strip():
+        raise ValueError(
+            f"{what} must not begin or end with whitespace: {skill_name!r} is read"
+            " without it, so it names no file a run finds."
+        )
     if "/" in skill_name or "\\" in skill_name:
-        raise ValueError("Skill name must not include path separators.")
+        raise ValueError(f"{what} must not include path separators.")
     if ".." in skill_name:
-        raise ValueError("Skill name must not include '..'.")
+        raise ValueError(f"{what} must not include '..'.")
+    if skill_name.startswith("."):
+        raise ValueError(
+            f"{what} must not start with '.': '{skill_name}' names a hidden entry, or a"
+            " folder of the search itself, which is no skill, preset or hook."
+        )
 
 
 def _validate_claude_agent_name(agent_name: str) -> None:
     """Validate Claude agent names used for filesystem lookup."""
 
-    _validate_skill_name(agent_name)
+    _validate_skill_name(agent_name, "Agent preset name")
 
 
-def _resolve_skill_dir(skill_name: str, plan: Any) -> Path | None:
-    """Resolve the skill directory for a skill name from supported roots."""
+def _find_skill(skill_name: str, roots: Iterable[Path]) -> tuple[Path, Path] | None:
+    """The first of `roots` with a `<skill_name>/SKILL.md`, and the skill's
+    directory there, resolved. `skill_name` is validated already."""
 
-    _validate_skill_name(skill_name)
-    for root in _skill_search_roots(plan):
+    for root in roots:
         candidate = root / skill_name
         # Containment is tested on the joined path, before resolving it: a
         # skill directory is very often a symlink — that is how tools install
@@ -192,8 +666,8 @@ def _resolve_skill_dir(skill_name: str, plan: Any) -> Path | None:
         # every symlinked install.
         #
         # Nothing is lost by testing it unresolved. `_validate_skill_name()`
-        # already rejects path separators and `..`, so `root / skill_name` is
-        # a direct child of `root` (or, for the name `.`, `root` itself). What
+        # already rejects path separators, `..` and a leading `.` (so `.`
+        # too), so `root / skill_name` is a direct child of `root`. What
         # remains is a Windows drive-relative name like `d:bar`, which passes
         # that validation and does join outside `root` — this check is what
         # catches it. Do not reinstate the `.resolve()` before it.
@@ -203,38 +677,84 @@ def _resolve_skill_dir(skill_name: str, plan: Any) -> Path | None:
             continue
         skill_dir = candidate.resolve()
         if (skill_dir / "SKILL.md").exists():
-            return skill_dir
+            return root, skill_dir
     return None
+
+
+def _lookup_skill(skill_name: str, plan: Any) -> tuple[list[Path], tuple[Path, Path] | None]:
+    """The roots a skill name is looked up in, and what `_find_skill` finds
+    there."""
+
+    _validate_skill_name(skill_name)
+    roots = _skill_search_roots(plan)
+    return roots, _find_skill(skill_name, roots)
+
+
+def _resolve_skill_dir(skill_name: str, plan: Any) -> Path | None:
+    """Resolve the skill directory for a skill name from supported roots."""
+
+    found = _lookup_skill(skill_name, plan)[1]
+    return found[1] if found is not None else None
+
+
+def _skill_folder(skill_name: str, plan: Any) -> Path:
+    """The folder a skill name resolves to, or `FileNotFoundError` naming
+    the roots searched."""
+
+    roots, found = _lookup_skill(skill_name, plan)
+    if found is None:
+        raise FileNotFoundError(
+            f"Skill '{skill_name}' was not found. Searched roots: "
+            + ", ".join(str(root) for root in roots)
+        )
+    return found[1]
 
 
 def _resolve_skill_md_path(skill_name: str, plan: Any) -> Path:
     """Resolve `SKILL.md` for a skill name from supported roots."""
 
-    skill_dir = _resolve_skill_dir(skill_name, plan)
-    if skill_dir is None:
-        raise FileNotFoundError(
-            f"Skill '{skill_name}' was not found. Searched roots: "
-            + ", ".join(str(root) for root in _skill_search_roots(plan))
-        )
-    return (skill_dir / "SKILL.md").resolve()
+    return (_skill_folder(skill_name, plan) / "SKILL.md").resolve()
+
+
+def _read_capped_text(path: Path, what: str, limit: int) -> str:
+    """Read `path`, checked with one `stat`: a file within `limit` bytes, in
+    UTF-8. `what` names it in an error: `Skill 'review'`, `Agent preset 'x'`."""
+
+    try:
+        status = path.stat()
+    except FileNotFoundError:
+        raise FileNotFoundError(f"{what}: {path} does not exist.") from None
+    if not stat.S_ISREG(status.st_mode):
+        # The lookup took the first folder holding it, so it exists and is no
+        # file: a directory, for instance.
+        raise FileNotFoundError(f"{what}: {path} is not a file.")
+    if status.st_size > limit:
+        raise ValueError(f"{what} is too large ({status.st_size} bytes). Limit is {limit} bytes.")
+    return path.read_text(encoding="utf-8")
+
+
+def _read_skill_md_file(skill_name: str, skill_md: Path) -> str:
+    """Read a skill's `SKILL.md`: a file within `SKILL_MD_MAX_BYTES`, in UTF-8."""
+
+    return _read_capped_text(skill_md, f"Skill '{skill_name}'", SKILL_MD_MAX_BYTES)
 
 
 def _read_skill_md(skill_name: str, plan: Any) -> tuple[str, Path]:
     """Read and return SKILL.md body text for a skill name."""
 
-    skill_md = _resolve_skill_md_path(skill_name, plan)
-    if not skill_md.exists() or not skill_md.is_file():
-        raise FileNotFoundError(
-            f"Skill '{skill_name}' not found at {skill_md}. "
-            "Expected in one of: <runtime>/.wf/skills, <runtime>/.claude/skills, <cwd>/.wf/skills, <cwd>/.claude/skills, ~/.claude/skills"
-        )
-    size = skill_md.stat().st_size
-    if size > SKILL_MD_MAX_BYTES:
-        raise ValueError(
-            f"Skill '{skill_name}' is too large ({size} bytes). "
-            f"Limit is {SKILL_MD_MAX_BYTES} bytes."
-        )
-    return skill_md.read_text(encoding="utf-8"), skill_md
+    text, skill_md, _folder = _read_skill(skill_name, plan)
+    return text, skill_md
+
+
+def _read_skill(skill_name: str, plan: Any) -> tuple[str, Path, Path]:
+    """A skill's `SKILL.md` text, the file, resolved, and the skill's folder,
+    from one lookup. The folder is the one its hooks run from, which the
+    file's own path does not give: `SKILL.md` may be a link that resolves
+    elsewhere."""
+
+    folder = _skill_folder(skill_name, plan)
+    skill_md = (folder / "SKILL.md").resolve()
+    return _read_skill_md_file(skill_name, skill_md), skill_md, folder
 
 
 def _parse_skill_frontmatter(skill_text: str) -> tuple[dict[str, Any], str]:
@@ -341,11 +861,17 @@ def _rewrite_skill_body_paths(skill_body: str, skill_dir: Path) -> str:
     return re.sub(r"\[([^\]]+)\]\(([^)\s]+)\)", _replace_markdown_link, skill_body)
 
 
+FRONTMATTER_TEXT_KEYS: tuple[str, ...] = ("name", "description")
+"""Front-matter keys of an agent preset whose value is text, commas and all."""
+
+
 def _parse_frontmatter_markdown(text: str) -> tuple[dict[str, Any], str]:
     """Parse generic markdown frontmatter and return `(meta, body)`.
 
     This parser is intentionally minimal and supports flat keys, comma lists,
-    and one-level nested maps for compatibility with Claude agent docs.
+    and one-level nested maps for compatibility with Claude agent docs. A
+    value with a comma is a list (`tools: Read, Grep`), except for the keys
+    in `FRONTMATTER_TEXT_KEYS`, whose value is text.
     """
 
     if not text.startswith("---\n"):
@@ -401,7 +927,7 @@ def _parse_frontmatter_markdown(text: str) -> tuple[dict[str, Any], str]:
             continue
 
         normalized = value.strip().strip('"').strip("'")
-        if "," in normalized:
+        if "," in normalized and key not in FRONTMATTER_TEXT_KEYS:
             items = [part.strip() for part in normalized.split(",") if part.strip()]
             meta[key] = items
         else:
@@ -410,23 +936,26 @@ def _parse_frontmatter_markdown(text: str) -> tuple[dict[str, Any], str]:
     return meta, body
 
 
+CLAUDE_AGENT_IGNORED_FIELDS: tuple[str, ...] = (
+    "tools",
+    "disallowedTools",
+    "permissionMode",
+    "maxTurns",
+    "mcpServers",
+    "hooks",
+    "memory",
+    "background",
+    "effort",
+    "isolation",
+)
+"""Claude agent front-matter fields wfpy's compatibility mode ignores (and `model`)."""
+
+
 def _claude_agent_frontmatter_warnings(meta: dict[str, Any]) -> list[str]:
     """Return compatibility warnings for unsupported Claude agent fields."""
 
     warnings: list[str] = []
-    ignored_fields = [
-        "tools",
-        "disallowedTools",
-        "permissionMode",
-        "maxTurns",
-        "mcpServers",
-        "hooks",
-        "memory",
-        "background",
-        "effort",
-        "isolation",
-    ]
-    for field in ignored_fields:
+    for field in CLAUDE_AGENT_IGNORED_FIELDS:
         if field in meta:
             warnings.append(
                 f"claude-agent field '{field}' is currently ignored in wfpy compatibility mode"
@@ -438,24 +967,38 @@ def _claude_agent_frontmatter_warnings(meta: dict[str, Any]) -> list[str]:
     return warnings
 
 
-def _resolve_claude_agent_path(agent_name: str, plan: Any) -> Path:
-    """Resolve Claude agent markdown by name from supported roots."""
+def _find_claude_agent(agent_name: str, roots: Iterable[Path]) -> tuple[Path, Path] | None:
+    """The first of `roots` with `<agent_name>.md` or `<agent_name>/AGENT.md`,
+    and that file, resolved. `agent_name` is validated already.
 
-    _validate_claude_agent_name(agent_name)
-    for root in _claude_agent_search_roots(plan):
-        direct = (root / f"{agent_name}.md").resolve()
-        nested = (root / agent_name / "AGENT.md").resolve()
-        for candidate in (direct, nested):
+    As in `_find_skill`, containment is tested on the joined path, before
+    resolving it: a preset installed as a link, to a file or to a folder
+    holding `AGENT.md`, resolves outside its root and is still found.
+    """
+
+    for root in roots:
+        for candidate in (root / f"{agent_name}.md", root / agent_name / "AGENT.md"):
             try:
                 candidate.relative_to(root)
             except ValueError:
                 continue
-            if candidate.exists() and candidate.is_file():
-                return candidate
-    raise FileNotFoundError(
-        f"Claude agent '{agent_name}' was not found. Searched roots: "
-        + ", ".join(str(root) for root in _claude_agent_search_roots(plan))
-    )
+            if candidate.is_file():
+                return root, candidate.resolve()
+    return None
+
+
+def _resolve_claude_agent_path(agent_name: str, plan: Any) -> Path:
+    """Resolve Claude agent markdown by name from supported roots."""
+
+    _validate_claude_agent_name(agent_name)
+    roots = _claude_agent_search_roots(plan)
+    found = _find_claude_agent(agent_name, roots)
+    if found is None:
+        raise FileNotFoundError(
+            f"Claude agent '{agent_name}' was not found. Searched roots: "
+            + ", ".join(str(root) for root in roots)
+        )
+    return found[1]
 
 
 def _normalize_frontmatter_string_list(value: Any) -> list[str]:
@@ -471,10 +1014,18 @@ def _normalize_frontmatter_string_list(value: Any) -> list[str]:
 
 
 def _load_claude_agent_profile(agent_name: str, plan: Any) -> dict[str, Any]:
-    """Load Claude agent markdown profile and compatibility metadata."""
+    """Load Claude agent markdown profile and compatibility metadata. The
+    file is read whole, whatever its size."""
 
     profile_path = _resolve_claude_agent_path(agent_name, plan)
-    raw = profile_path.read_text(encoding="utf-8")
+    return _claude_agent_profile_from(
+        agent_name, profile_path, profile_path.read_text(encoding="utf-8")
+    )
+
+
+def _claude_agent_profile_from(agent_name: str, profile_path: Path, raw: str) -> dict[str, Any]:
+    """The Claude agent markdown profile `raw`, read from `profile_path`."""
+
     meta, body = _parse_frontmatter_markdown(raw)
     skills = _normalize_frontmatter_string_list(meta.get("skills"))
     warnings = _claude_agent_frontmatter_warnings(meta)
@@ -547,31 +1098,205 @@ def _load_skill_hook_policy(path_str: str) -> dict[str, Any]:
         raise RuntimeError(f"Cannot load skill hook policy '{path_str}': {exc}") from exc
 
 
+SKILL_HOOK_POLICY_REQUIRED_KEYS = ("skill", "hook")
+"""The keys an object entry of a skill-hook policy's `allow` must hold."""
+
+SKILL_HOOK_POLICY_OPTIONAL_KEYS = ("interpreter", "dir")
+"""The keys an object entry of a skill-hook policy's `allow` may hold."""
+
+SKILL_HOOK_INTERPRETERS = ("python", "sh")
+"""The interpreters a hook's script runs with: `scripts/<hook>.py` with
+`python3`, `scripts/<hook>.sh` with `bash`."""
+
+
+class HookApproval(NamedTuple):
+    """An object entry of a skill-hook policy's `allow`, read."""
+
+    skill: str
+    hook: str
+    interpreter: str | None
+    """The interpreter it approves (`python`, `sh`); None for either."""
+
+    dir: Path | None
+    """The skill folder it approves, resolved; None for an entry that
+    approves the hook by name, in whichever folder the name resolves to."""
+
+    def approves(self, skill: str, hook: str, interpreter: str) -> bool:
+        """Whether it approves the hook `hook` of a skill named `skill`, run
+        with `interpreter`, in some folder."""
+        return self.skill == skill and self.hook == hook and self.interpreter in (None, interpreter)
+
+
+class SkillHookPolicy(NamedTuple):
+    """A skill-hook policy file, read (`_read_skill_hook_policy`)."""
+
+    names: frozenset[str]
+    """Its text entries, `"<skill>:<hook>"` or `"<skill>:<hook>:<interpreter>"`:
+    each approves a hook by name, in whichever folder the name resolves to."""
+
+    approvals: tuple[HookApproval, ...]
+    """Its object entries that it reads."""
+
+    unread: tuple[str, ...]
+    """What it cannot read, and why: it approves nothing."""
+
+    require_dir: bool
+    """`requireDir`: an entry that names no folder approves nothing."""
+
+
+def _object_entry(entry: dict[Any, Any], base: Path) -> HookApproval | str:
+    """An object entry of `allow`, read; or why it cannot be. `base` is the
+    folder a relative `dir` is read from. Text is taken without the spaces
+    around it, as a run takes a skill's and a hook's name."""
+
+    keys = (*SKILL_HOOK_POLICY_REQUIRED_KEYS, *SKILL_HOOK_POLICY_OPTIONAL_KEYS)
+    unknown = sorted(str(key) for key in entry if key not in keys)
+    if unknown:
+        return f"it holds {', '.join(unknown)}, which is not read"
+    missing = [key for key in SKILL_HOOK_POLICY_REQUIRED_KEYS if key not in entry]
+    if missing:
+        return f"it has no {' and no '.join(missing)}"
+    text: dict[str, str] = {}
+    for key in keys:
+        if key in entry:
+            value = entry[key]
+            if not isinstance(value, str) or not value.strip():
+                return f"its {key} is not text"
+            text[key] = value.strip()
+    interpreter = text.get("interpreter")
+    if interpreter is not None and interpreter not in SKILL_HOOK_INTERPRETERS:
+        return f"its interpreter is not {' or '.join(SKILL_HOOK_INTERPRETERS)}"
+    folder: Path | None = None
+    if "dir" in text:
+        try:
+            folder = (base / Path(text["dir"]).expanduser()).resolve()
+        except (OSError, RuntimeError) as exc:
+            return f"its dir cannot be resolved: {exc}"
+        if folder.exists() and not folder.is_dir():
+            return f"its dir is no folder: {folder}"
+    return HookApproval(text["skill"], text["hook"], interpreter, folder)
+
+
+def _read_skill_hook_policy(policy: Any, policy_path: str) -> SkillHookPolicy:
+    """The skill-hook policy `policy`, loaded from `policy_path`.
+
+    `allow` holds text entries, `"<skill>:<hook>"` or
+    `"<skill>:<hook>:<interpreter>"`, matched whole as they always were, and
+    object entries with `skill`, `hook`, and optionally `interpreter`
+    (`python` or `sh`) and `dir`. `dir` names the skill folder the entry
+    approves: read from the folder of the policy file (links resolved, so
+    a policy linked from a dotfiles checkout reads it from there), `~`
+    expanded, and resolved, so a link and the folder it points at are one.
+
+    What it cannot read approves nothing, and a refusal says what it is: an
+    object entry with a key it does not take, a key missing or a value that
+    is not text (`null` included), since read as an entry without `dir` a
+    misspelt `dir` would approve the hook in every folder; an entry that is
+    neither text nor an object (a number, `null`), which approves nothing
+    as it did before objects were read; an `allow` that is no list, a
+    policy that is no object, approving nothing; a `requireDir` that is not
+    true or false, taken as true. An `allow` that is an object has its keys
+    read as text entries, as they were, and what they hold is not read: a
+    `dir` written there is said to be unread rather than quietly dropped,
+    which would approve the hook in every folder. A policy that does not
+    load stops the firing, as before.
+
+    What it cannot read is in the log as well as in a refusal: an entry
+    read as approving less stops a hook, which says so, but one read as
+    approving more (a `dir` an object `allow` holds) runs it, and then only
+    the log would say the folder was not read.
+    """
+
+    unread: list[str] = []
+    if not isinstance(policy, dict):
+        unread.append("the policy is not a JSON object")
+        policy = {}
+    require_dir = policy.get("requireDir", False)
+    if not isinstance(require_dir, bool):
+        unread.append(f"requireDir {json.dumps(require_dir)} is not true or false: taken as true")
+        require_dir = True
+    allow = policy.get("allow", [])
+    if isinstance(allow, dict):
+        unread.append("allow is an object: its keys are read as entries, what they hold is not")
+        allow = list(allow)
+    if not isinstance(allow, list):
+        unread.append(f"allow {json.dumps(allow)} is not a list")
+        allow = []
+    base = Path(policy_path).resolve().parent
+    names: set[str] = set()
+    approvals: list[HookApproval] = []
+    for entry in allow:
+        if isinstance(entry, str):
+            names.add(entry.strip())
+        elif isinstance(entry, dict):
+            read = _object_entry(entry, base)
+            if isinstance(read, HookApproval):
+                approvals.append(read)
+            else:
+                unread.append(f"{json.dumps(entry)} ({read})")
+        else:
+            unread.append(f"{json.dumps(entry)} (it is neither text nor an object)")
+    if unread:
+        logger.warning(
+            "skill hook policy '%s': what it cannot read: %s", policy_path, "; ".join(unread)
+        )
+    return SkillHookPolicy(frozenset(names), tuple(approvals), tuple(unread), require_dir)
+
+
 def _authorize_skill_hook(
     options: dict[str, Any],
     skill_name: str,
     hook_name: str,
     interpreter: str,
+    skill_dir: Path,
 ) -> tuple[bool, str]:
-    """Authorize running a skill hook script under configured policy."""
+    """Authorize running a hook script of the skill folder `skill_dir`, the
+    folder the run resolved `skill_name` to, under the configured mode.
 
+    Under `policy`, an entry that names a folder (`_read_skill_hook_policy`)
+    approves the hook of that folder and no other. Which folder a name
+    resolves to depends on the working directory, the variables and what a
+    cloned repository holds, so an entry that names none approves the hook
+    of whichever folder the run finds; `requireDir` makes such entries count
+    for nothing. The reason names the folder, as the run's record does
+    (`_run_skill_hook`), and a refusal says what else the policy holds for
+    the hook.
+    """
+
+    where = skill_dir.resolve()
     mode = _normalize_skill_hook_auth_mode(options)
     if mode == "deny-all":
-        return False, "mode=deny-all"
+        return False, f"mode=deny-all, for {where}"
     if mode == "allow-all":
-        return True, "mode=allow-all"
+        return True, f"mode=allow-all, for {where}"
     policy_path = options.get("skill_hook_policy") or os.environ.get("WF_SKILL_HOOK_POLICY")
     if not policy_path:
-        return False, "mode=policy but no policy path provided"
-    policy = _load_skill_hook_policy(policy_path)
-    allow = set(str(v) for v in policy.get("allow", []))
-    keys = {
-        f"{skill_name}:{hook_name}",
-        f"{skill_name}:{hook_name}:{interpreter}",
-    }
-    if any(k in allow for k in keys):
-        return True, f"allowed by policy '{policy_path}'"
-    return False, f"hook '{skill_name}:{hook_name}' not listed in policy '{policy_path}'"
+        return False, f"mode=policy but no policy path provided, for {where}"
+    policy = _read_skill_hook_policy(_load_skill_hook_policy(policy_path), policy_path)
+    named = [a for a in policy.approvals if a.approves(skill_name, hook_name, interpreter)]
+    by_name = bool(
+        policy.names & {f"{skill_name}:{hook_name}", f"{skill_name}:{hook_name}:{interpreter}"}
+    ) or any(approval.dir is None for approval in named)
+    if any(approval.dir == where for approval in named):
+        return True, f"allowed by policy '{policy_path}' by folder, for {where}"
+    if by_name and not policy.require_dir:
+        return True, f"allowed by policy '{policy_path}' by name, for {where}"
+    held: list[str] = []
+    if by_name:
+        held.append("by name only, which requireDir makes count for nothing")
+    others = sorted({str(approval.dir) for approval in named if approval.dir is not None})
+    if others:
+        # Naming them is how a `dir` that is misspelt, or no longer the
+        # folder the run resolves, is seen for what it is.
+        held.append(f"for other folders only ({', '.join(others)})")
+    said = (
+        f"is approved in policy '{policy_path}' {', and '.join(held)}"
+        if held
+        else f"not listed in policy '{policy_path}'"
+    )
+    if policy.unread:
+        said += "; what it cannot read of the policy: " + "; ".join(policy.unread)
+    return False, f"hook '{skill_name}:{hook_name}' of {where} {said}"
 
 
 def _resolve_skill_hook_script(
@@ -580,17 +1305,33 @@ def _resolve_skill_hook_script(
     """Resolve a skill hook script by convention under `<skill>/scripts`."""
 
     _validate_skill_name(skill_name)
-    _validate_skill_name(hook_name)
+    _validate_skill_name(hook_name, "Hook name")
     skill_dir = _resolve_skill_dir(skill_name, plan)
     if skill_dir is None:
         return None
+    return _skill_hook_script_in(skill_dir, hook_name)
+
+
+def _skill_hook_script_in(skill_dir: Path, hook_name: str) -> tuple[Path, str] | None:
+    """A hook's script in a skill's directory: `scripts/<hook>.py`, else
+    `scripts/<hook>.sh`. `hook_name` is validated already.
+
+    The joined name is held inside `scripts/`, as a skill's is inside its
+    root (`_find_skill`): validation leaves a Windows drive-relative name
+    such as `d:evil`, which joins outside the folder, and a hook's script
+    is executed.
+    """
+
     scripts_root = (skill_dir / "scripts").resolve()
-    py = (scripts_root / f"{hook_name}.py").resolve()
-    sh = (scripts_root / f"{hook_name}.sh").resolve()
-    if py.exists() and py.is_file():
-        return py, "python"
-    if sh.exists() and sh.is_file():
-        return sh, "sh"
+    for suffix, interpreter in ((".py", "python"), (".sh", "sh")):
+        candidate = scripts_root / f"{hook_name}{suffix}"
+        try:
+            candidate.relative_to(scripts_root)
+        except ValueError:
+            continue
+        script = candidate.resolve()
+        if script.exists() and script.is_file():
+            return script, interpreter
     return None
 
 
@@ -604,25 +1345,45 @@ def _run_skill_hook(
     response_text: str | None,
     plan: Any,
     timeout_ms: int,
+    skill_dir: Path | None = None,
 ) -> dict[str, Any]:
-    """Execute one skill hook script and return debug metadata."""
+    """Execute one skill hook script and return debug metadata.
 
-    resolved = _resolve_skill_hook_script(skill_name, hook_name, plan)
-    if resolved is None:
+    The script is taken from `skill_dir`, the folder the firing read the
+    skill's `SKILL.md` from (`skillFolder` of the firing's debug data); a
+    firing passes it to both its hooks, so neither runs a folder made
+    during the agent's turn, or by a parallel worker, where the name
+    resolves first. Without it the name is resolved now, for a caller that
+    runs one hook of its own. The metadata names the folder it took,
+    `skillDir`, resolved, the one the approval was checked against.
+    """
+
+    _validate_skill_name(skill_name)
+    _validate_skill_name(hook_name)
+    if skill_dir is None:
+        skill_dir = _resolve_skill_dir(skill_name, plan)
+    if skill_dir is not None:
+        skill_dir = skill_dir.resolve()
+    resolved = _skill_hook_script_in(skill_dir, hook_name) if skill_dir is not None else None
+    if skill_dir is None or resolved is None:
         return {
             "ran": False,
             "reason": "script-not-found",
             "phase": phase,
             "hook": hook_name,
+            **({"skillDir": str(skill_dir)} if skill_dir is not None else {}),
         }
     script_path, interpreter = resolved
-    allowed, reason = _authorize_skill_hook(plan.options, skill_name, hook_name, interpreter)
+    allowed, reason = _authorize_skill_hook(
+        plan.options, skill_name, hook_name, interpreter, skill_dir
+    )
     if not allowed:
         return {
             "ran": False,
             "reason": f"denied: {reason}",
             "phase": phase,
             "hook": hook_name,
+            "skillDir": str(skill_dir),
             "script": str(script_path),
             "interpreter": interpreter,
         }
@@ -664,6 +1425,7 @@ def _run_skill_hook(
             "ran": True,
             "phase": phase,
             "hook": hook_name,
+            "skillDir": str(skill_dir),
             "script": str(script_path),
             "interpreter": interpreter,
             "exitCode": proc.returncode,
@@ -676,6 +1438,7 @@ def _run_skill_hook(
             "ran": True,
             "phase": phase,
             "hook": hook_name,
+            "skillDir": str(skill_dir),
             "script": str(script_path),
             "interpreter": interpreter,
             "timeoutMs": timeout_ms,
@@ -738,7 +1501,7 @@ def _build_effective_agent_prompt(spec: AgentSpec, plan: Any) -> tuple[str, dict
     # named but cannot be read still raises, from _read_skill_md.
     skill_name = (spec.skill or "").strip()
     if spec.use_skill and skill_name:
-        skill_text, skill_path = _read_skill_md(skill_name, plan)
+        skill_text, skill_path, skill_folder = _read_skill(skill_name, plan)
         skill_meta, skill_body = _parse_skill_frontmatter(skill_text)
         skill_dir = skill_path.parent
         skill_body = _rewrite_skill_body_paths(skill_body, skill_dir)
@@ -746,6 +1509,9 @@ def _build_effective_agent_prompt(spec: AgentSpec, plan: Any) -> tuple[str, dict
         debug_meta["skillPath"] = str(skill_path)
         debug_meta["skillDir"] = str(skill_dir)
         debug_meta["skillMeta"] = skill_meta
+        # The folder the skill was read from, where its hooks run from
+        # (`_run_skill_hook`); `skillDir` is `SKILL.md`'s, which a link moves.
+        debug_meta["skillFolder"] = str(skill_folder)
 
     if spec.use_prompt:
         prompt_text = (spec.prompt or "").strip()
