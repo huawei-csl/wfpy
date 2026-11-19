@@ -39,8 +39,22 @@ run.sh                   one subcommand per top-level workflow
 wf-out/                  run artifacts, pinned to the repo
 ```
 
-Generic helper modules do not belong at the `src/` root — that level is the list of things
+Generic helper modules do not belong at the `src/` root: that level is the list of things
 this project can do, and nothing else.
+
+**Put an empty `__init__.py` in every folder under `src/`** (`src/` itself needs none), and
+write imports from `src/`:
+
+```python
+from tasks.decide import Decide
+from lib.paths import REPO_ROOT
+```
+
+`wfpy run` and `wfpy plan` put the folder of the file they load on the import path, and
+the parent of that folder when it is a package. A top-level workflow in `src/` loads
+either way. A file one level down does not: without the `__init__.py`,
+`wfpy plan src/workflows/repair_flow.py` (and the IDE drawing that file) fails with
+`ModuleNotFoundError: No module named 'tasks'`.
 
 ## A top-level workflow is thin
 
@@ -49,9 +63,9 @@ It says what the run *is*, never how a phase works:
 ```python
 @workflow(inputs={}, outputs={"Out": str})
 def repair_softmax() -> None:
-    kernel = KernelSource(path=File(KERNEL_PATH))   # where the input comes from
-    flow = repair_flow()                            # what happens to it
-    view = RepairReportViewer()                     # where the answer goes
+    kernel = KernelSource(path=File(str(KERNEL_PATH)))   # where the input comes from
+    flow = repair_flow()                                 # what happens to it
+    view = RepairReportViewer()                          # where the answer goes
 
     connect(kernel.Out, flow.Kernel)
     connect(flow.Report, view.Report)
@@ -61,31 +75,36 @@ def repair_softmax() -> None:
 Three or four nodes, mostly sub-workflows. If a top-level workflow has ten actors in it, the
 phases have not been separated yet.
 
+`File(...)` takes a string. `File(KERNEL_PATH)` with a `pathlib.Path` raises
+`AttributeError: 'PosixPath' object has no attribute 'startswith'`.
+
 ## Runnable from a terminal and from an IDE
 
-Both, from the first commit — an IDE launches the module directly and shares none of the
-shell's environment.
+A workflow file is started in two ways, and they do not run the same code:
 
-- **No `sys.argv` at import time.** Whoever imports the module owns argv, and the wfpy IDE
-  extension passes its own flags, so `sys.argv[1]` can be `--workflow`. Read configuration
-  from the environment, and honour argv only under `if __name__ == "__main__"`.
-- **Bootstrap the environment in `main()`.** A wrapper script that sources an SDK setup
-  script does not run when an IDE launches the file. Do that work in the entry point so both
-  paths behave the same.
-- **Pin `out_dir`.** wfpy defaults it to `./wf-out` relative to the *invocation* cwd, which
-  scatters artifacts wherever the command was typed. Resolve it against the repo.
+- `wfpy run src/<workflow>.py` **imports** the file and runs its `@workflow`. The wfpy IDE
+  does the same (`wfpy run <file> --out-dir <dir> --keep-intermediates`). The module is not
+  `__main__` (its `__name__` is `__wfpy_user_module__`), so `main()` and the
+  `if __name__ == "__main__":` block never run.
+- `python src/<workflow>.py` runs the file as `__main__`, with the `run()` call it makes.
+
+Measured with a bootstrap written in `main()`: `python flow.py` saw `SDK_HOME='/opt/sdk'`,
+and `wfpy run flow.py` saw `SDK_HOME=None`. So:
+
+- **Nothing a run needs may live only in `main()`.** Set the environment a node depends on
+  where both ways pass: at import, in a `src/lib/` module the nodes import, or in the node
+  that needs it. A wrapper script that sources an SDK setup script is a third way, and
+  neither of the two above runs it.
+- **No `sys.argv` at import time.** Whoever imports the module owns argv: under `wfpy run`,
+  `sys.argv[1]` is `run` and the rest are wfpy's flags. Read configuration from the
+  environment, and honour argv only under `if __name__ == "__main__"`.
+- **Pin `out_dir`.** `run()` defaults it to `./wf-out`, and `wfpy run --out-dir` likewise,
+  relative to the *invocation* cwd, which scatters artifacts wherever the command was
+  typed. Resolve it against the repo in your own `run()` call and in `run.sh`. The IDE
+  passes its own `--out-dir`.
 - **Resolve paths against the repo, not the cwd**, via one `REPO_ROOT` in `src/lib/`. Count
   the `parents[]` levels when a file moves; a short root silently resolves every path to
   somewhere that does not exist, and the graph may still build.
-
-## Check your work mechanically
-
-`wfpy-skills lint src/` checks the rules in these skills that can be checked statically:
-mutable field defaults, `File` ports without `ext=`, `argv` at import, an `@agent` with no
-`mock_outputs`, a loop with no budget, more than one actor in a file.
-
-`wfpy-skills new actor <kind> <Name>` and `wfpy-skills new project <dir>` scaffold files that
-already follow the conventions.
 
 ## Before you say it works
 
@@ -93,6 +112,11 @@ A wfpy run that prints no error is not evidence. Check that the nodes you expect
 fired, and that the tokens you expected actually moved:
 
 ```bash
-cat wf-out/<run>/run.wf-queues.json     # a producer that emitted nothing is visible here
-ls wf-out/<run>/work/                   # every materialized file should carry a suffix
+wfpy plan src/<workflow>.py --format graph   # the graph wfpy built, as JSON
+cat wf-out/<run>/run.wf-queues.json          # one step per firing, with every queue's size
+ls wf-out/<run>/work/                        # every materialized file should carry a suffix
 ```
+
+In `run.wf-queues.json`, `leftovers` lists the queues that still held tokens when the run
+ended: tokens that a node was waiting on, or that nothing read. A run in which no node
+fired writes no `run.wf-queues.json` at all. `wfpy-graph-composition` says how to read both.

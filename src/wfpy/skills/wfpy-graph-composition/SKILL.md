@@ -14,10 +14,13 @@ attributes:
 @workflow(inputs={"Kernel": str},
           outputs={"Report": File(ext=".md"), "Verdict": str})
 def repair_flow() -> None:
-    runner, decide = RunKernel(run_mode="sim"), Decide(budget=2)
+    runner, decide, writer = RunKernel(run_mode="sim"), Decide(budget=2), WriteReport()
     connect("Kernel", runner.Initial)       # a string names a boundary port
+    connect(runner.Result, decide.Result)
+    connect(decide.Retry, runner.Retry)     # the feedback edge
     connect(decide.Done, writer.Done)
     connect(writer.Report, "Report")
+    connect(writer.Verdict, "Verdict")
 
 # and in the caller:
 flow = repair_flow()
@@ -27,10 +30,10 @@ connect(flow.Report, view.Report)
 
 **Declare `ext=` on boundary outputs too, not only on the producing port.** At a
 sub-workflow boundary the declared ext is the only thing that names the materialized copy;
-the source path's own suffix is not consulted. Measured: a writer's own copy came out
-`writer__Report__0.md` (its port declared `ext=".md"`), while the boundary re-export of the
-same file came out `flow__Report__0` — no extension — because the boundary output was
-declared as a bare `File`. Ports declared `File(ext=".json")` came out `.json` at both levels.
+the source path's own suffix is not consulted. Measured: a writer returned `report.md` and
+its own copy came out `writer__Report__0.md`, while the boundary re-export of the same file
+came out `flow__Report__0`, with no extension, because the boundary output was declared as
+a bare `File`. Declared `File(ext=".md")`, it came out `flow__Report__0.md`.
 
 A phase earns a sub-workflow when it has its own inputs and outputs and could be swapped
 out. A step that only transforms one token is a task. Nesting one task is noise; nesting a
@@ -38,8 +41,11 @@ four-actor measurement phase that two top-level workflows share is the point.
 
 ## Input ports do not fan in
 
-An output port broadcasts to every consumer. An input port accepts **one** producer. Two
-`connect()` calls into the same input port is the single most common wiring mistake.
+An output port broadcasts to every consumer. An input port reads **one** producer. Two
+`connect()` calls into the same input port raise nothing: the node reads the producer
+connected first, and the other producer's tokens are never read. They show under
+`leftovers` in `run.wf-queues.json`, as `{"queueId": "b.Out-->t.In", "count": 1}`. This is
+the single most common wiring mistake.
 
 So a loop head needs **two input ports on one actor**:
 
@@ -58,7 +64,7 @@ class RunKernel:
     def from_retry(self, kernel): return self._run(kernel)
 ```
 
-When the thing in the loop is a **sub-workflow** — whose boundary has one `Kernel` input —
+When the thing in the loop is a **sub-workflow**, whose boundary has one `Kernel` input,
 put a small merge node in front of it instead. That keeps the sub-workflow reusable and
 makes the join visible in the graph rather than hidden inside a task:
 
@@ -71,7 +77,7 @@ connect(candidate.Kernel, merge.Retry)   # the feedback edge
 
 Note the asymmetry: a `@task` can have two input ports consumed by two different actions
 (OR), **and** two consumed together by one action (`consumes={"A": 1, "B": 1}`, AND). An
-`@agent` only has the AND form — see `wfpy-agent-nodes`.
+`@agent` only has the AND form; see `wfpy-agent-nodes`.
 
 ## A loop has no backpressure, so it must stop itself
 
@@ -90,10 +96,16 @@ def ask_again(self, r):
 ```
 
 Independent cycles need independent counters. If a loop can re-enter for two different
-reasons — a slower candidate versus one that failed to build — give each its own budget,
-and bound the total deliberately (`rounds × repairs`). A node with **no input at all**, or
-`fireable_without_input`, is a cycle too: it has nothing to stop it and needs a latch or a
-budget just the same.
+reasons (a slower candidate, and one that failed to build) give each its own budget, and
+bound the total deliberately (`rounds × repairs`).
+
+A node with **no input port at all** is a cycle too: nothing has to arrive for it to fire,
+so nothing stops it. A `@task` action with `consumes={}` and no guard fires until the
+process is killed; give it a latch, as `@source` does for you. On an `@agent`,
+`fireable_without_input=N` is such a budget only when the agent declares an input port: it
+then fires N times with nothing on its inputs, and once more per token. An agent with no
+input port ignores the count and fires without end (measured, with
+`fireable_without_input=2`: over a thousand firings in twelve seconds).
 
 Make every exit route to a node that **writes something**. A loop whose exit leads nowhere
 reaches quiescence with no report, which looks exactly like a hang.
@@ -109,14 +121,18 @@ wfpy plan src/optimize.py --workflow optimize_kernel --format graph \
       print('edges:', len(g['edges']))"
 ```
 
-`kind` distinguishes `source` / `internal` / `agent` / `viewer` / `workflow`, so a
-sub-workflow you expected to nest shows as `workflow` and a node you forgot to wire shows
-with no edges. Counting `"kind"` occurrences in the raw text does **not** give a node count
-— parse `graph.nodes`.
+`kind` distinguishes `source` / `internal` (a `@task`) / `agent` / `viewer` / `workflow`,
+so a sub-workflow you expected to nest shows as `workflow` and a node you forgot to wire
+shows with no edges. The workflow's own boundary ports are listed too, as `wf-input` and
+`wf-output`; leave them out of the count. Counting `"kind"` occurrences in the raw text
+does **not** give a node count; parse `graph.nodes`.
 
 ## When a run does nothing
 
 Quiescence with no error means some port never received a token. `run.wf-queues.json` in
-the run directory shows each queue's size, so a producer that emitted nothing is
-immediately visible. Work backwards from the first empty queue to the action that should
-have filled it, and check it against the action-return rules in `wfpy-actor-authoring`.
+the run directory has one step per firing, each with every queue's size, so a producer
+that emitted nothing is immediately visible, and `leftovers` names the queues that still
+held tokens at the end: a node waiting on its other inputs, or a queue nothing reads. If
+the file is not there at all, no node fired. Work backwards from the first empty queue to
+the action that should have filled it, and check it against the action-return rules in
+`wfpy-actor-authoring`.

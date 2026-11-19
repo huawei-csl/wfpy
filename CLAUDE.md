@@ -45,6 +45,8 @@ src/wfpy/
 │                  run() orchestration; _step_actor dispatch; _step_agent,
 │                  _step_internal, _step_workflow, _step_control_*; _invoke_agent()
 ├── cli.py         `wfpy run|plan` entry-point; _load_module() sys.path bootstrap
+├── skills.py      The Agent Skills wfpy ships (skills/*/SKILL.md, package data) and
+│                  `wfpy skills install|path|list`; `wfpy skills <file>` is cli.py's
 ├── rewrite.py     RewriteEngine — sidecar rewrite ops + nested workflow export
 ├── sidecar.py     Sidecar runtime (nested workflow export + invocation)
 ├── sidecar_cli.py Sidecar CLI entry-point (wfpy-sidecar-op)
@@ -108,5 +110,9 @@ Public API is re-exported from `src/wfpy/__init__.py`.
   `.[dev,agent]` without that file (`test-agent`).
 - `tests/test_dependency_docs.py` holds the README's Dependencies table to the
   bounds in `pyproject.toml`: change a pin and the table in one commit.
+- `tests/test_shipped_skill_claims.py` runs what the shipped skills
+  (`src/wfpy/skills/*/SKILL.md`) say wfpy does, one small workflow a sentence.
+  A failure there means a skill is wrong now: change the skill's text and the
+  test in the commit that changes the behaviour.
 - There are no `examples/` in this repo yet; nothing in `tests/` may depend on
   example files, or a missing example will abort collection for the whole suite.
