@@ -16,6 +16,8 @@ from __future__ import annotations
 import collections
 import concurrent.futures
 import copy
+import dataclasses
+import inspect
 import json
 import logging
 import os
@@ -2484,6 +2486,15 @@ def _step_agent(
                     verbose=verbose,
                 )
 
+    # ── Route materialized outputs to queues ─────────────────────────
+    for port_name in meta.output_ports:
+        output_val = materialized.get(port_name)
+        if output_val is None:
+            continue
+        for q in actor.out_queues.get(port_name, []):
+            q.enqueue(output_val)
+            _record_edge_token(plan, q, output_val)
+
     # ── Agent debug: write request/response artifacts ─────────────────
     if _agent_debug_enabled(plan.options):
         _write_agent_debug_artifact(
@@ -2614,13 +2625,47 @@ def _nested_options(parent_options: dict[str, Any]) -> dict[str, Any]:
     name; two instances of one workflow hold agents of the same name, so a
     nested agent keeps writing below its own workflow's work directory.
 
+    ``agent_debug`` is handed down when it is on. Off is what ``run()`` passes
+    when nobody asked, and it would hide ``WF_AGENT_DEBUG`` from a nested
+    agent, which has always honoured it.
+
     A copy, not the parent's dict: an agent step stores its tool registry in
     the options of the plan it runs in, and agents of different plans fire in
-    parallel.
+    parallel. What must be one for the whole run (the elicit socket's handler)
+    is put in the options before the first copy, by ``run()``.
     """
     options = dict(parent_options)
     options.pop("agent_debug_dir", None)
+    if not options.get("agent_debug"):
+        options.pop("agent_debug", None)
     return options
+
+
+def _nested_validator_registry(
+    actor: RuntimeActor, parent_plan: FifoPlan
+) -> LoadedValidatorRegistry | None:
+    """The validators the ports of a nested workflow are checked with.
+
+    The run's registry is found from the top workflow's file. A nested
+    workflow defined elsewhere names, on its ports, the validators registered
+    beside its own file (its ``wf-validators.json``): the ones it is checked
+    with when it runs on its own. It gets both, its own over the run's. The
+    mode and the MCP bridge stay the run's.
+    """
+    registry = parent_plan.validator_registry
+    if registry is None or not isinstance(actor.meta, WorkflowDef):
+        return registry
+    definition = actor.meta.builder_fn if actor.meta.builder_fn is not None else actor.meta.cls
+    try:
+        own_file = inspect.getsourcefile(definition) if definition is not None else None
+    except TypeError:
+        own_file = None
+    if not own_file:
+        return registry
+    own = load_validator_registry(own_file, parent_plan.options)
+    if own.source is None or own.source == registry.source:
+        return registry
+    return dataclasses.replace(registry, specs={**registry.specs, **own.specs})
 
 
 def _run_sub_plan(
@@ -2650,7 +2695,7 @@ def _run_sub_plan(
     # The validator registry is built from those options (`validate`) and the
     # source path, on the top plan as well. A sub-plan without one skips every
     # validator its ports declare, in silence.
-    sub_plan.validator_registry = parent_plan.validator_registry
+    sub_plan.validator_registry = _nested_validator_registry(actor, parent_plan)
 
     # Its outputs are copied beside its siblings': name them for this
     # instance and firing, as a tool's outputs are.
@@ -3043,6 +3088,15 @@ def run(
     # be in there; without it the workspace file is silently skipped and only
     # the discovered connectors and the user file apply.
     plan.options["source_path"] = plan.source_path
+
+    # One connection to the elicit socket serves the run. The handler that
+    # holds it is cached in the options on first use, and a nested workflow
+    # gets a copy of the options each time it fires: made here, before any
+    # copy, it is the one every plan asks through.
+    if plan.options.get("elicit_socket"):
+        from wfpy._elicitation_runtime import resolve_base_handler
+
+        resolve_base_handler(plan.options)
 
     # Load validator registry
     plan.validator_registry = load_validator_registry(
