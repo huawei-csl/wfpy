@@ -1,6 +1,6 @@
 ---
 name: wfpy-actor-authoring
-description: Write one wfpy node correctly - a @task, @tool, @source or @viewer, its fields, ports and actions. Covers the rules that fail silently: a returned dict is a port map, a field with a default is state not a parameter, File ports need ext=, a @source emits a File object. Use when adding or fixing a single actor. Triggers: write a task, add an actor, @task, @tool, @source, @viewer, Port, action, produces, consumes, actor state, constructor parameter.
+description: Write one wfpy node correctly - a @task, @tool, @source or @viewer, its fields, ports and actions, and the Schedule and Priority that say which action fires. Covers the rules that fail silently: a returned dict is a port map, a field with a default is state not a parameter, File ports need ext=, a @source emits a File object, an action left out of a schedule never fires. Use when adding or fixing a single actor, or when a task has several actions. Triggers: write a task, add an actor, @task, @tool, @source, @viewer, Port, action, guard, schedule, priority, action selection, state machine, produces, consumes, actor state, constructor parameter.
 ---
 
 # Writing one wfpy actor
@@ -84,33 +84,132 @@ class Ports:
 - One firing emits exactly **one** token per output port. The count in `produces` does not
   change that: with `produces={"Out": 2}`, a returned list is one token.
 
-## Guards must be mutually exclusive
+## Which action fires: a schedule, then guards, then a priority
 
-wfpy tries a task's actions in the order they are declared and fires the first one whose
-tokens are there and whose guard passes (a `Priority` inner class reorders them). An
-action declared above another therefore shadows it whenever both could fire, and an
-unguarded action shadows every action below it that reads the same port. Do not lean on
-the order: write guards that cannot both pass.
+A task with several actions may have more than one ready. The model resolves it in three
+stages:
 
-Derive the exits from **one pure routing function** rather than four conditions that have
-to agree:
+1. **Eligible**: allowed by the task's `Schedule` in the state it is in (every action,
+   when there is no schedule).
+2. **Activated**: eligible, its tokens are there, and its guard passes.
+3. **Firable**: activated, with no activated action above it in the task's `Priority`.
+
+When several actions are firable, the model does not say which fires. This runtime takes
+the one declared first, and that is not something to build on: moving a method up in the
+file would change what the task does. Say the order with the two declarations below, and
+keep guards for what depends on the token.
+
+### Prefer a `Schedule` for what happens in sequence
+
+A schedule is a finite state machine on the task: a nested class with an `initial` state
+and `(state, action, next_state)` transitions. In a state, only the actions with a
+transition out of it can fire, and firing one moves the task to its next state.
 
 ```python
-def _route(self, outcome) -> str:
-    """Pure: a guard may be evaluated more than once. Mutates nothing."""
-    if not self._started:            return "first"
-    if outcome.ok:                   return "accept"
-    if self._tries < self.budget:    return "retry"
-    return "give_up"
+@task
+class RunKernel:
+    class Ports:
+        Initial = Port[str](direction="in")      # from the boundary
+        Retry   = Port[str](direction="in")      # from the feedback edge
+        Result  = Port[Outcome](direction="out")
 
-@action(consumes={"In": 1}, produces={"Done": 1})
-@guard(lambda self, outcome: self._route(outcome) == "accept")
-def accept(self, outcome): ...
+    class Schedule:
+        initial = "fresh"
+        transitions = [
+            ("fresh",   "from_initial", "looping"),   # the first kernel, once
+            ("looping", "from_retry",   "looping"),   # then only what comes back
+        ]
+
+    @action(consumes={"Initial": 1}, produces={"Result": 1})
+    def from_initial(self, kernel): return self._run(kernel)
+
+    @action(consumes={"Retry": 1}, produces={"Result": 1})
+    def from_retry(self, kernel): return self._run(kernel)
 ```
 
-Exclusivity is then structural. A guard that mutates state will corrupt the run, because it
-is called to *test* the action, not to fire it, and it is called again on every pass of
-the scheduler while the token waits (measured: three calls for one token).
+Reach for it whenever a guard would test a field that only records where the task is
+(`_started`, `_phase`, `_done`). Such a field is a schedule written by hand: every action
+that moves the task has to set it, and the one that forgets fails without a word. A
+schedule is also data: `wfpy plan --format graph` prints it under the node's
+`meta.schedule`, so the phases of a task can be read without reading its actions.
+
+A schedule is the latch of a node with no input too. One transition out of the initial
+state, `("armed", "emit", "spent")`, and an action that consumes nothing fires once
+instead of without end.
+
+### Give a state with several actions a `Priority`
+
+`rules` is a list of groups, each a list of action names from high to low. An earlier
+group outranks a later one, and an action in no group ranks below every listed one.
+
+```python
+@task
+class Decide:
+    budget: int                 # a parameter
+    _rounds: int = 0            # state: a counter, not a phase
+
+    class Ports:
+        Result = Port[Outcome](direction="in")
+        Retry  = Port[str](direction="out")
+        Done   = Port[Outcome](direction="out")
+
+    class Schedule:
+        initial = "deciding"
+        transitions = [
+            ("deciding", "accept",    "done"),
+            ("deciding", "ask_again", "deciding"),
+            ("deciding", "give_up",   "done"),
+        ]
+
+    class Priority:
+        rules = [["accept", "ask_again", "give_up"]]
+
+    @action(consumes={"Result": 1}, produces={"Done": 1})
+    @guard(lambda self, r: r.ok)
+    def accept(self, r): return r
+
+    @action(consumes={"Result": 1}, produces={"Retry": 1})
+    @guard(lambda self, r: self._rounds < self.budget)
+    def ask_again(self, r):
+        self._rounds += 1
+        return r.kernel
+
+    @action(consumes={"Result": 1}, produces={"Done": 1})
+    def give_up(self, r): return r          # no guard: what is left
+```
+
+Three actions read the same port in the state `deciding`, and the priority makes them a
+case statement: the guards may overlap, and the last action needs none. Without it each
+guard has to exclude the others by hand (`not r.ok and self._rounds < self.budget`, then
+`not r.ok and self._rounds >= self.budget`), and the first one that drifts leaves two
+firable actions, or none. A state with one action needs no priority.
+
+`done` has no transition out of it, so the task ends there: one decision a run, and a
+result that arrives later is left in its queue. A task that serves a stream sends its
+exits back to `deciding` and resets its counter there.
+
+### What a schedule and a priority do not check
+
+- **An action in no transition never fires.** A schedule lists what may fire. Adding an
+  action to the class and not to `transitions` adds nothing, with no error.
+- **State names are not checked.** A next state that is spelled wrong is a state with no
+  way out. Measured with `("ready", "go", "raedy")`: three tokens in, one firing, and the
+  task never fired again. An `initial` that no transition starts from is accepted the same
+  way, and that task never fires at all.
+- What does raise, when the class is made: an action name the class does not have
+  (`TypeError: X.Schedule references unknown action 'nope'`, and the same for `Priority`),
+  two transitions for one state and action, and `rules` written flat (`["a", "b"]` where
+  `[["a", "b"]]` is meant).
+- Both are for the actions of a `@task`. An `@agent` has no actions to order.
+
+### Guards
+
+A guard takes the tokens its action would consume, and says whether this action is for
+them: `@guard(lambda self, outcome: outcome.ok)`.
+
+**Keep it pure.** A guard is called to *test* the action, not to fire it, and it is called
+again on every pass of the scheduler while the token waits (measured: three calls for one
+token). One that mutates state corrupts the run. Count in the action, on the way round.
 
 **A guard that raises counts as false.** wfpy logs `Guard <node>.<action> raised; treating
 as not fireable` with the traceback and carries on, so a typo in a guard gives a run that

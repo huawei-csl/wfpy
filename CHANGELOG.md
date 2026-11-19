@@ -11,7 +11,8 @@ All notable changes to wfpy are documented here. The format follows
   install` links them where a tool looks for them. Four skills:
   `wfpy-workflow-builder` (the entry point, and the project layout a new
   project starts from), `wfpy-actor-authoring` (one node: its fields, ports
-  and actions), `wfpy-graph-composition` (wiring, nesting, and a loop that
+  and actions, and the `Schedule` and `Priority` that say which action
+  fires), `wfpy-graph-composition` (wiring, nesting, and a loop that
   terminates) and `wfpy-agent-nodes` (an agent in the graph, and the skill
   loaded into it). They are here rather than in a package of their own
   because they describe this code, down to behaviour that changed in a given

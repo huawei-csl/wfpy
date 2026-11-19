@@ -17,7 +17,7 @@ real debugging time, each with the evidence for it.
 
 | Doing | Read |
 |---|---|
-| Writing or fixing one node | `wfpy-actor-authoring` |
+| Writing or fixing one node, or saying which of its actions fires | `wfpy-actor-authoring` |
 | Wiring nodes, nesting workflows, building a loop | `wfpy-graph-composition` |
 | Putting an LLM in the graph, or loading a skill into one | `wfpy-agent-nodes` |
 | Starting a project, or deciding where a file goes | this file, below |

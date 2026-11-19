@@ -66,7 +66,7 @@ class TestFields:
     def test_a_mutable_default_is_copied_for_each_node(self, tmp_path):
         @task
         class History:
-            _history: list = []  # noqa: RUF012 - the case under test
+            _history: list = []
 
             class Ports:
                 In = Port[str](direction="in")
@@ -402,6 +402,270 @@ class TestGuards:
 
         assert run(wf, {"Data": "d", "Key": "k"}, out_dir=tmp_path)["Out"] == ["d"]
         assert len(calls) > 1
+
+
+@dataclass(frozen=True)
+class Outcome:
+    kernel: str
+    ok: bool
+
+
+class TestSchedulesAndPriorities:
+    """The two nodes of the skill's section on which action fires, and what a
+    schedule and a priority do not check."""
+
+    def loop(self, tmp_path: Path, budget: int) -> Any:
+        @task
+        class RunKernel:
+            class Ports:
+                Initial = Port[str](direction="in")
+                Retry = Port[str](direction="in")
+                Result = Port[Outcome](direction="out")
+
+            class Schedule:
+                initial = "fresh"
+                transitions = [
+                    ("fresh", "from_initial", "looping"),
+                    ("looping", "from_retry", "looping"),
+                ]
+
+            def _run(self, kernel: str) -> Outcome:
+                return Outcome(kernel, ok=kernel.endswith("v3"))
+
+            # The retry is declared first: the schedule decides, not the order.
+            @action(consumes={"Retry": 1}, produces={"Result": 1})
+            def from_retry(self, kernel: str) -> Outcome:
+                return self._run(kernel)
+
+            @action(consumes={"Initial": 1}, produces={"Result": 1})
+            def from_initial(self, kernel: str) -> Outcome:
+                return self._run(kernel)
+
+        @task
+        class Decide:
+            budget: int
+            _rounds: int = 0
+
+            class Ports:
+                Result = Port[Outcome](direction="in")
+                Retry = Port[str](direction="out")
+                Done = Port[str](direction="out")
+
+            class Schedule:
+                initial = "deciding"
+                transitions = [
+                    ("deciding", "accept", "done"),
+                    ("deciding", "ask_again", "deciding"),
+                    ("deciding", "give_up", "done"),
+                ]
+
+            class Priority:
+                rules = [["accept", "ask_again", "give_up"]]
+
+            # Declared from low to high: the priority decides, not the order.
+            @action(consumes={"Result": 1}, produces={"Done": 1})
+            def give_up(self, result: Outcome) -> str:
+                return f"gave up on {result.kernel}"
+
+            @action(consumes={"Result": 1}, produces={"Retry": 1})
+            @guard(lambda self, result: self._rounds < self.budget)
+            def ask_again(self, result: Outcome) -> str:
+                self._rounds += 1
+                return f"k:v{self._rounds + 1}"
+
+            @action(consumes={"Result": 1}, produces={"Done": 1})
+            @guard(lambda self, result: result.ok)
+            def accept(self, result: Outcome) -> str:
+                return f"accepted {result.kernel}"
+
+        @workflow(inputs={"Kernel": str}, outputs={"Out": str})
+        def wf() -> None:
+            runner, decide = RunKernel(), Decide(budget=budget)
+            connect("Kernel", runner.Initial)
+            connect(runner.Result, decide.Result)
+            connect(decide.Retry, runner.Retry)
+            connect(decide.Done, "Out")
+
+        return run(wf, {"Kernel": "k:v1"}, out_dir=tmp_path)["Out"]
+
+    def test_a_loop_whose_order_is_said_by_a_schedule_and_a_priority(self, tmp_path):
+        assert self.loop(tmp_path / "accepts", budget=5) == ["accepted k:v3"]
+        # The action with no guard is the default: it fires when no other can.
+        assert self.loop(tmp_path / "gives-up", budget=1) == ["gave up on k:v2"]
+
+    def scheduled(self, rows: list[tuple[str, str, str]], first: str = "ready") -> type:
+        @task
+        class Scheduled:
+            class Ports:
+                In = Port[int](direction="in")
+                Out = Port[str](direction="out")
+
+            class Schedule:
+                initial = first
+                transitions = rows
+
+            @action(consumes={"In": 1}, produces={"Out": 1})
+            @guard(lambda self, value: value != 0)
+            def go(self, value: int) -> str:
+                return f"went:{value}"
+
+            @action(consumes={"In": 1}, produces={"Out": 1})
+            def other(self, value: int) -> str:
+                return f"other:{value}"
+
+        return Scheduled
+
+    def tokens(self, cls: type, values: list[int]) -> tuple[Any, str]:
+        from wfpy.runner import build_plan, execute_plan
+
+        @workflow(inputs={"In": int}, outputs={"Out": str})
+        def wf() -> None:
+            node = cls()
+            connect("In", node.In)
+            connect(node.Out, "Out")
+
+        definition = wf._wfpy_workflow
+        plan = build_plan(_build_workflow_graph(definition), definition)
+        for queue in plan.wf_input_queues["In"]:
+            for value in values:
+                queue.enqueue(value)
+        outputs = execute_plan(plan)
+        node = next(actor for actor in plan.actors if actor.name == "node")
+        return outputs["Out"], node.instance._wfpy_schedule_state
+
+    def test_an_action_in_no_transition_never_fires(self):
+        cls = self.scheduled([("ready", "go", "ready")])
+        # 0 is a token only `other` takes, and `other` is in no transition.
+        assert self.tokens(cls, [0]) == (None, "ready")
+        assert self.tokens(cls, [1, 2]) == (["went:1", "went:2"], "ready")
+
+    def test_a_next_state_spelled_wrong_ends_the_task_without_a_word(self):
+        cls = self.scheduled([("ready", "go", "raedy")])
+        assert self.tokens(cls, [1, 2, 3]) == (["went:1"], "raedy")
+
+    def test_an_initial_state_with_no_transition_is_accepted_and_never_fires(self):
+        cls = self.scheduled([("ready", "go", "ready")], first="nowhere")
+        assert self.tokens(cls, [1]) == (None, "nowhere")
+
+    @pytest.mark.parametrize(
+        ("transitions", "message"),
+        [
+            ([("ready", "nope", "ready")], "Schedule references unknown action 'nope'"),
+            ([("ready", "go", "a"), ("ready", "go", "b")], "Schedule has duplicate transition"),
+        ],
+    )
+    def test_what_a_schedule_refuses_when_the_class_is_made(self, transitions, message):
+        with pytest.raises(TypeError, match=message):
+            self.scheduled(transitions)
+
+    def ranked(self, order: Any) -> type:
+        @task
+        class Ranked:
+            class Ports:
+                In = Port[int](direction="in")
+                Out = Port[str](direction="out")
+
+            class Priority:
+                rules = order
+
+            @action(consumes={"In": 1}, produces={"Out": 1})
+            def a(self, value: int) -> str:
+                return "a"
+
+            @action(consumes={"In": 1}, produces={"Out": 1})
+            def b(self, value: int) -> str:
+                return "b"
+
+            @action(consumes={"In": 1}, produces={"Out": 1})
+            def c(self, value: int) -> str:
+                return "c"
+
+        return Ranked
+
+    def test_a_listed_action_outranks_an_unlisted_one_and_an_earlier_group_a_later(self, tmp_path):
+        def fired(rules: Any, name: str) -> Any:
+            cls = self.ranked(rules)
+
+            @workflow(inputs={"In": int}, outputs={"Out": str})
+            def wf() -> None:
+                node = cls()
+                connect("In", node.In)
+                connect(node.Out, "Out")
+
+            return run(wf, {"In": 1}, out_dir=tmp_path / name)["Out"]
+
+        assert fired([["c"], ["b"]], "groups") == ["c"]  # `a` is declared first, and unlisted
+        assert fired([["b", "c"]], "one-group") == ["b"]
+
+    @pytest.mark.parametrize(
+        ("rules", "message"),
+        [
+            ([["a", "zzz"]], "Priority references unknown action 'zzz'"),
+            (["a", "b"], r"Priority\.rules\[0\] must be a list of action names"),
+        ],
+    )
+    def test_what_a_priority_refuses_when_the_class_is_made(self, rules, message):
+        with pytest.raises(TypeError, match=message):
+            self.ranked(rules)
+
+    def test_the_graph_carries_the_schedule_and_the_priority_of_a_node(self):
+        @task
+        class Decide:
+            class Ports:
+                In = Port[int](direction="in")
+                Out = Port[str](direction="out")
+
+            class Schedule:
+                initial = "deciding"
+                transitions = [("deciding", "a", "done"), ("deciding", "b", "deciding")]
+
+            class Priority:
+                rules = [["a", "b"]]
+
+            @action(consumes={"In": 1}, produces={"Out": 1})
+            def a(self, value: int) -> str:
+                return "a"
+
+            @action(consumes={"In": 1}, produces={"Out": 1})
+            def b(self, value: int) -> str:
+                return "b"
+
+        @workflow(inputs={"In": int}, outputs={"Out": str})
+        def wf() -> None:
+            node = Decide()
+            connect("In", node.In)
+            connect(node.Out, "Out")
+
+        graph = export_graph_json(_build_workflow_graph(wf._wfpy_workflow))["graph"]
+        meta = next(node for node in graph["nodes"] if node["label"] == "node")["meta"]
+        assert meta["schedule"] == {
+            "initial": "deciding",
+            "transitions": [
+                {"state": "deciding", "action": "a", "nextState": "done"},
+                {"state": "deciding", "action": "b", "nextState": "deciding"},
+            ],
+        }
+        assert meta["priority"] == {"rules": [["a", "b"]]}
+
+    def test_a_schedule_is_the_latch_of_a_node_with_no_input(self, tmp_path):
+        @task
+        class Once:
+            class Ports:
+                Out = Port[str](direction="out")
+
+            class Schedule:
+                initial = "armed"
+                transitions = [("armed", "emit", "spent")]
+
+            @action(consumes={}, produces={"Out": 1})
+            def emit(self) -> str:
+                return "once"
+
+        @workflow(inputs={}, outputs={"Out": str})
+        def wf() -> None:
+            connect(Once().Out, "Out")
+
+        assert run(wf, {}, out_dir=tmp_path) == {"Out": ["once"]}
 
 
 class TestTheOtherDecorators:

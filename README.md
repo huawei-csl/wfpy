@@ -95,7 +95,7 @@ wfpy skills src/flow.py              # what a run of that workflow finds
 | Skill | Covers |
 |---|---|
 | `wfpy-workflow-builder` | the entry point: which skill to read, and the project layout a new project starts from |
-| `wfpy-actor-authoring` | one node: a field with a default is state not a parameter, a returned dict is a port map, `File` ports need `ext=` |
+| `wfpy-actor-authoring` | one node: a field with a default is state not a parameter, a returned dict is a port map, `File` ports need `ext=`, and a `Schedule` and a `Priority` say which action fires |
 | `wfpy-graph-composition` | wiring and nesting: boundary ports, output ports broadcast but input ports do not fan in, a loop must stop itself |
 | `wfpy-agent-nodes` | an agent in the graph: transport, the connector's model names, loading a skill and matching its inputs and outputs onto ports |
 

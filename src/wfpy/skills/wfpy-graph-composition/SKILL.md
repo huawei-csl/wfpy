@@ -47,7 +47,8 @@ connected first, and the other producer's tokens are never read. They show under
 `leftovers` in `run.wf-queues.json`, as `{"queueId": "b.Out-->t.In", "count": 1}`. This is
 the single most common wiring mistake.
 
-So a loop head needs **two input ports on one actor**:
+So a loop head needs **two input ports on one actor**, and a schedule that says in which
+order they are read:
 
 ```python
 @task
@@ -57,12 +58,22 @@ class RunKernel:
         Retry   = Port[str](direction="in")     # from the feedback edge
         Result  = Port[Outcome](direction="out")
 
+    class Schedule:
+        initial = "fresh"
+        transitions = [
+            ("fresh",   "from_initial", "looping"),
+            ("looping", "from_retry",   "looping"),
+        ]
+
     @action(consumes={"Initial": 1}, produces={"Result": 1})
     def from_initial(self, kernel): return self._run(kernel)
 
     @action(consumes={"Retry": 1}, produces={"Result": 1})
     def from_retry(self, kernel): return self._run(kernel)
 ```
+
+Without the schedule both actions are eligible at any time, and which port is read first
+when both hold a token is left to the order of the methods in the file.
 
 When the thing in the loop is a **sub-workflow**, whose boundary has one `Kernel` input,
 put a small merge node in front of it instead. That keeps the sub-workflow reusable and
@@ -88,12 +99,20 @@ needs a counter that only goes up**, checked by the guard that re-enters the loo
 budget: int                        # a parameter
 _rounds: int = 0                   # state
 
+class Priority:                    # the exits of the loop, as a case statement
+    rules = [["accept", "ask_again", "give_up"]]
+
 @action(consumes={"Result": 1}, produces={"Retry": 1})
-@guard(lambda self, r: self._route(r) == "retry")
+@guard(lambda self, r: self._rounds < self.budget)
 def ask_again(self, r):
     self._rounds += 1              # increment on the way round, not in the guard
     ...
 ```
+
+The node that decides has several actions on one port, so it gets a `Priority`: accept
+first, ask again while the budget lasts, and give up last, with no guard, so that the loop
+always has an exit that can fire. `wfpy-actor-authoring` has the whole node, with the
+`Schedule` that ends it after its exit.
 
 Independent cycles need independent counters. If a loop can re-enter for two different
 reasons (a slower candidate, and one that failed to build) give each its own budget, and
@@ -101,7 +120,8 @@ bound the total deliberately (`rounds × repairs`).
 
 A node with **no input port at all** is a cycle too: nothing has to arrive for it to fire,
 so nothing stops it. A `@task` action with `consumes={}` and no guard fires until the
-process is killed; give it a latch, as `@source` does for you. On an `@agent`,
+process is killed. Give it a latch, as `@source` does for you: a `Schedule` with one
+transition out of its initial state fires the action once. On an `@agent`,
 `fireable_without_input=N` is such a budget only when the agent declares an input port: it
 then fires N times with nothing on its inputs, and once more per token. An agent with no
 input port ignores the count and fires without end (measured, with
