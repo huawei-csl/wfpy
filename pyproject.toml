@@ -38,8 +38,10 @@ Changelog = "https://github.com/huawei-csl/wfpy/releases"
 [project.optional-dependencies]
 # `agent` covers the @agent decorator runtimes: the HTTP API transport (httpx),
 # MCP tool bridging (mcp), and the opencode-acp transport (agent-client-protocol,
-# imported as `acp` — required for transport="opencode-acp").
-agent = ["httpx>=0.27", "mcp>=1.9", "agent-client-protocol>=0.10"]
+# imported as `acp` — required for transport="opencode-acp"). The SDK is held
+# below its next major release: 1.0 removed an API the transport called, and an
+# open-ended pin handed that to every fresh install.
+agent = ["httpx>=0.27", "mcp>=1.9", "agent-client-protocol>=1.0,<2"]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",

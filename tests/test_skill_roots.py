@@ -33,6 +33,7 @@ from wfpy._agent_prompt_runtime import (
     _read_skill_md,
     _read_skill_md_file,
     _resolve_skill_dir,
+    _run_skill_hook,
     _runtime_root_for_skills,
     _skill_lookup_roots,
     _skill_search_roots,
@@ -139,6 +140,63 @@ class TestSkillsRootVariable:
         assert _runtime_root_for_skills(plan) == first.resolve()
         assert _resolve_skill_dir("wfroot-walked-to", plan) is not None
 
+    def test_a_root_that_is_missing_is_not_the_runtime_root(self, tmp_path, monkeypatch):
+        """A list names the folders of several tools, and a project seldom
+        has them all. The runtime root is the first that is there."""
+        missing = tmp_path / ".claude" / "skills"
+        present = tmp_path / ".codex" / "skills"
+        present.mkdir(parents=True)
+        monkeypatch.setenv("WF_SKILLS_ROOT", os.pathsep.join([str(missing), str(present)]))
+
+        assert _runtime_root_for_skills(make_plan()) == present.resolve()
+
+    def test_with_no_root_present_the_first_is_the_runtime_root(self, tmp_path, monkeypatch):
+        """As one missing directory always was."""
+        first = tmp_path / "first"
+        second = tmp_path / "second"
+        monkeypatch.setenv("WF_SKILLS_ROOT", os.pathsep.join([str(first), str(second)]))
+
+        assert _runtime_root_for_skills(make_plan()) == first.resolve()
+
+    def test_a_hook_of_a_skill_in_a_later_root_runs(self, tmp_path, monkeypatch):
+        """The hook's working directory is the runtime root. With the first
+        root listed missing, the skill was found in the second and its hook
+        then failed to start: `FileNotFoundError`, for the first."""
+        missing = tmp_path / ".claude" / "skills"
+        present = tmp_path / ".codex" / "skills"
+        scripts = make_skill(present, "wfroot-hooked") / "scripts"
+        scripts.mkdir()
+        (scripts / "pre.py").write_text("import os\nprint(os.getcwd())\n", encoding="utf-8")
+        monkeypatch.setenv("WF_SKILLS_ROOT", os.pathsep.join([str(missing), str(present)]))
+        plan = make_plan()
+        plan.options = {"skill_hook_auth": "allow-all"}
+
+        result = _run_skill_hook(
+            skill_name="wfroot-hooked",
+            hook_name="pre",
+            phase="pre",
+            actor_name="a",
+            payload={},
+            response_text=None,
+            plan=plan,
+            timeout_ms=10_000,
+        )
+
+        assert result["ran"] and result["exitCode"] == 0, result
+        assert Path(result["stdout"].strip()) == present.resolve()
+
+    @pytest.mark.skipif(os.pathsep != ":", reason="a POSIX path may hold `:`")
+    def test_one_directory_whose_path_holds_the_separator_is_one_root(self, tmp_path, monkeypatch):
+        """`skills:v2` was a valid setting before the variable took a list."""
+        root = tmp_path / "skills:v2"
+        skill_dir = make_skill(root, "wfroot-versioned")
+        monkeypatch.setenv("WF_SKILLS_ROOT", str(root))
+
+        plan = make_plan()
+
+        assert _resolve_skill_dir("wfroot-versioned", plan) == skill_dir
+        assert _runtime_root_for_skills(plan) == root.resolve()
+
     def test_blank_entries_are_ignored(self, tmp_path, monkeypatch):
         root = tmp_path / "skills"
         skill_dir = make_skill(root, "wfroot-padded")
@@ -177,6 +235,22 @@ class TestSkillNameTraversal:
 
         with pytest.raises(ValueError):
             _resolve_skill_dir(name, make_plan())
+
+    def test_a_name_that_joins_outside_its_root_finds_nothing(self, tmp_path, monkeypatch):
+        """The second line of defence, with the first taken away. The name
+        check refuses every such name on POSIX; a Windows drive-relative one
+        (`d:bar`) passes it and joins outside the root, as an absolute path
+        does here. The containment test in `_resolve_skill_dir` is what stops
+        it, and no other test reaches that line."""
+        import wfpy._agent_prompt_runtime as prompt_runtime
+
+        root = tmp_path / "skills"
+        root.mkdir()
+        outside = make_skill(tmp_path / "elsewhere", "wfroot-outside")
+        monkeypatch.setenv("WF_SKILLS_ROOT", str(root))
+        monkeypatch.setattr(prompt_runtime, "_validate_skill_name", lambda name: None)
+
+        assert _resolve_skill_dir(str(outside), make_plan()) is None
 
 
 class TestAncestorWalk:

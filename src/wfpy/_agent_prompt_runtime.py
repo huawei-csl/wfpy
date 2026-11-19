@@ -30,12 +30,17 @@ def _explicit_skills_roots(cwd: Path | None = None) -> list[Path]:
     The variable holds one directory or several separated by `os.pathsep`
     (`:` on POSIX, `;` on Windows), like `PATH`. A single directory — the
     only form the variable used to take — parses to a one-element list, so
-    an existing setting keeps behaving exactly as before. A relative entry
-    is read from `cwd`, the run's working directory (this process's when
-    omitted).
+    an existing setting keeps behaving exactly as before. That includes a
+    directory whose own path holds the separator (`skills:v2`): a value that
+    is itself a directory is that one directory, and is not split. A
+    relative entry is read from `cwd`, the run's working directory (this
+    process's when omitted).
     """
 
     raw = os.environ.get("WF_SKILLS_ROOT", "")
+    whole = _from_cwd(Path(raw.strip()).expanduser(), cwd)
+    if os.pathsep in raw and whole.is_dir():
+        return [whole]
     roots: list[Path] = []
     for entry in raw.split(os.pathsep):
         entry = entry.strip()
@@ -250,7 +255,14 @@ def _runtime_root_for_skills(plan: Any, cwd: Path | None = None) -> Path:
         # of a skill hook — so when `WF_SKILLS_ROOT` names several, the first
         # (highest-priority) one is it. Every root it names is still searched
         # directly by `_skill_search_roots()`.
-        return explicit[0].resolve()
+        #
+        # The first one that exists, that is. A list names the folders of
+        # several tools and a project seldom has them all; a hook cannot run
+        # in a directory that is not there (`subprocess` raises), and the walk
+        # from one finds nothing. With none present it is the first, as a
+        # single missing directory always was.
+        present = next((root for root in explicit if root.is_dir()), explicit[0])
+        return present.resolve()
     return _workflow_dir(plan, cwd)
 
 

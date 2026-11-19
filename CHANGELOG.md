@@ -9,15 +9,19 @@ All notable changes to wfpy are documented here. The format follows
 ### Added
 - `WF_SKILLS_ROOT` names several skill directories, separated by
   `os.pathsep`, searched in the order written; a single directory still
-  means what it always did. A skill name may not hold a path separator, so
+  means what it always did, one whose own path holds the separator
+  included (a value that is itself a directory is not split). A skill name
+  may not hold a path separator, so
   a skill nested inside another collection
   (`pypto-op-perf-tune/tune-swimlane`) is only reachable when its own
   directory is a root, which one value could not say while also naming the
   collection around it. It also lets an operator point wfpy at the skill
   directories of several tools, wherever they keep them. The first
-  directory listed stays the runtime root: the base of the walk up the tree
-  for `.wf/skills` and `.claude/skills`, and the directory a skill hook runs
-  in.
+  directory listed that exists is the runtime root: the base of the walk up
+  the tree for `.wf/skills`, `.claude/skills` and `.claude/agents`, and the
+  directory a skill hook runs in. The order therefore decides more than
+  priority: a project's own `.wf/skills` and `.claude/agents` are found
+  only when the walk starts in that project, so its directory goes first.
 - A skill installed for another agent tool is found. A skill is the same
   `SKILL.md` folder whichever tool installed it, but wfpy looked only in its
   own and Claude's folders, so a skill installed for Codex or OpenCode was
@@ -87,6 +91,30 @@ All notable changes to wfpy are documented here. The format follows
   takes. `createNode` takes `expressions`, written verbatim.
 
 ### Fixed
+- An ACP agent runs on `agent-client-protocol` 1.0. That release removed the
+  `text_block` helper the transport built its prompt with, and the `agent`
+  extra accepted any SDK from 0.10 up, so a fresh `wfpy[agent]` install failed
+  at the first prompt of every ACP agent (`ImportError: cannot import name
+  'text_block' from 'acp'`). The extra now requires `>=1.0,<2`. With wfpy
+  1.1.0 and earlier, `pip install "agent-client-protocol<1"` restores it.
+- A run on the Claude connector under its new name
+  (`@agentclientprotocol/claude-agent-acp`) no longer prints a traceback for
+  each `auth/status_update` the connector sends: a notification the ACP SDK
+  has no route for is dropped, as a notification a client does not know is.
+- An agent inside a nested workflow receives the run's options. `run()` set
+  them on the top plan only, so such an agent was invoked without the ACP
+  connector and its stuck window, the tool and skill-hook policies, the
+  elicitation handler and the `source_path` its workspace connectors are found
+  from. One connection to the elicit socket serves every plan of the run.
+- The validators a port declares run inside a nested workflow; they were
+  skipped there in silence. A nested workflow is checked with the run's
+  validators and, over them, those registered beside its own file. **This
+  changes what a run does:** a nested output that fails its validators now
+  fails the run under the default `enforce` mode, as it did at the top level.
+- An output that fails validation is not delivered. The validators ran after
+  the output was put in its queue, so a failed run's checkpoint held the
+  rejected output beside the input given back, and a resume delivered both the
+  rejected output and the accepted one.
 - A skill whose directory is a symlink is found. The lookup resolved
   `<root>/<name>` before checking that it was still under `<root>`, and a
   symlink resolves elsewhere, so every skill installed into `.claude/skills`
