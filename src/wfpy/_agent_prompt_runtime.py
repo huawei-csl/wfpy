@@ -511,21 +511,34 @@ def _claude_agent_search_roots(plan: Any, cwd: Path | None = None) -> list[Path]
     return [root.path for root in _claude_agent_lookup_roots(plan, cwd)]
 
 
-def _validate_skill_name(skill_name: str) -> None:
-    """Validate user-provided skill names used for filesystem lookup."""
+def _validate_skill_name(skill_name: str, what: str = "Skill name") -> None:
+    """Validate user-provided skill names used for filesystem lookup.
+
+    The same rule holds for an agent preset's name and a hook's, which name
+    a file or folder the same way; `what` names the kind in the error. A
+    name that starts with `.` names a hidden entry, which is no skill: the
+    `.git` of a skills folder kept in git, or Codex's `.system`, a root of
+    its own. Codex and Claude Code skip hidden entries, `wfpy skills` does
+    not list them, and so a run does not take one either.
+    """
 
     if not skill_name or not skill_name.strip():
-        raise ValueError("Skill name is empty.")
+        raise ValueError(f"{what} is empty.")
     if "/" in skill_name or "\\" in skill_name:
-        raise ValueError("Skill name must not include path separators.")
+        raise ValueError(f"{what} must not include path separators.")
     if ".." in skill_name:
-        raise ValueError("Skill name must not include '..'.")
+        raise ValueError(f"{what} must not include '..'.")
+    if skill_name.startswith("."):
+        raise ValueError(
+            f"{what} must not start with '.': '{skill_name}' names a hidden entry, which"
+            " is no skill, preset or hook."
+        )
 
 
 def _validate_claude_agent_name(agent_name: str) -> None:
     """Validate Claude agent names used for filesystem lookup."""
 
-    _validate_skill_name(agent_name)
+    _validate_skill_name(agent_name, "Agent preset name")
 
 
 def _find_skill(skill_name: str, roots: Iterable[Path]) -> tuple[Path, Path] | None:
@@ -541,8 +554,8 @@ def _find_skill(skill_name: str, roots: Iterable[Path]) -> tuple[Path, Path] | N
         # every symlinked install.
         #
         # Nothing is lost by testing it unresolved. `_validate_skill_name()`
-        # already rejects path separators and `..`, so `root / skill_name` is
-        # a direct child of `root` (or, for the name `.`, `root` itself). What
+        # already rejects path separators, `..` and a leading `.` (so `.`
+        # too), so `root / skill_name` is a direct child of `root`. What
         # remains is a Windows drive-relative name like `d:bar`, which passes
         # that validation and does join outside `root` — this check is what
         # catches it. Do not reinstate the `.resolve()` before it.
@@ -988,7 +1001,7 @@ def _resolve_skill_hook_script(
     """Resolve a skill hook script by convention under `<skill>/scripts`."""
 
     _validate_skill_name(skill_name)
-    _validate_skill_name(hook_name)
+    _validate_skill_name(hook_name, "Hook name")
     skill_dir = _resolve_skill_dir(skill_name, plan)
     if skill_dir is None:
         return None

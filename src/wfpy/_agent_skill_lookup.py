@@ -33,6 +33,7 @@ from wfpy._agent_prompt_runtime import (
     _runtime_root_for_skills,
     _skill_hook_name,
     _skill_hook_script_in,
+    _validate_claude_agent_name,
     _validate_skill_name,
 )
 
@@ -99,7 +100,7 @@ def agent_skill_lookup(file_path: str, cwd: str | None = None) -> dict[str, Any]
     presets: list[dict[str, Any]] = []
     for name in _names_in(preset_paths, ".md"):
         try:
-            _validate_skill_name(name)
+            _validate_claude_agent_name(name)
         except ValueError:
             continue
         found_preset = _find_claude_agent(name, preset_paths)
@@ -132,9 +133,10 @@ def _names_in(roots: list[Path], suffix: str = "") -> list[str]:
     `suffix` taken off an entry that has it (a preset is `<name>.md`, or a
     directory `<name>` for `<name>/AGENT.md`).
 
-    A hidden entry is no name to offer: the `.git` of a skills folder kept
-    in git, Codex's `.system` (a root of its own). Codex does not take a
-    hidden folder as a skill either.
+    A hidden entry (the `.git` of a skills folder kept in git, Codex's
+    `.system`, a root of its own) is in the list, and goes with every name a
+    run refuses: a caller checks each name as the run does
+    (`_validate_skill_name`), which refuses one that starts with `.`.
     """
 
     names: dict[str, None] = {}
@@ -144,8 +146,6 @@ def _names_in(roots: list[Path], suffix: str = "") -> list[str]:
         except OSError:
             continue
         for entry in entries:
-            if entry.startswith("."):
-                continue
             names.setdefault(
                 entry[: -len(suffix)] if suffix and entry.endswith(suffix) else entry, None
             )
@@ -207,7 +207,7 @@ def _hook(skill_dir: Path, hook: str) -> dict[str, Any]:
     """A declared hook, with the script a run would execute or why none."""
 
     try:
-        _validate_skill_name(hook)
+        _validate_skill_name(hook, "Hook name")
     except ValueError as exc:
         return {"name": hook, "script": None, "problem": str(exc)}
     script = _skill_hook_script_in(skill_dir, hook)
@@ -229,7 +229,7 @@ def _hook_scripts(skill_dir: Path) -> list[str]:
         if not dot or suffix not in ("py", "sh"):
             continue
         try:
-            _validate_skill_name(stem)
+            _validate_skill_name(stem, "Hook name")
         except ValueError:
             continue
         if _skill_hook_script_in(skill_dir, stem) is not None:

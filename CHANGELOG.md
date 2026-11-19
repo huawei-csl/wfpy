@@ -204,6 +204,12 @@ All notable changes to wfpy are documented here. The format follows
 - The live files go only after the run's record is in `run-log.jsonl`, on
   success as on failure. They went before it, and in between a reader found
   only the previous run.
+- A run refuses a skill, agent preset or hook name that starts with `.`,
+  saying why. `wfpy skills` does not list a hidden entry, as Codex and
+  Claude Code skip one, but `skill=".draft"` loaded
+  `.claude/skills/.draft`, which no list offers, and `skill=".system"` took
+  Codex's `.system` root for a skill. The list now leaves such a name out
+  by the same check, so the two cannot differ.
 
 ## [1.1.0] — 2026-10-14
 
