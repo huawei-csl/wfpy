@@ -35,6 +35,16 @@ All notable changes to wfpy are documented here. The format follows
   takes. `createNode` takes `expressions`, written verbatim.
 
 ### Fixed
+- An ACP agent runs on `agent-client-protocol` 1.0. That release removed the
+  `text_block` helper the transport built its prompt with, and the `agent`
+  extra accepted any SDK from 0.10 up, so a fresh `wfpy[agent]` install failed
+  at the first prompt of every ACP agent (`ImportError: cannot import name
+  'text_block' from 'acp'`). The extra now requires `>=1.0,<2`. With wfpy
+  1.1.0 and earlier, `pip install "agent-client-protocol<1"` restores it.
+- A run on the Claude connector under its new name
+  (`@agentclientprotocol/claude-agent-acp`) no longer prints a traceback for
+  each `auth/status_update` the connector sends: a notification the ACP SDK
+  has no route for is dropped, as a notification a client does not know is.
 - A run whose workflow holds a sub-workflow taking no input ends. The
   sub-workflow node had its inputs whenever it had none, so after its one
   firing the scheduler fired it again forever, each empty re-run counted as
