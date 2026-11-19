@@ -471,6 +471,41 @@ Prompt composition order:
 
 Missing enabled skill files are runtime errors.
 
+A skill's hooks are named in its front matter (`hooks:` with `pre:` and
+`post:`) and run from `scripts/<hook>.py` (with `python3`) or
+`scripts/<hook>.sh` (with `bash`) in the skill's folder, before and after
+the agent's turn, with `use_skill_hooks=True`; a hook runs in the runtime
+root and reads the firing as JSON on stdin. Whether one runs is
+`--skill-hook-auth` (`WF_SKILL_HOOK_AUTH`): `deny-all`, `allow-all`, or
+`policy`, the default, which runs a hook the policy file
+(`--skill-hook-policy`, `WF_SKILL_HOOK_POLICY`) approves and no other:
+
+```json
+{
+  "allow": [
+    "lint:pre",
+    {"skill": "review", "hook": "pre", "interpreter": "sh",
+     "dir": "~/.claude/skills/review"}
+  ]
+}
+```
+
+An entry `"<skill>:<hook>"` or `"<skill>:<hook>:<interpreter>"` approves the
+hook by name, in whichever folder the name resolves to. Which folder that is
+depends on the working directory, the variables and what a cloned repository
+holds, so such an entry also runs the `scripts/pre.sh` of a repository's own
+`.claude/skills/review`. An object entry may name the folder it approves,
+`dir`: read from the policy file's folder, with `~` expanded, and compared,
+links resolved, with the skill folder the run resolved. It approves that
+folder's hook and no other. `interpreter` (`python` or `sh`) is optional in
+both forms. `"requireDir": true`, beside `allow`, makes the entries that name
+no folder count for nothing, as `lint:pre` would above. An object entry with a key wfpy does
+not read, or a value that is not text, is an error rather than an approval
+by name. Why a hook ran or did not names the skill folder, and the hook's
+record in the firing's debug data (`WF_AGENT_DEBUG`) gives it as `skillDir`.
+`wfpy skills --json` gives each skill's folder as `dir`: the folder an
+approval names.
+
 ## Claude agent format compatibility (draft)
 
 wfpy agents can also reference Claude-style markdown agent profiles by name:

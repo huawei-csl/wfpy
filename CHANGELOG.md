@@ -7,6 +7,20 @@ All notable changes to wfpy are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- A skill-hook policy entry may name the skill folder it approves:
+  `{"skill": "review", "hook": "pre", "interpreter": "sh", "dir": "<path>"}`,
+  `interpreter` optional, `dir` read from the policy file's folder with `~`
+  expanded and compared, links resolved, with the folder the run resolved
+  the name to. An entry `review:pre` approves the hook of whichever
+  `review` a run finds, and which one that is depends on the working
+  directory, the variables and what a cloned repository holds: a
+  repository's own `.claude/skills/review` ran its `scripts/pre.sh` under
+  an approval given for another folder. Text entries keep approving by
+  name; `"requireDir": true` makes them, and object entries without `dir`,
+  count for nothing. An object entry with a key wfpy does not read is an
+  error, not an approval by name. The reason a hook ran or was refused
+  names its skill folder, and the hook's debug record gives it as
+  `skillDir`. The README now describes hooks and the policy file.
 - `WF_SKILLS_ROOT` names several skill directories, separated by
   `os.pathsep`, searched in the order written; a single directory still
   means what it always did, one whose own path holds the separator

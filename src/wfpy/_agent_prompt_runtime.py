@@ -955,31 +955,144 @@ def _load_skill_hook_policy(path_str: str) -> dict[str, Any]:
         raise RuntimeError(f"Cannot load skill hook policy '{path_str}': {exc}") from exc
 
 
+SKILL_HOOK_POLICY_ENTRY_KEYS = ("skill", "hook", "interpreter", "dir")
+"""The keys an object entry of a skill-hook policy's `allow` may hold."""
+
+
+class HookApproval(NamedTuple):
+    """An object entry of a skill-hook policy's `allow`, read."""
+
+    skill: str
+    hook: str
+    interpreter: str | None
+    """The interpreter it approves (`python`, `sh`); None for either."""
+
+    dir: Path | None
+    """The skill folder it approves, resolved; None for an entry that
+    approves the hook by name, in whichever folder the name resolves to."""
+
+    def approves(self, skill: str, hook: str, interpreter: str) -> bool:
+        """Whether it approves the hook `hook` of a skill named `skill`, run
+        with `interpreter`, in some folder."""
+        return self.skill == skill and self.hook == hook and self.interpreter in (None, interpreter)
+
+
+class SkillHookPolicy(NamedTuple):
+    """A skill-hook policy file, read (`_read_skill_hook_policy`)."""
+
+    names: frozenset[str]
+    """Its text entries, `"<skill>:<hook>"` or `"<skill>:<hook>:<interpreter>"`:
+    each approves a hook by name, in whichever folder the name resolves to."""
+
+    approvals: tuple[HookApproval, ...]
+    """Its object entries."""
+
+    require_dir: bool
+    """`requireDir`: an entry that names no folder approves nothing."""
+
+
+def _read_skill_hook_policy(policy: Any, policy_path: str) -> SkillHookPolicy:
+    """The skill-hook policy `policy`, loaded from `policy_path`.
+
+    `allow` holds text entries, `"<skill>:<hook>"` or
+    `"<skill>:<hook>:<interpreter>"`, matched whole as they always were, and
+    object entries with `skill`, `hook`, and optionally `interpreter` and
+    `dir`. `dir` names the skill folder the entry approves: read from the
+    policy file's folder, `~` expanded, and resolved, so a link and the
+    folder it points at are one. An object entry the reader cannot take is
+    an error, not an approval by name: a misspelt `dir` would approve the
+    hook in every folder. Any other entry (a number, `null`) approves
+    nothing, as before objects were read.
+    """
+
+    def unread(why: str) -> RuntimeError:
+        return RuntimeError(f"Cannot read skill hook policy '{policy_path}': {why}")
+
+    if not isinstance(policy, dict):
+        raise unread("it is not a JSON object")
+    require_dir = policy.get("requireDir", False)
+    if not isinstance(require_dir, bool):
+        raise unread("`requireDir` is not true or false")
+    allow = policy.get("allow", [])
+    if not isinstance(allow, list):
+        raise unread("`allow` is not a list")
+    base = Path(policy_path).absolute().parent
+    names: set[str] = set()
+    approvals: list[HookApproval] = []
+    for entry in allow:
+        if isinstance(entry, str):
+            names.add(entry)
+            continue
+        if not isinstance(entry, dict):
+            continue
+        unknown = sorted(str(key) for key in entry if key not in SKILL_HOOK_POLICY_ENTRY_KEYS)
+        if unknown:
+            raise unread(f"entry {entry!r} holds what it cannot read: {', '.join(unknown)}")
+        for key in SKILL_HOOK_POLICY_ENTRY_KEYS:
+            value = entry.get(key)
+            required = key in ("skill", "hook")
+            if (value is None and required) or (
+                value is not None and (not isinstance(value, str) or not value.strip())
+            ):
+                raise unread(f"entry {entry!r} has no {key} as text")
+        folder: Path | None = None
+        if entry.get("dir") is not None:
+            try:
+                folder = (base / Path(entry["dir"]).expanduser()).resolve()
+            except (OSError, RuntimeError) as exc:
+                raise unread(f"entry {entry!r}: {exc}") from exc
+        approvals.append(
+            HookApproval(entry["skill"], entry["hook"], entry.get("interpreter"), folder)
+        )
+    return SkillHookPolicy(frozenset(names), tuple(approvals), require_dir)
+
+
 def _authorize_skill_hook(
     options: dict[str, Any],
     skill_name: str,
     hook_name: str,
     interpreter: str,
+    skill_dir: Path,
 ) -> tuple[bool, str]:
-    """Authorize running a skill hook script under configured policy."""
+    """Authorize running a hook script of the skill folder `skill_dir`, the
+    folder the run resolved `skill_name` to, under the configured mode.
 
+    Under `policy`, an entry that names a folder (`_read_skill_hook_policy`)
+    approves the hook of that folder and no other. Which folder a name
+    resolves to depends on the working directory, the variables and what a
+    cloned repository holds, so an entry that names none approves the hook
+    of whichever folder the run finds; `requireDir` makes such entries count
+    for nothing. The reason names the folder, as the run's record does
+    (`_run_skill_hook`).
+    """
+
+    where = skill_dir.resolve()
     mode = _normalize_skill_hook_auth_mode(options)
     if mode == "deny-all":
-        return False, "mode=deny-all"
+        return False, f"mode=deny-all, for {where}"
     if mode == "allow-all":
-        return True, "mode=allow-all"
+        return True, f"mode=allow-all, for {where}"
     policy_path = options.get("skill_hook_policy") or os.environ.get("WF_SKILL_HOOK_POLICY")
     if not policy_path:
-        return False, "mode=policy but no policy path provided"
-    policy = _load_skill_hook_policy(policy_path)
-    allow = set(str(v) for v in policy.get("allow", []))
-    keys = {
-        f"{skill_name}:{hook_name}",
-        f"{skill_name}:{hook_name}:{interpreter}",
-    }
-    if any(k in allow for k in keys):
-        return True, f"allowed by policy '{policy_path}'"
-    return False, f"hook '{skill_name}:{hook_name}' not listed in policy '{policy_path}'"
+        return False, f"mode=policy but no policy path provided, for {where}"
+    policy = _read_skill_hook_policy(_load_skill_hook_policy(policy_path), policy_path)
+    named = [a for a in policy.approvals if a.approves(skill_name, hook_name, interpreter)]
+    by_name = bool(
+        policy.names & {f"{skill_name}:{hook_name}", f"{skill_name}:{hook_name}:{interpreter}"}
+    ) or any(approval.dir is None for approval in named)
+    hook = f"hook '{skill_name}:{hook_name}' of {where}"
+    if any(approval.dir == where for approval in named):
+        return True, f"allowed by policy '{policy_path}' by folder, for {where}"
+    if by_name and not policy.require_dir:
+        return True, f"allowed by policy '{policy_path}' by name, for {where}"
+    if by_name:
+        return False, (
+            f"{hook} is approved in policy '{policy_path}' by name only, which"
+            " requireDir makes count for nothing"
+        )
+    if named:
+        return False, f"{hook} is approved in policy '{policy_path}' for other folders only"
+    return False, f"{hook} not listed in policy '{policy_path}'"
 
 
 def _resolve_skill_hook_script(
@@ -1020,24 +1133,35 @@ def _run_skill_hook(
     plan: Any,
     timeout_ms: int,
 ) -> dict[str, Any]:
-    """Execute one skill hook script and return debug metadata."""
+    """Execute one skill hook script and return debug metadata.
 
-    resolved = _resolve_skill_hook_script(skill_name, hook_name, plan)
-    if resolved is None:
+    The metadata names the skill folder the hook's script is taken from,
+    `skillDir`, the one its approval is checked against.
+    """
+
+    _validate_skill_name(skill_name)
+    _validate_skill_name(hook_name)
+    skill_dir = _resolve_skill_dir(skill_name, plan)
+    resolved = _skill_hook_script_in(skill_dir, hook_name) if skill_dir is not None else None
+    if skill_dir is None or resolved is None:
         return {
             "ran": False,
             "reason": "script-not-found",
             "phase": phase,
             "hook": hook_name,
+            **({"skillDir": str(skill_dir)} if skill_dir is not None else {}),
         }
     script_path, interpreter = resolved
-    allowed, reason = _authorize_skill_hook(plan.options, skill_name, hook_name, interpreter)
+    allowed, reason = _authorize_skill_hook(
+        plan.options, skill_name, hook_name, interpreter, skill_dir
+    )
     if not allowed:
         return {
             "ran": False,
             "reason": f"denied: {reason}",
             "phase": phase,
             "hook": hook_name,
+            "skillDir": str(skill_dir),
             "script": str(script_path),
             "interpreter": interpreter,
         }
@@ -1079,6 +1203,7 @@ def _run_skill_hook(
             "ran": True,
             "phase": phase,
             "hook": hook_name,
+            "skillDir": str(skill_dir),
             "script": str(script_path),
             "interpreter": interpreter,
             "exitCode": proc.returncode,
@@ -1091,6 +1216,7 @@ def _run_skill_hook(
             "ran": True,
             "phase": phase,
             "hook": hook_name,
+            "skillDir": str(skill_dir),
             "script": str(script_path),
             "interpreter": interpreter,
             "timeoutMs": timeout_ms,
