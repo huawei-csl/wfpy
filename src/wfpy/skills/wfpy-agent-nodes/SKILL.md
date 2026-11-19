@@ -152,10 +152,14 @@ class Propose:
   joined its output with them fired once too. A `loop()` body is the same: over three
   items, one firing. An agent that has to answer each token needs that token on an input
   port.
+- The count is 1 or more. Writing 0 on such an agent is refused when the class is made,
+  since the agent would never fire: `TypeError: Propose: fireable_without_input=0 on an
+  agent with no input port.` Leave the option out for one firing.
 - A run that is resumed does not give the firing again: the checkpoint carries what is left.
 - On an agent that **has** input ports the option means something else: how many times it
   may fire with nothing on them, besides once for each token. With
-  `fireable_without_input=2` and one token it fires three times.
+  `fireable_without_input=2` and one token it fires three times. There 0 is allowed, and is
+  what the agent says by default.
 
 ## Never trust the output
 

@@ -912,6 +912,23 @@ class TestAgents:
         assert run(wf, {}, out_dir=tmp_path) == {"Out": ["k"] * times}
         assert len(firings) == times
 
+    def test_an_agent_with_no_input_port_cannot_say_zero_and_one_with_a_port_can(self):
+        message = r"^Propose: fireable_without_input=0 on an agent with no input port\."
+        with pytest.raises(TypeError, match=message):
+
+            @agent(prompt="Propose.", transport="mock", fireable_without_input=0)
+            class Propose:
+                class Ports:
+                    Candidate = Port[str](direction="out")
+
+        @agent(prompt="Answer.", transport="mock", fireable_without_input=0)
+        class Answer:
+            class Ports:
+                In = Port[str](direction="in")
+                Out = Port[str](direction="out")
+
+        assert Answer._wfpy_meta.agent_spec.fireable_without_input == 0
+
     def test_that_firing_is_for_the_run_not_for_each_token_around_it(self, tmp_path, firings):
         @agent(prompt="Tick.", transport="mock", mock_outputs={"Out": "tick"})
         class Ticker:
