@@ -410,6 +410,55 @@ class TestAgentDecorator:
         assert spec.model is None
         assert _resolve_provider_model(spec) == tuple(DEFAULT_HTTP_MODEL.split("/", 1))
 
+    @pytest.mark.parametrize(
+        "given",
+        [
+            {"fireable_without_input": 0},
+            {"fireableWithoutInput": 0},
+            {"fireable_without_input": -1},
+            {"fireable_without_input": 3, "fireableWithoutInput": 0},  # camelCase wins
+        ],
+    )
+    def test_an_agent_with_no_input_port_cannot_be_told_to_fire_no_times(self, given):
+        """It fires in no other way than out of its count, so 0 is an agent
+        that never fires. The message names the option as it was written."""
+        written = "fireableWithoutInput" if "fireableWithoutInput" in given else next(iter(given))
+        message = rf"^Idle: {written}={given[written]} on an agent with no input port\."
+
+        with pytest.raises(TypeError, match=message):
+
+            @agent(prompt="p", **given)
+            class Idle:
+                class Ports:
+                    Out = Port[str](direction="out")
+
+    def test_an_agent_with_no_input_port_may_leave_the_count_out_or_give_one(self):
+        @agent(prompt="p")
+        class Once:
+            class Ports:
+                Out = Port[str](direction="out")
+
+        @agent(prompt="p", fireable_without_input=0, fireableWithoutInput=2)
+        class Twice:
+            class Ports:
+                Out = Port[str](direction="out")
+
+        # No count is 0 in the spec, and the runtime fires such an agent once.
+        assert Once._wfpy_meta.agent_spec.fireable_without_input == 0
+        assert Twice._wfpy_meta.agent_spec.fireable_without_input == 2
+
+    def test_an_agent_with_an_input_port_may_say_zero(self):
+        """There the count is the firings it makes with nothing on its inputs,
+        and none is what an agent that waits for its token says."""
+
+        @agent(prompt="p", fireable_without_input=0)
+        class Waits:
+            class Ports:
+                In = Port[str](direction="in")
+                Out = Port[str](direction="out")
+
+        assert Waits._wfpy_meta.agent_spec.fireable_without_input == 0
+
     def test_agent_stateful(self):
 
         @agent(prompt="Chat.", stateful=True, context_budget=30)

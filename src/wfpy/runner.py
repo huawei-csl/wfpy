@@ -403,6 +403,8 @@ def _agent_fire_budget(meta: Any) -> int:
     `@agent(fireable_without_input=N)` says it. An agent that declares no input
     port can fire in no other way, so N is all its firings; when the decorator
     gives no count it fires once, as the `@source` at the head of a graph does.
+    No count is 0 in the spec. The decorator refuses a 0 that was written for
+    such an agent, so 0 here never stands for "do not fire".
     """
     count = max(0, int(meta.agent_spec.fireable_without_input))
     if not meta.input_ports:

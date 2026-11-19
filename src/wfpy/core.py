@@ -1009,7 +1009,7 @@ def agent(
     provider: str | None = None,
     endpoint: str | None = None,
     timeout_ms: int = 120_000,
-    fireable_without_input: int = 0,
+    fireable_without_input: int | None = None,
     stateful: bool = False,
     ask_user: bool = False,
     ask_permissions: bool = False,
@@ -1101,7 +1101,8 @@ def agent(
                 Out = Port[File](direction="out", ext=".cpp")
 
     An agent that declares no input port fires once in a run, and
-    ``fireable_without_input`` says how many times instead::
+    ``fireable_without_input`` says how many times instead. That is 1 or more:
+    0 is refused when the class is made, since the agent would never fire::
 
         @agent(prompt="Propose a kernel.", fireable_without_input=3)
         class Propose:
@@ -1153,6 +1154,21 @@ def agent(
             askUser=askUser,
         )
 
+        # How many times the agent may fire with nothing on its inputs; None
+        # when the decorator does not say. An agent with no input port fires
+        # in no other way, so a count below 1 is one that never fires: refuse
+        # it here, where the person who wrote it reads the message.
+        fire_count = normalized["fireable_without_input"]
+        if fire_count is not None and fire_count < 1 and not meta.input_ports:
+            written = (
+                "fireable_without_input" if fireableWithoutInput is None else "fireableWithoutInput"
+            )
+            raise TypeError(
+                f"{klass.__name__}: {written}={fire_count} on an agent with no input port. "
+                "The count is how many times such an agent fires, so it is 1 or more; "
+                "leave it out and the agent fires once."
+            )
+
         server_name_filters, inline_configs = _parse_mcp_configs(
             mcp_servers, mcp_server_configs, mcpServers, mcpServerConfigs
         )
@@ -1195,7 +1211,7 @@ def agent(
             provider=provider,
             endpoint=endpoint,
             timeout_ms=normalized["timeout_ms"],
-            fireable_without_input=normalized["fireable_without_input"],
+            fireable_without_input=fire_count or 0,
             stateful=stateful,
             ask_user=normalized["ask_user"],
             ask_permissions=normalized["ask_permissions"],

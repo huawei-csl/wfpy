@@ -3574,7 +3574,7 @@ class TestStepAgentBehavior:
         assert _step_agent(actor1, tmp_path, plan, verbose=False) is False
         assert _step_agent(actor2, tmp_path, plan, verbose=False) is True
 
-    @pytest.mark.parametrize(("count", "firings"), [(None, 1), (0, 1), (1, 1), (3, 3)])
+    @pytest.mark.parametrize(("count", "firings"), [(None, 1), (1, 1), (3, 3)])
     def test_an_agent_with_no_input_port_fires_as_often_as_its_decorator_says(
         self,
         count,

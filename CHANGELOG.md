@@ -315,8 +315,10 @@ All notable changes to wfpy are documented here. The format follows
   was never read. A run with one did not end, and on a real transport each
   firing was a model turn. The count is for the run: the agent fires once
   inside a child workflow or a loop body that several tokens pass through,
-  and a resume does not give the firing again. An agent that has input
-  ports is unchanged.
+  and a resume does not give the firing again. On such an agent the count
+  is 1 or more: `fireable_without_input=0` is refused when the class is
+  made (`TypeError`), since the agent would never fire. An agent that has
+  input ports is unchanged, and may say 0.
 
 ## [1.1.0] — 2026-10-14
 
