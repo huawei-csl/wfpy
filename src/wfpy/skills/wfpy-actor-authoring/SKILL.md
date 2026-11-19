@@ -134,11 +134,13 @@ ends without an error and without that action ever firing.
 
 `wfpy/types.py` says a `File` value is "simply the resolved path string", but that is only
 true of tokens the runtime *materialises*. A `@source` emits its configured `path` as the
-`File` **dataclass**, and `Path(token)` on it raises:
+`File` **dataclass**, and `Path(token)` on it raises (the first wording from Python 3.12,
+the second before it):
 
 ```
 TypeError: argument should be a str or an os.PathLike object where
 __fspath__ returns a str, not 'File'
+TypeError: expected str, bytes or os.PathLike object, not File
 ```
 
 This is deliberate: the runtime recognises a re-emitted configured path and leaves it

@@ -453,7 +453,8 @@ class TestTheOtherDecorators:
         if coerce:
             assert run(wf, {}, out_dir=tmp_path / "out") == {"Out": ["body"]}
         else:
-            with pytest.raises(TypeError, match="not 'File'"):
+            # "..., not 'File'" from Python 3.12, "..., not File" before it.
+            with pytest.raises(TypeError, match=r"os\.PathLike object.*not '?File'?"):
                 run(wf, {}, out_dir=tmp_path / "out")
 
 
