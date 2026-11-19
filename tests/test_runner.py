@@ -2775,12 +2775,17 @@ class TestSkillMdSupport:
         assert "Home Skill" in prompt
         assert str(skill_dir / "SKILL.md") == meta.get("skillPath")
 
-    def test_build_effective_prompt_finds_skill_in_ancestor_example_root(self, tmp_path):
+    def test_build_effective_prompt_finds_skill_in_ancestor_example_root(
+        self, tmp_path, monkeypatch
+    ):
+        """The walk up goes as far as the project's top: here, with no git
+        repository, the directory the run is started in."""
         example_root = tmp_path / "examples" / "pto-kernels"
         workflow_dir = example_root / "tests" / "optimizer"
         skill_dir = example_root / ".wf" / "skills" / "writer"
         workflow_dir.mkdir(parents=True)
         skill_dir.mkdir(parents=True)
+        monkeypatch.chdir(example_root)
         (skill_dir / "SKILL.md").write_text("# Ancestor Skill\nBody\n", encoding="utf-8")
 
         plan = FifoPlan("x")

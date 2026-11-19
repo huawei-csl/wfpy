@@ -264,6 +264,87 @@ class TestTheAnswerIsTheRuntimes:
         assert answer["repository"] == str((tmp_path / "project").resolve())
 
 
+class TestTheProjectBoundsTheWalk:
+    def test_a_folder_above_the_project_is_neither_searched_nor_listed(self, tmp_path):
+        """`/tmp/.claude/skills`, `/tmp/.wf/skills` and `/tmp/.claude/agents`,
+        planted by someone else, are not read for a workflow in `/tmp/job`
+        started elsewhere: the answer gives the folders a run searches, and
+        they stop at the project's top, here the workflow's directory."""
+        shared_tmp = tmp_path / "tmp"
+        skill(shared_tmp / ".claude" / "skills", "planted")
+        skill(shared_tmp / ".wf" / "skills", "planted-wf")
+        (shared_tmp / ".claude" / "agents").mkdir(parents=True)
+        (shared_tmp / ".claude" / "agents" / "planted.md").write_text("Planted.\n")
+        (shared_tmp / "job").mkdir()
+        source = shared_tmp / "job" / "flow.py"
+        source.write_text("", encoding="utf-8")
+        plan = types.SimpleNamespace(source_path=str(source), work_dir=None)
+
+        answer = agent_skill_lookup(str(source))
+        roots = [Path(root["path"]) for root in answer["roots"]]
+
+        assert roots == _skill_search_roots(plan)
+        assert [Path(root["path"]) for root in answer["presetRoots"]] == (
+            _claude_agent_search_roots(plan)
+        )
+        assert answer["repository"] is None
+        assert (shared_tmp / ".claude" / "skills").resolve() not in roots
+        assert not {"planted", "planted-wf"} & set(by_name(answer["skills"]))
+        assert answer["presets"] == []
+
+    def test_the_answer_keeps_its_fields(self, tmp_path):
+        """wfpy-ide checks every field it reads: the bound changes which
+        folders are listed, not how an answer is made."""
+        project = tmp_path / "project"
+        source = workflow(project)
+        skill(project / ".claude" / "skills", "listed")
+        (project / ".claude" / "agents").mkdir(parents=True)
+        (project / ".claude" / "agents" / "listed.md").write_text("Listed.\n")
+
+        answer = agent_skill_lookup(str(source))
+
+        assert set(answer) == {
+            "workflow",
+            "cwd",
+            "runtimeRoot",
+            "repository",
+            "roots",
+            "skills",
+            "presetRoots",
+            "presets",
+        }
+        for root in answer["roots"] + answer["presetRoots"]:
+            assert set(root) == {"path", "folder", "scope"}
+        [listed] = answer["skills"]
+        assert set(listed) == {
+            "name",
+            "found",
+            "dir",
+            "root",
+            "folder",
+            "scope",
+            "skillMd",
+            "problem",
+            "description",
+            "hooks",
+            "scripts",
+            "warnings",
+        }
+        [preset] = answer["presets"]
+        assert set(preset) == {
+            "name",
+            "path",
+            "root",
+            "folder",
+            "scope",
+            "problem",
+            "description",
+            "skills",
+            "ignoredFields",
+            "warnings",
+        }
+
+
 class TestHiddenEntries:
     def test_a_hidden_entry_is_no_skill_and_no_preset(self, tmp_path, monkeypatch):
         """A skills folder kept in git has a `.git`, Codex keeps the skills it
@@ -526,6 +607,19 @@ class TestTheCommand:
         assert code == 0
         assert "in-the-table" in out
         assert f"repository: {project.resolve()}" in out
+
+    def test_a_table_outside_a_repository_says_how_far_up_the_folders_are_searched(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        project = tmp_path / "project"
+        (project / "flows").mkdir(parents=True)
+        (project / "flows" / "flow.py").write_text("", encoding="utf-8")
+        monkeypatch.chdir(project)
+
+        code, out = self.run(monkeypatch, capsys, str(project / "flows" / "flow.py"))
+
+        assert code == 0
+        assert f"repository: none (project folders searched up to {project.resolve()})" in out
 
     def test_a_file_that_is_not_there_is_an_error(self, tmp_path, monkeypatch, capsys):
         code, out = self.run(monkeypatch, capsys, "--json", str(tmp_path / "nowhere.py"))

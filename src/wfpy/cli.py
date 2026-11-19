@@ -439,6 +439,7 @@ def cmd_skills(args: argparse.Namespace) -> None:
     """
     import json as _json
 
+    from wfpy._agent_prompt_runtime import _project_top_outside_a_repository
     from wfpy._agent_skill_lookup import agent_skill_lookup
 
     if not Path(args.file).is_file():
@@ -456,7 +457,11 @@ def cmd_skills(args: argparse.Namespace) -> None:
     for preset in lookup["presets"]:
         problem = f"  ({preset['problem']})" if preset["problem"] else ""
         print(f"{preset['name']:<24} {preset['folder']:<20} {preset['path']}{problem}")
-    repository = lookup["repository"] or "none (other tools' folders: the workflow's own only)"
+    repository = lookup["repository"]
+    if repository is None:
+        workflow_dir = Path(lookup["workflow"]).parent
+        top = _project_top_outside_a_repository(workflow_dir, Path(lookup["cwd"]))
+        repository = f"none (project folders searched up to {top})"
     print(f"\nworking directory: {lookup['cwd']}  repository: {repository}")
 
 
