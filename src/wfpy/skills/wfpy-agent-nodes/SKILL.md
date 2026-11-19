@@ -149,8 +149,9 @@ class Propose:
 
 - The count is for the run, not for each token of the workflow around it. Measured: such
   an agent inside a sub-workflow that received three tokens fired once, and the node that
-  joined its output with them fired once too. An agent that has to answer each token needs
-  that token on an input port.
+  joined its output with them fired once too. A `loop()` body is the same: over three
+  items, one firing. An agent that has to answer each token needs that token on an input
+  port.
 - A run that is resumed does not give the firing again: the checkpoint carries what is left.
 - On an agent that **has** input ports the option means something else: how many times it
   may fire with nothing on them, besides once for each token. With

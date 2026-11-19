@@ -16,7 +16,20 @@ from typing import Any
 
 import pytest
 
-from wfpy import File, Port, action, agent, connect, guard, run, source, task, tool, workflow
+from wfpy import (
+    File,
+    Port,
+    action,
+    agent,
+    connect,
+    guard,
+    loop,
+    run,
+    source,
+    task,
+    tool,
+    workflow,
+)
 from wfpy.cli import _load_module
 from wfpy.graph import export_graph_json
 from wfpy.runner import _build_workflow_graph
@@ -943,6 +956,35 @@ class TestAgents:
             connect(child.Out, "Out")
 
         assert run(outer, {}, out_dir=tmp_path, max_workers=1) == {"Out": ["1:tick"]}
+        assert len(firings) == 1
+
+    def test_nor_for_each_item_of_a_loop_body(self, tmp_path, firings):
+        @agent(prompt="Tick.", transport="mock", mock_outputs={"Out": "tick"})
+        class Ticker:
+            class Ports:
+                Out = Port[str](direction="out")
+
+        @task
+        class Join:
+            class Ports:
+                Number = Port[int](direction="in")
+                Word = Port[str](direction="in")
+                Out = Port[str](direction="out")
+
+            @action(consumes={"Number": 1, "Word": 1}, produces={"Out": 1})
+            def join(self, number: int, word: str) -> str:
+                return f"{number}:{word}"
+
+        @workflow(inputs={}, outputs={"Out": str})
+        def wf() -> None:
+            items = loop([1, 2, 3])
+            with items:
+                ticker, join = Ticker(), Join()
+                connect(items.item, join.Number)
+                connect(ticker.Out, join.Word)
+                connect(join.Out, "Out")
+
+        assert run(wf, {}, out_dir=tmp_path, max_workers=1) == {"Out": ["1:tick"]}
         assert len(firings) == 1
 
     def with_skill(self, tmp_path: Path, name: str) -> Any:
