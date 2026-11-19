@@ -57,6 +57,11 @@ wfpy-sidecar-op = "wfpy.sidecar_cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+# The shipped Agent Skills are data, not modules, so they need naming here or a
+# wheel install has no skills to link.
+[tool.setuptools.package-data]
+wfpy = ["skills/**/*.md"]
+
 [tool.mypy]
 python_version = "3.10"
 strict = true

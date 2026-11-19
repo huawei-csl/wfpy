@@ -395,6 +395,31 @@ def cmd_run(args: argparse.Namespace) -> None:
             print(f"  {port_name}: {values}")
 
 
+def cmd_skills(args: argparse.Namespace) -> None:
+    """Install, locate or list the Agent Skills this wfpy ships."""
+    from wfpy.skills import SKILLS_DIR, install, install_root, print_install, shipped
+
+    skills = shipped()
+    if not skills:
+        print("this wfpy ships no skills", file=sys.stderr)
+        raise SystemExit(1)
+
+    if args.skills_command == "path":
+        print(SKILLS_DIR)
+        return
+
+    if args.skills_command == "list":
+        for skill in skills:
+            print(f"{skill.name:<26} {skill.description[:110]}")
+        return
+
+    root = install_root(args.scope, args.workspace)
+    results = install(root, skills, force=args.force)
+    print_install(root, results)
+    if any("--force" in what or "in the way" in what for _, what in results):
+        raise SystemExit(1)
+
+
 def cmd_connectors(args: argparse.Namespace) -> None:
     """List the ACP connectors a run from the workspace would see."""
     import json as _json
@@ -830,6 +855,35 @@ def main() -> None:
     connectors_parser.add_argument("--workspace", default=".", help="A path inside the workspace (default: .)")
     connectors_parser.add_argument("--json", action="store_true", help="One JSON list instead of a table")
     connectors_parser.set_defaults(func=cmd_connectors)
+
+    # ── skills ──
+    skills_parser = subparsers.add_parser(
+        "skills", help="The Agent Skills wfpy ships: install them, or say where they are"
+    )
+    skills_sub = skills_parser.add_subparsers(dest="skills_command", required=True)
+
+    skills_install = skills_sub.add_parser(
+        "install", help="Link the skills where a tool looks for them"
+    )
+    skills_install.add_argument(
+        "--scope", choices=("user", "project"), default="user",
+        help="user: ~/.claude/skills (default). project: <workspace>/.wf/skills",
+    )
+    skills_install.add_argument(
+        "--workspace", default=".", help="Workspace root for --scope project (default: .)"
+    )
+    skills_install.add_argument(
+        "--force", action="store_true", help="Replace a link that points elsewhere"
+    )
+    skills_install.set_defaults(func=cmd_skills)
+
+    skills_path = skills_sub.add_parser(
+        "path", help="Print the skills directory, to use as WF_SKILLS_ROOT"
+    )
+    skills_path.set_defaults(func=cmd_skills)
+
+    skills_list = skills_sub.add_parser("list", help="List the skills wfpy ships")
+    skills_list.set_defaults(func=cmd_skills)
 
     args = parser.parse_args()
     args.func(args)

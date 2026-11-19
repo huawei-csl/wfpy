@@ -77,6 +77,33 @@ With those releases, keep the SDK below 1.0:
 pip install "agent-client-protocol<1"
 ```
 
+## Skills for building workflows
+
+wfpy ships Agent Skills that describe how to build a wfpy workflow: the rules
+that fail silently rather than raise. `wfpy skills install` links them where a
+tool looks for them, so they reach an `@agent` in a graph and your own editor
+alike.
+
+```bash
+wfpy skills list                     # what is shipped
+wfpy skills install                  # link into ~/.claude/skills
+wfpy skills install --scope project  # or into <workspace>/.wf/skills
+wfpy skills path                     # the directory, to use as WF_SKILLS_ROOT
+```
+
+| Skill | Covers |
+|---|---|
+| `wfpy-workflow-builder` | the entry point: which skill to read, and the project layout a new project starts from |
+| `wfpy-actor-authoring` | one node: a field with a default is state not a parameter, a returned dict is a port map, `File` ports need `ext=` |
+| `wfpy-graph-composition` | wiring and nesting: boundary ports, output ports broadcast but input ports do not fan in, a loop must stop itself |
+| `wfpy-agent-nodes` | an agent in the graph: transport, the connector's model names, loading a skill and matching its inputs and outputs onto ports |
+
+The install links rather than copies, so `pip install -U wfpy` updates the
+skills in place. It keeps a link that points elsewhere unless `--force` says
+otherwise, and never deletes a real directory of the same name. A symlinked
+skill resolves on a wfpy whose containment check precedes `.resolve()`; on an
+earlier one, use `wfpy skills path` as `WF_SKILLS_ROOT` instead.
+
 ## Agent connectors (ACP)
 
 An `@agent` on the `acp` transport, and the chat in the wfpy IDE, talk to a

@@ -7,6 +7,24 @@ All notable changes to wfpy are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- wfpy ships Agent Skills for building a wfpy workflow, and `wfpy skills
+  install` links them where a tool looks for them. Four skills:
+  `wfpy-workflow-builder` (the entry point, and the project layout a new
+  project starts from), `wfpy-actor-authoring` (one node: its fields, ports
+  and actions), `wfpy-graph-composition` (wiring, nesting, and a loop that
+  terminates) and `wfpy-agent-nodes` (an agent in the graph, and the skill
+  loaded into it). They are here rather than in a package of their own
+  because they describe this code, down to behaviour that changed in a given
+  release; a skill that versions separately from what it documents drifts.
+  `wfpy skills install` links rather than copies, so upgrading wfpy updates
+  the skills in place: `--scope user` (the default) links into
+  `~/.claude/skills`, which is wfpy's last search root and the folder the
+  Claude tools read, so one link serves a workflow and an editor alike, and
+  `--scope project` into `<workspace>/.wf/skills`. A link that points
+  somewhere else is kept unless `--force` says otherwise, and a real
+  directory of that name is never deleted, with or without it. `wfpy skills
+  path` prints the directory to use as `WF_SKILLS_ROOT` where a symlinked
+  skill is not resolved, and `wfpy skills list` says what is shipped.
 - `WF_SKILLS_ROOT` names several skill directories, separated by
   `os.pathsep`, searched in the order written; a single directory still
   means what it always did, one whose own path holds the separator
