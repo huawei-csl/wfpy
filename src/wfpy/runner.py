@@ -1676,6 +1676,14 @@ def _step_agent(
     pre_hook_result: dict[str, Any] | None = None
     post_hook_result: dict[str, Any] | None = None
     hook_timeout_ms = int(plan.options.get("skill_hook_timeout_ms", 30_000))
+    # Both hooks run from the folder whose `SKILL.md` declared them, which
+    # the firing has just read: a folder the agent's turn makes, or a
+    # parallel worker's, where the name resolves first is another skill.
+    # Reading the skill either names its folder or fails, so None here means
+    # there is no skill to take a hook from.
+    hook_skill_dir = (
+        Path(skill_debug_meta["skillFolder"]) if skill_debug_meta.get("skillFolder") else None
+    )
     _mcp_available_servers: list[str] = []
     _mcp_discovered_tool_names: list[str] = []
     effective_prompt_with_runtime = effective_prompt
@@ -1684,6 +1692,7 @@ def _step_agent(
         agent_spec.use_skill
         and agent_spec.use_skill_hooks
         and skill_name
+        and hook_skill_dir is not None
         and isinstance(skill_meta, dict)
     ):
         pre_hook = _skill_hook_name(skill_meta, "pre")
@@ -1697,6 +1706,7 @@ def _step_agent(
                 response_text=None,
                 plan=plan,
                 timeout_ms=hook_timeout_ms,
+                skill_dir=hook_skill_dir,
             )
             if pre_hook_result.get("ran") and (
                 pre_hook_result.get("error") or int(pre_hook_result.get("exitCode", 0)) != 0
@@ -2407,6 +2417,7 @@ def _step_agent(
         agent_spec.use_skill
         and agent_spec.use_skill_hooks
         and skill_name
+        and hook_skill_dir is not None
         and isinstance(skill_meta, dict)
     ):
         post_hook = _skill_hook_name(skill_meta, "post")
@@ -2445,6 +2456,7 @@ def _step_agent(
                 response_text=response_text,
                 plan=plan,
                 timeout_ms=hook_timeout_ms,
+                skill_dir=hook_skill_dir,
             )
             if post_hook_result.get("ran") and (
                 post_hook_result.get("error") or int(post_hook_result.get("exitCode", 0)) != 0
