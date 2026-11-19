@@ -522,19 +522,19 @@ def _validate_skill_name(skill_name: str, what: str = "Skill name") -> None:
     Claude Code skip hidden entries, `wfpy skills` does not list them, and
     so a run does not take one either.
 
-    A name is taken without the spaces around it everywhere a run reads one
-    (`spec.skill`, `claude_agent`, a preset's `skills`, a hook in
-    `SKILL.md`), so a folder whose name has them is no name a run can
-    resolve, and this refuses it: what `wfpy skills` offers is what a run
-    takes.
+    A name is taken without the whitespace around it everywhere a run reads
+    one (`spec.skill`, `claude_agent`, a preset's `skills`, a hook in
+    `SKILL.md`), so what reaches this with whitespace around it is a name
+    read from a folder, which no run can resolve: refusing it is what keeps
+    `wfpy skills` to the names a run takes.
     """
 
     if not skill_name or not skill_name.strip():
         raise ValueError(f"{what} is empty.")
     if skill_name != skill_name.strip():
         raise ValueError(
-            f"{what} must not begin or end with a space: '{skill_name}' is read without"
-            " them, so it names no file a run finds."
+            f"{what} must not begin or end with whitespace: {skill_name!r} is read"
+            " without it, so it names no file a run finds."
         )
     if "/" in skill_name or "\\" in skill_name:
         raise ValueError(f"{what} must not include path separators.")
@@ -1022,15 +1022,24 @@ def _resolve_skill_hook_script(
 
 def _skill_hook_script_in(skill_dir: Path, hook_name: str) -> tuple[Path, str] | None:
     """A hook's script in a skill's directory: `scripts/<hook>.py`, else
-    `scripts/<hook>.sh`. `hook_name` is validated already."""
+    `scripts/<hook>.sh`. `hook_name` is validated already.
+
+    The joined name is held inside `scripts/`, as a skill's is inside its
+    root (`_find_skill`): validation leaves a Windows drive-relative name
+    such as `d:evil`, which joins outside the folder, and a hook's script
+    is executed.
+    """
 
     scripts_root = (skill_dir / "scripts").resolve()
-    py = (scripts_root / f"{hook_name}.py").resolve()
-    sh = (scripts_root / f"{hook_name}.sh").resolve()
-    if py.exists() and py.is_file():
-        return py, "python"
-    if sh.exists() and sh.is_file():
-        return sh, "sh"
+    for suffix, interpreter in ((".py", "python"), (".sh", "sh")):
+        candidate = scripts_root / f"{hook_name}{suffix}"
+        try:
+            candidate.relative_to(scripts_root)
+        except ValueError:
+            continue
+        script = candidate.resolve()
+        if script.exists() and script.is_file():
+            return script, interpreter
     return None
 
 

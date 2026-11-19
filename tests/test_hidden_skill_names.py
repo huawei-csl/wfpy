@@ -172,6 +172,32 @@ class TestAHookName:
         assert review["scripts"] == []
 
 
+class TestAHooksScriptIsInsideTheSkill:
+    def test_a_name_that_joins_outside_scripts_takes_no_script(self, tmp_path):
+        """What validation leaves is a Windows drive-relative name,
+        `d:evil`, which joins outside `scripts/` as it does outside a skills
+        root (`_find_skill`)."""
+        from wfpy._agent_prompt_runtime import _skill_hook_script_in
+
+        directory = skill(tmp_path / "root", "review")
+        (directory / "scripts").mkdir()
+        (directory / "scripts" / "pre.sh").write_text("echo ran\n", encoding="utf-8")
+        planted = directory / "scripts" / "d:evil.sh"
+        planted.write_text("echo planted\n", encoding="utf-8")
+
+        assert _skill_hook_script_in(directory, "pre") == (
+            (directory / "scripts" / "pre.sh").resolve(),
+            "sh",
+        )
+        joined = Path("d:evil.sh")
+        if joined.is_absolute() or joined.drive:
+            assert _skill_hook_script_in(directory, "d:evil") is None
+        else:
+            # On this platform the name is a plain file name: it is inside
+            # `scripts/`, and the script there is the hook's.
+            assert _skill_hook_script_in(directory, "d:evil") == (planted.resolve(), "sh")
+
+
 class TestTheListAndTheRunAgree:
     def test_a_name_with_spaces_around_it_is_refused_and_not_listed(self, tmp_path):
         """A run reads `skill=" draft "` as `draft`, so the folder
@@ -182,7 +208,7 @@ class TestTheListAndTheRunAgree:
         skill(root, "shown")
         plan = flow(project)
 
-        with pytest.raises(ValueError, match="must not begin or end with a space"):
+        with pytest.raises(ValueError, match="must not begin or end with whitespace"):
             _resolve_skill_dir(" .draft ", plan)
         assert [entry["name"] for entry in agent_skill_lookup(plan.source_path)["skills"]] == [
             "shown"
