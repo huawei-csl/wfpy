@@ -234,7 +234,8 @@ nothing else about the graph. See
 [`09_agents_are_actors.py`](../examples/09_agents_are_actors.py).
 
 An agent with no input port has nothing to wait for. It fires once in a run, and
-`@agent(fireable_without_input=N)` makes that N times. The count is for the run,
+`@agent(fireable_without_input=N)` makes that N times. N is 1 or more: 0 is
+refused when the class is made, since the agent would never fire. The count is for the run,
 not for each token that passes by: inside a child workflow or a `loop()` body
 that handles three items, such an agent still fires once. An agent that has to
 answer each item takes it on an input port. On an agent that has input ports,
