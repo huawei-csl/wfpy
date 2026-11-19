@@ -206,11 +206,15 @@ def _repository_root(start: Path) -> Path | None:
     trusts. It refuses a repository of dubious ownership, such as a
     `/tmp/.git` another user planted, unless the user lists it in
     `safe.directory`, as containers and CI already do for their checkouts.
+    A git that does not answer, one that cannot be run and a repository it
+    refuses are said in the log: the project's folders are then searched as
+    outside a repository, which is a narrower search than the user expects
+    of a checkout, and nothing else would say why.
+
     `GIT_DIR`, `GIT_WORK_TREE` and the other `GIT_REPOSITORY_VARIABLES` are
     not passed on: a git hook, or a push git holds in quarantine, exports
     its own repository's, and the question is which repository the
-    workflow's directory is in, not which one the environment names. A git
-    that does not answer within `GIT_TIMEOUT_SECONDS` is said in the log.
+    workflow's directory is in, not which one the environment names.
 
     `cli._discover_project_root` answers another question: it also stops at
     a `pyproject.toml`. The project folders bounded here (`_project`) are
@@ -236,10 +240,27 @@ def _repository_root(start: Path) -> Path | None:
             start,
         )
         return None
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError) as error:
+        logger.warning(
+            "git could not be run to say which repository %s is in (%s): the project"
+            " folders are searched as outside a repository, so a folder of the"
+            " repository's top is not searched; WF_SKILLS_ROOT names one that is",
+            start,
+            error,
+        )
         return None
     top = os.fsdecode(found.stdout).rstrip("\r\n")
     if found.returncode != 0 or not top:
+        said = os.fsdecode(found.stderr)
+        if "dubious ownership" in said:
+            # A checkout owned by another user: a bind mount in a container,
+            # a CI checkout. git lists the remedy itself, and without this
+            # the run just stops finding the repository's own skills.
+            logger.warning(
+                "git refuses the repository %s is in: %s",
+                start,
+                " ".join(said.split()),
+            )
         return None
     try:
         root = Path(top).resolve()

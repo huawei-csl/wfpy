@@ -121,7 +121,15 @@ All notable changes to wfpy are documented here. The format follows
   `WF_CLAUDE_AGENTS_ROOT`). For a workflow in a project below the home
   directory, `~/.claude/skills` and `~/.claude/agents` come after the
   working directory's folders, as the documented order has them; the walk
-  reached them first. `wfpy skills` lists the folders a run searches, its
+  reached them first. `~/.wf/skills` is reached by no other rule — the
+  user's folders are `~/.claude/skills` and `~/.claude/agents` — so a
+  skill kept there is now found only by a run whose project is the home
+  directory; name it in `WF_SKILLS_ROOT`, or keep it in
+  `~/.claude/skills`. Which repository a directory is in is git's answer:
+  where git cannot be run (an image without it) or refuses the checkout
+  (another user's, not in `safe.directory`), there is no repository to
+  bound the search, so the folders of a checkout's top are not searched
+  and the log says so. `wfpy skills` lists the folders a run searches, its
   answer made as before.
 
 ### Fixed

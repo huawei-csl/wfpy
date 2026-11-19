@@ -1193,6 +1193,70 @@ class TestGitDecidesTheRepository:
 
         assert runtime._repository_root(flows.resolve()) == project.resolve()
 
+    def test_wfpys_own_folders_at_the_repositorys_top_need_gits_answer(self, tmp_path, monkeypatch):
+        """Without git, the project is the workflow's directory: the
+        repository's own `.wf/skills` and `.claude/skills` are not searched
+        either, so a run in an image without git must name them in
+        `WF_SKILLS_ROOT`."""
+        project = tmp_path / "project"
+        git_init(project)
+        at_top = make_skill(project / ".wf" / "skills", "wfroot-top-of-repo")
+        empty = tmp_path / "empty-path"
+        empty.mkdir()
+        monkeypatch.setenv("PATH", str(empty))
+        plan = self.flow(project / "flows")
+
+        assert _resolve_skill_dir("wfroot-top-of-repo", plan) is None
+        monkeypatch.setenv("WF_SKILLS_ROOT", str(project / ".wf" / "skills"))
+        assert _resolve_skill_dir("wfroot-top-of-repo", self.flow(project / "flows")) == at_top
+
+    def test_a_git_that_cannot_be_run_is_said(self, tmp_path, monkeypatch, caplog):
+        """An image without git searches a checkout as no repository, which
+        is less than the user expects: the log says so, and how to say where
+        the skills are."""
+        empty = tmp_path / "empty-path"
+        empty.mkdir()
+        monkeypatch.setenv("PATH", str(empty))
+        flows = tmp_path / "project" / "flows"
+        flows.mkdir(parents=True)
+
+        with caplog.at_level(logging.WARNING, logger="wfpy"):
+            assert runtime._repository_root(flows.resolve()) is None
+
+        assert "git could not be run" in caplog.text
+        assert "WF_SKILLS_ROOT" in caplog.text
+        assert str(flows.resolve()) in caplog.text
+
+    def test_a_repository_git_refuses_is_said(self, tmp_path, monkeypatch, caplog):
+        """A checkout owned by another user (a bind mount in a container)
+        stops being a project, and only git's own words say why."""
+        project = tmp_path / "project"
+        git_init(project)
+        bin_dir = tmp_path / "bin"
+        refusal = f"fatal: detected dubious ownership in repository at '{project}'"
+        fake_git(bin_dir, f'echo "{refusal}" >&2\nexit 128')
+        monkeypatch.setenv("PATH", str(bin_dir))
+        flows = (project / "flows").resolve()
+        flows.mkdir()
+
+        with caplog.at_level(logging.WARNING, logger="wfpy"):
+            assert runtime._repository_root(flows) is None
+
+        assert "git refuses the repository" in caplog.text
+        assert "dubious ownership" in caplog.text
+
+    def test_a_directory_that_is_in_no_repository_is_said_nothing_of(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """The common case: a workflow outside a checkout is no warning."""
+        flows = tmp_path / "loose" / "flows"
+        flows.mkdir(parents=True)
+
+        with caplog.at_level(logging.WARNING, logger="wfpy"):
+            assert runtime._repository_root(flows.resolve()) is None
+
+        assert caplog.text == ""
+
     def test_a_git_that_does_not_answer_is_said(self, tmp_path, monkeypatch, caplog):
         """The tool folders above the workflow's directory are then left out,
         and the log says why."""

@@ -418,13 +418,14 @@ wfpy also searches Claude-compatible skill roots in order:
 
 The project is the workflow's git repository (a submodule is a repository
 of its own). With no repository git accepts, it is `<cwd>` when the
-workflow's directory is in it, and otherwise the workflow's directory alone. A folder found by walking up, wfpy's own
-and the other tools' below, is searched from where the walk starts up to
-the project's top, included, and never above it. So a folder above the
-project, such as `/tmp/.claude/skills` or `/tmp/.claude/agents`, is not read
-for a workflow in `/tmp/job` started elsewhere: any local user can write
-there. `<cwd>`'s own folders and the user's (`~/.claude/skills`) are read
-wherever they are, and so is what `WF_SKILLS_ROOT` names. When its first
+workflow's directory is in it, and otherwise the workflow's directory
+alone. A folder found by walking up, wfpy's own and the other tools'
+below, is searched from where the walk starts up to the project's top,
+included, and never above it. So a folder above the project, such as
+`/tmp/.claude/skills` or `/tmp/.claude/agents`, is not read for a workflow
+in `/tmp/job` started elsewhere: any local user can write there. `<cwd>`'s
+own folders and the user's (`~/.claude/skills`) are read wherever they
+are, and so is what `WF_SKILLS_ROOT` names. When its first
 directory is outside the project, the walk from it is that directory alone:
 its `.wf/skills` and `.claude/skills` are inside what the variable names,
 and the directories above it are neither named nor the project's. A skill
@@ -452,13 +453,17 @@ that is (`git rev-parse --show-toplevel` from the workflow's directory), so
 what git refuses bounds nothing: a `.git` that is no repository, and a
 repository owned by a user git does not trust (add it to `safe.directory`,
 as for `git status`). Without a repository git accepts, or without git,
-the project is `<cwd>` or the workflow's directory, as above. So
+the project is `<cwd>` or the workflow's directory, as above, and a git
+that cannot be run or refuses a checkout is said in the log: the folders
+of that checkout's top are then not searched, and `WF_SKILLS_ROOT` names
+them. So
 `/tmp/.agents/skills` is not read for a workflow in `/tmp/job` started
 elsewhere; a run started in `/tmp` reads it, as it reads
 `/tmp/.claude/skills`. A user-level folder the walk or `<cwd>` reaches, as
 in a home directory kept in git, is searched once, in its user-level place;
-the home directory's other folders (`~/.opencode/skills`) are a project's,
-as they are for OpenCode. The same holds for a
+the home directory's other folders (`~/.opencode/skills`, `~/.wf/skills`)
+are a project's, as they are for OpenCode, so a run whose project is
+elsewhere does not read them. The same holds for a
 `CODEX_HOME` that names a project's `.codex` (`CODEX_HOME=.codex`, started
 in the project): Codex reads that folder as `CODEX_HOME`, not as the
 project's, and ranks a user's skill after a repository's. A relative
