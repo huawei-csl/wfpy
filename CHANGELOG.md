@@ -16,13 +16,56 @@ All notable changes to wfpy are documented here. The format follows
   (`pypto-op-perf-tune/tune-swimlane`) is only reachable when its own
   directory is a root, which one value could not say while also naming the
   collection around it. It also lets an operator point wfpy at the skill
-  directories of several tools (`.claude/skills`, `.codex/skills`,
-  `.agents/skills`) without wfpy knowing any of their layouts. The first
+  directories of several tools, wherever they keep them. The first
   directory listed that exists is the runtime root: the base of the walk up
   the tree for `.wf/skills`, `.claude/skills` and `.claude/agents`, and the
   directory a skill hook runs in. The order therefore decides more than
   priority: a project's own `.wf/skills` and `.claude/agents` are found
   only when the walk starts in that project, so its directory goes first.
+- A skill installed for another agent tool is found. A skill is the same
+  `SKILL.md` folder whichever tool installed it, but wfpy looked only in its
+  own and Claude's folders, so a skill installed for Codex or OpenCode was
+  reported as not found unless `WF_SKILLS_ROOT` named its folder. wfpy now
+  also searches `.agents/skills` (the folder the Agent Skills convention
+  shares between tools), `.codex/skills`, `.opencode/skills` and
+  `.opencode/skill`, in the workflow's directory and above it up to the top
+  of its git repository, and in the working directory when it is in that
+  repository, then `~/.agents/skills`, `$CODEX_HOME/skills` (`~/.codex` by
+  default; a relative value read from the working directory, as Codex reads
+  it), `$CODEX_HOME/skills/.system` (the skills Codex ships) and
+  `$XDG_CONFIG_HOME/opencode/skills` and `skill` (`~/.config` by default).
+  They are searched after every folder searched before, `~/.claude/skills`
+  included, so a name that resolved before resolves to the same folder:
+  these folders only add names. The walk up starts at the workflow's
+  directory, `WF_SKILLS_ROOT` or not, and stops where git says the
+  repository ends (`git rev-parse --show-toplevel`), as Codex and OpenCode
+  stop there. A `.git` git does not take for a repository, or a repository
+  of dubious ownership git refuses, bounds nothing: with no repository, or
+  no git, only the workflow's directory is searched. So a folder above the
+  project (`/tmp/.agents/skills`) is not read, whoever planted a `/tmp/.git`.
+  git is not handed the variables that name another repository's parts,
+  which a git hook exports (`GIT_DIR`, `GIT_COMMON_DIR`, …); a git that does
+  not answer within 10 s is said in the log.
+  A user-level folder is searched in its user-level place however the walk
+  reaches it; a home directory kept in git has its other folders
+  (`~/.opencode/skills`) searched as a project's. A `CODEX_HOME` that names
+  a project's `.codex` is the user's too, as Codex reads it.
+- `wfpy skills <workflow.py> [--json]` lists the skills and agent presets a
+  run of the workflow started in the current directory finds: the folders
+  searched, in order, the folder each name resolves to, what reading its
+  `SKILL.md` fails with, its hooks as the runtime reads them, and the
+  presets with the skills they preload. It runs the runtime's own lookup
+  and does not load the workflow, so an IDE that runs it with the command
+  it runs workflows with offers the skills a run finds, without copying the
+  rules or asking another process. A relative path is read from the
+  current directory, a hidden entry (`.git`, `.system`) is not listed, and
+  each call looks again. A preset over 256 kB is listed without its
+  description; a run reads it whole, as before.
+- The lookup roots are worked out once per plan, not on every skill read,
+  hook and preset lookup of every firing. Parallel workers wait for the
+  first to work them out rather than each run git.
+- An agent preset's `description` (and `name`) is read as text: one with a
+  comma was a list.
 - The sidecar answers `pythonEnvironment` for a workflow file: the
   interpreter running it, the import roots `wfpy plan` loads the file with,
   and the folders its installed packages come from. An IDE configures its
@@ -82,6 +125,9 @@ All notable changes to wfpy are documented here. The format follows
   found. Containment is now checked on the path as written, which is where
   it was doing its work: `_validate_skill_name()` already refuses a name
   holding a path separator or `..`.
+- An agent preset installed as a symlink (`<name>.md`, or a `<name>` folder
+  holding `AGENT.md`) is found, as a symlinked skill is; the lookup
+  resolved it before checking containment and passed it over.
 - A run whose workflow holds a sub-workflow taking no input ends. The
   sub-workflow node had its inputs whenever it had none, so after its one
   firing the scheduler fired it again forever, each empty re-run counted as
