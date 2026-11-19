@@ -102,5 +102,11 @@ Public API is re-exported from `src/wfpy/__init__.py`.
 
 - `tests/conftest.py` provides env cleanup fixtures and `mock_invoke_agent`.
 - `test_acp_simple.py` is skipped unless the optional `agent` extra is installed.
+  With the extra, it drives a real OpenCode agent (three tests, real model
+  turns); pass `--ignore tests/test_acp_simple.py` to leave it out. CI runs the
+  suite with `.[dev]` on every Python (the `agent` tests skip) and once with
+  `.[dev,agent]` without that file (`test-agent`).
+- `tests/test_dependency_docs.py` holds the README's Dependencies table to the
+  bounds in `pyproject.toml`: change a pin and the table in one commit.
 - There are no `examples/` in this repo yet; nothing in `tests/` may depend on
   example files, or a missing example will abort collection for the whole suite.

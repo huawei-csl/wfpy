@@ -39,6 +39,44 @@ For local development, clone and install editable: `pip install -e ".[dev]"`.
 wfpy run my_workflow.py          # run a workflow
 ```
 
+## Dependencies
+
+wfpy needs Python 3.10 or newer. What `pip` installs beside it depends on the
+extra:
+
+| Install | Package | Version | Used for |
+|---|---|---|---|
+| `wfpy` | `libcst` | `>=1.4` | the rewrite engine and the sidecar's source edits |
+| `wfpy` | `tomli` | `>=2.0`, on Python 3.10 only | reading `connectors.toml` (Python 3.11 has `tomllib`) |
+| `wfpy[agent]` | `httpx` | `>=0.27` | the HTTP API transport of an `@agent` |
+| `wfpy[agent]` | `mcp` | `>=1.9` | MCP tools for an agent |
+| `wfpy[agent]` | `agent-client-protocol` | `>=1.0,<2` | the ACP transport (the package is imported as `acp`) |
+| `wfpy[dev]` | `pytest`, `pytest-asyncio`, `mypy`, `ruff` | | the tests, the type check, the lint |
+
+A workflow of tasks and tools needs the core only. The `agent` extra adds what
+an `@agent` needs for the HTTP API transport, for MCP tools and for the ACP
+transport.
+
+An agent on the `acp` transport needs one thing more, which `pip` does not
+install: a connector, the command wfpy spawns. Most are Node.js packages; they
+are listed, with the Node.js version each needs, under
+[Agent connectors (ACP)](#agent-connectors-acp).
+
+**The ACP SDK is held to its 1.x releases.** `agent-client-protocol` 1.0.0
+removed an API that wfpy 1.1.0 and earlier call, and those releases accept any
+SDK from 0.10 up. A fresh `wfpy[agent]` install of one of them therefore fails
+at the first prompt of an ACP agent:
+
+```text
+ImportError: cannot import name 'text_block' from 'acp'
+```
+
+With those releases, keep the SDK below 1.0:
+
+```bash
+pip install "agent-client-protocol<1"
+```
+
 ## Agent connectors (ACP)
 
 An `@agent` on the `acp` transport, and the chat in the wfpy IDE, talk to a
@@ -50,13 +88,29 @@ a connector is available when its command is on the `PATH`:
 |---|---|---|---|
 | `opencode` (default) | `opencode acp` | `npm install -g opencode-ai` (or `curl -fsSL https://opencode.ai/install \| bash`) | `opencode auth login` |
 | `claude` | `claude-agent-acp` | `npm install -g @anthropic-ai/claude-code @agentclientprotocol/claude-agent-acp` | run `claude` once and `/login`, or set `ANTHROPIC_API_KEY` |
-| `codex` | `codex-acp` | `npm install -g @zed-industries/codex-acp` | `codex login`, or set `OPENAI_API_KEY` |
+| `codex` | `codex-acp` | `npm install -g @agentclientprotocol/codex-acp` | `codex login`, or set `OPENAI_API_KEY` |
 | `gemini` | `gemini --experimental-acp` | `npm install -g @google/gemini-cli` | run `gemini` once and sign in, or set `GEMINI_API_KEY` |
 
 `claude-agent-acp` is the ACP adapter for Claude Code: it drives Claude Code,
 so it uses Claude Code's login and settings. Install the connectors you want.
 Only `opencode` is needed for the defaults. The npm packages need Node.js 18 or
-newer.
+newer; the Gemini one needs 20, and the Claude ones 22.
+
+The Claude and Codex adapters moved from `@zed-industries` to
+`@agentclientprotocol`, under the same commands. The old packages are
+deprecated and no longer updated. `@zed-industries/claude-agent-acp` does not
+know the newer Claude models: where Claude Code is set to one of them, an agent
+on it fails at its first turn ("There's an issue with the selected model").
+Uninstall an old package before installing the new one, since both provide the
+same command:
+
+```bash
+npm uninstall -g @zed-industries/claude-agent-acp
+npm install -g @agentclientprotocol/claude-agent-acp
+
+npm uninstall -g @zed-industries/codex-acp          # Codex, the same way
+npm install -g @agentclientprotocol/codex-acp
+```
 
 ### Set up a machine
 
