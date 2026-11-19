@@ -1099,6 +1099,17 @@ def agent(
             class Ports:
                 In = Port[File](direction="in")
                 Out = Port[File](direction="out", ext=".cpp")
+
+    An agent that declares no input port fires once in a run, and
+    ``fireable_without_input`` says how many times instead::
+
+        @agent(prompt="Propose a kernel.", fireable_without_input=3)
+        class Propose:
+            class Ports:
+                Candidate = Port[File](direction="out", ext=".cpp")
+
+    On an agent that has input ports the count is how many times it may fire
+    with nothing on them, besides once for each token it is sent.
     """
 
     def decorator(klass: type) -> type:

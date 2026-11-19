@@ -233,6 +233,13 @@ agent graph is runnable and testable in CI. Swapping to a real transport changes
 nothing else about the graph. See
 [`09_agents_are_actors.py`](../examples/09_agents_are_actors.py).
 
+An agent with no input port has nothing to wait for. It fires once in a run, and
+`@agent(fireable_without_input=N)` makes that N times. The count is for the run,
+not for each token that passes by: inside a child workflow or a `loop()` body
+that handles three items, such an agent still fires once. An agent that has to
+answer each item takes it on an input port. On an agent that has input ports,
+the same count is how many times it may fire with nothing on them.
+
 ## Beyond the core model
 
 The tasks, guards, schedules, and priorities above are the dataflow core. wfpy
