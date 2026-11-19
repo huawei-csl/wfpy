@@ -192,6 +192,39 @@ class TestTheAnswerIsTheRuntimes:
         run = types.SimpleNamespace(source_path=os.path.join("flows", "flow.py"), work_dir=None)
         assert [Path(root["path"]) for root in answer["roots"]] == _skill_search_roots(run)
 
+    @pytest.mark.skipif(os.pathsep != ":", reason="a POSIX path may hold `:`")
+    def test_a_relative_directory_holding_the_separator_is_read_from_the_working_directory(
+        self, tmp_path, monkeypatch
+    ):
+        """A value that is itself a directory is that one directory (#61),
+        and a relative one is that directory under where the run starts,
+        not under this process's directory."""
+        project = tmp_path / "project"
+        workflow(project)
+        skill(project / "skills:v2", "versioned")
+        monkeypatch.setenv("WF_SKILLS_ROOT", "skills:v2")
+
+        answer = agent_skill_lookup(os.path.join("flows", "flow.py"), str(project))
+
+        assert answer["roots"][0]["path"] == str((project / "skills:v2").resolve())
+        assert answer["runtimeRoot"] == str((project / "skills:v2").resolve())
+        assert "versioned" in by_name(answer["skills"])
+
+    def test_the_runtime_root_is_the_first_listed_directory_there_from_the_working_directory(
+        self, tmp_path, monkeypatch
+    ):
+        """The runtime root is the first `WF_SKILLS_ROOT` directory that
+        exists (#61), each relative one looked for where the run starts."""
+        project = tmp_path / "project"
+        workflow(project)
+        skill(project / "present", "listed-second")
+        monkeypatch.setenv("WF_SKILLS_ROOT", os.pathsep.join(["absent", "present"]))
+
+        answer = agent_skill_lookup(os.path.join("flows", "flow.py"), str(project))
+
+        assert answer["runtimeRoot"] == str((project / "present").resolve())
+        assert "listed-second" in by_name(answer["skills"])
+
     def test_each_call_looks_again(self, tmp_path):
         """A run keeps its lookup for its plan; `wfpy skills` answers what is
         there now. A repository made and a folder added since the last call
