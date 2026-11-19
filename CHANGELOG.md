@@ -45,6 +45,20 @@ All notable changes to wfpy are documented here. The format follows
   (`@agentclientprotocol/claude-agent-acp`) no longer prints a traceback for
   each `auth/status_update` the connector sends: a notification the ACP SDK
   has no route for is dropped, as a notification a client does not know is.
+- An agent inside a nested workflow receives the run's options. `run()` set
+  them on the top plan only, so such an agent was invoked without the ACP
+  connector and its stuck window, the tool and skill-hook policies, the
+  elicitation handler and the `source_path` its workspace connectors are found
+  from. One connection to the elicit socket serves every plan of the run.
+- The validators a port declares run inside a nested workflow; they were
+  skipped there in silence. A nested workflow is checked with the run's
+  validators and, over them, those registered beside its own file. **This
+  changes what a run does:** a nested output that fails its validators now
+  fails the run under the default `enforce` mode, as it did at the top level.
+- An output that fails validation is not delivered. The validators ran after
+  the output was put in its queue, so a failed run's checkpoint held the
+  rejected output beside the input given back, and a resume delivered both the
+  rejected output and the accepted one.
 - A run whose workflow holds a sub-workflow taking no input ends. The
   sub-workflow node had its inputs whenever it had none, so after its one
   firing the scheduler fired it again forever, each empty re-run counted as
