@@ -56,12 +56,15 @@ def allow_once(title: str, options: list[dict[str, str]]) -> Optional[str]:
     return chosen
 
 
-def _tool_call_fields(update: Any) -> dict[str, Any]:
-    """What a run's observer sees of an ACP tool call: its title (or its
-    kind when it has none), the kind, the status, the id."""
+def _tool_call_fields(update: Any, known_name: Optional[str] = None) -> dict[str, Any]:
+    """What a run's observer sees of an ACP tool call: a name, the title,
+    the kind, the status, the id. The name is the tool's own where the agent
+    sends one (`name`, since schema 1.23), else the title, else the kind.
+    `known_name` is the tool's own name from an earlier update of the same
+    call, for an update that carries none."""
     title = getattr(update, "title", None)
     kind = getattr(update, "kind", None)
-    name = getattr(update, "name", None) or title or kind or "tool"
+    name = getattr(update, "name", None) or known_name or title or kind or "tool"
     call_id = getattr(update, "tool_call_id", None) or getattr(update, "toolCallId", None)
     return {"name": str(name), "title": title, "kind": kind,
             "status": getattr(update, "status", None), "id": call_id}
@@ -88,6 +91,17 @@ class SimpleClient:
         # Optional sink for structured, observer-facing events (live streaming to the
         # IDE). Called synchronously and best-effort; must never raise into the run.
         self.on_event = on_event
+        # The tool's own name of each call that gave one, by call id: a later
+        # update of the call need not repeat it, and is still named by it.
+        self._tool_names: dict[str, str] = {}
+
+    def _tool_call(self, update: Any) -> dict[str, Any]:
+        """The observer's fields of a tool call or of an update of one."""
+        call_id = getattr(update, "tool_call_id", None) or getattr(update, "toolCallId", None)
+        own_name = getattr(update, "name", None)
+        if call_id and own_name:
+            self._tool_names[str(call_id)] = str(own_name)
+        return _tool_call_fields(update, self._tool_names.get(str(call_id)) if call_id else None)
 
     def _emit(self, event: dict[str, Any]) -> None:
         if self.on_event is None:
@@ -132,13 +146,14 @@ class SimpleClient:
             # An ACP tool call carries a title ("Write choice-a.txt") and a
             # kind ("edit", "execute"): the title is what a viewer shows, the
             # kind what it groups by. Since schema 1.23 (SDK 1.0) it may also
-            # carry the tool's own name, which is then the name reported.
-            tool = _tool_call_fields(update)
+            # carry the tool's own name ("Write"), which is then the name
+            # reported, for the call and for its updates alike.
+            tool = self._tool_call(update)
             logger.info(f"Tool call: {tool['name']}")
             self._emit({"type": "agent.tool_call", **tool})
         elif hasattr(update, 'sessionUpdate') and update.sessionUpdate == 'tool_call_update':
             logger.info("Tool call update")
-            self._emit({"type": "agent.tool_call_update", **_tool_call_fields(update)})
+            self._emit({"type": "agent.tool_call_update", **self._tool_call(update)})
         
         await self.events.put(event)
         
@@ -230,43 +245,65 @@ class SimpleClient:
         return {}
         
     async def ext_notification(self, method, params):
-        """Called for extension notifications. None is acted on, and that is
-        no fault: a notification has no reply, and a client ignores the ones
-        it does not know (`claude-agent-acp` sends `auth/status_update` on
-        every turn)."""
-        logger.debug(f"Extension notification ignored: {method}")
+        """Called for extension notifications. None is acted on. One wfpy
+        knows to be routine is passed over quietly; another is still named,
+        since it may be the agent saying something that matters."""
+        if method in _ROUTINE_NOTIFICATIONS:
+            logger.debug(f"Extension notification ignored: {method}")
+        else:
+            logger.warning(f"Extension notification not implemented: {method}")
 
 
 _METHOD_NOT_FOUND = -32601
 
+# Notifications a connector sends as a matter of course and wfpy does not act
+# on. `claude-agent-acp` pushes its login state as `auth/status_update` on
+# every turn, under that name and as the extension `_auth/status_update`.
+_ROUTINE_NOTIFICATIONS = frozenset({"auth/status_update"})
+
 
 def _drop_unrouted_notifications(connection: Any) -> None:
-    """Drop, in silence, a notification the SDK has no route for.
+    """Drop a notification the SDK has no route for, without its traceback.
 
     A notification has no reply, so a client that does not know one ignores
-    it, and connectors count on that: `claude-agent-acp` pushes
-    `auth/status_update` on every turn. SDK 1.0 has no route for that method
-    and logs each one as an unhandled error with its traceback, three of them
-    on a run that succeeds.
+    it, and connectors count on that. SDK 1.0 logs each one as an unhandled
+    error with its traceback instead: three of them on a run that succeeds,
+    for the `auth/status_update` of `claude-agent-acp`.
+
+    A routine one (`_ROUTINE_NOTIFICATIONS`) is dropped at debug; any other
+    is dropped with one warning line that names it. Only the SDK's own "no
+    route for this method" is taken for that: a request without a route still
+    fails (it has a reply to carry the error), and so does any other failure
+    inside a notification, a "method not found" for another method included.
 
     The SDK offers no hook for this, so the handler of its connection is
     wrapped. Should its layout change, nothing is wrapped and the tracebacks
-    come back; a run is unaffected either way. A request the SDK has no route
-    for still fails: it has a reply to carry the error.
+    come back; a run is unaffected either way.
     """
     conn = getattr(connection, "_conn", None)
     handler = getattr(conn, "_handler", None)
     if handler is None:
+        logger.debug("The ACP SDK's connection has no handler to wrap; "
+                     "notifications it has no route for keep their traceback")
         return
 
     async def handle(method, params, is_notification):
         try:
             return await handler(method, params, is_notification)
         except acp.RequestError as exc:
-            if is_notification and getattr(exc, "code", None) == _METHOD_NOT_FOUND:
-                logger.debug(f"Dropped a notification the SDK has no route for: {method}")
-                return None
-            raise
+            data = getattr(exc, "data", None)
+            unrouted = (is_notification
+                        and getattr(exc, "code", None) == _METHOD_NOT_FOUND
+                        and isinstance(data, dict) and data.get("method") == method)
+            if not unrouted:
+                raise
+            if method in _ROUTINE_NOTIFICATIONS:
+                logger.debug(f"Notification ignored: {method}")
+            else:
+                logger.warning(
+                    f"The agent sent a notification wfpy does not know: {method} (ignored)"
+                )
+            return None
 
     conn._handler = handle
 

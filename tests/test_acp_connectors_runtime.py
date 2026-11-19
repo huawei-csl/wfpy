@@ -251,9 +251,9 @@ class TestThePrompt:
 
 
 class TestNotificationsTheSdkDoesNotKnow:
-    """A notification has no reply, so one the SDK has no route for is dropped
-    in silence. `claude-agent-acp` pushes `auth/status_update` on every turn,
-    and the SDK logged each as an unhandled error, traceback and all."""
+    """A notification has no reply, so one the SDK has no route for is dropped.
+    `claude-agent-acp` pushes `auth/status_update` on every turn, and the SDK
+    logged each as an unhandled error, traceback and all."""
 
     @staticmethod
     def _wrapped(handler):
@@ -271,11 +271,43 @@ class TestNotificationsTheSdkDoesNotKnow:
             return "routed"
         if method == "session/broken":
             raise ValueError("the client's own handler failed")
+        if method == "session/nested":
+            # A routed notification whose handler made a call that was refused.
+            raise acp.RequestError.method_not_found("fs/read_text_file")
         raise acp.RequestError.method_not_found(method)
 
-    def test_an_unrouted_notification_is_dropped(self):
+    def test_a_routine_one_is_dropped_without_a_word(self, caplog):
         handle = self._wrapped(self._router)
-        assert asyncio.run(handle("auth/status_update", {}, True)) is None
+        with caplog.at_level("INFO"):
+            assert asyncio.run(handle("auth/status_update", {}, True)) is None
+        assert caplog.records == []
+
+    def test_one_wfpy_has_not_met_is_dropped_and_named(self, caplog):
+        """Without its traceback, but not without a trace: it may matter."""
+        handle = self._wrapped(self._router)
+        with caplog.at_level("INFO"):
+            assert asyncio.run(handle("quota/exceeded", {}, True)) is None
+        assert [(r.levelname, r.getMessage()) for r in caplog.records] == [
+            ("WARNING", "The agent sent a notification wfpy does not know: quota/exceeded (ignored)")
+        ]
+
+    def test_a_refusal_of_another_method_is_not_taken_for_it(self):
+        import acp
+
+        handle = self._wrapped(self._router)
+        with pytest.raises(acp.RequestError, match="Method not found"):
+            asyncio.run(handle("session/nested", {}, True))
+
+    def test_an_extension_notification_is_named_unless_it_is_routine(self, caplog):
+        from wfpy.acp_client import SimpleClient
+
+        client = SimpleClient()
+        with caplog.at_level("INFO"):
+            asyncio.run(client.ext_notification("auth/status_update", {}))
+            asyncio.run(client.ext_notification("quota/exceeded", {}))
+        assert [(r.levelname, r.getMessage()) for r in caplog.records] == [
+            ("WARNING", "Extension notification not implemented: quota/exceeded")
+        ]
 
     def test_a_routed_one_is_handled_as_before(self):
         handle = self._wrapped(self._router)
