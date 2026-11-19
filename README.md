@@ -93,20 +93,23 @@ a connector is available when its command is on the `PATH`:
 
 `claude-agent-acp` is the ACP adapter for Claude Code: it drives Claude Code,
 so it uses Claude Code's login and settings. Install the connectors you want.
-Only `opencode` is needed for the defaults. The Claude packages need Node.js 22
-or newer, the Gemini one Node.js 20.
+Only `opencode` is needed for the defaults. The npm packages need Node.js 18 or
+newer; the Gemini one needs 20, and the Claude ones 22.
 
 The Claude and Codex adapters moved from `@zed-industries` to
 `@agentclientprotocol`, under the same commands. The old packages are
 deprecated and no longer updated. `@zed-industries/claude-agent-acp` does not
 know the newer Claude models: where Claude Code is set to one of them, an agent
 on it fails at its first turn ("There's an issue with the selected model").
-Uninstall it before installing the new one, since both provide
-`claude-agent-acp`:
+Uninstall an old package before installing the new one, since both provide the
+same command:
 
 ```bash
 npm uninstall -g @zed-industries/claude-agent-acp
 npm install -g @agentclientprotocol/claude-agent-acp
+
+npm uninstall -g @zed-industries/codex-acp          # Codex, the same way
+npm install -g @agentclientprotocol/codex-acp
 ```
 
 ### Set up a machine

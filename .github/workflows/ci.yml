@@ -27,11 +27,30 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
-      # The core `[dev]` extra only — the `agent` extra's transports (httpx,
-      # mcp, opencode-acp) need external services, so those tests skip here.
+      # The core `[dev]` extra only: the tests of the `agent` extra's
+      # transports (httpx, mcp, acp) skip here and run in `test-agent`.
       - run: python -m pip install --upgrade pip
       - run: python -m pip install -e ".[dev]"
       - run: python -m pytest tests/ -q
+
+  test-agent:
+    name: test (agent extra)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          # The oldest Python wfpy supports: the modules behind the extra are
+          # imported by no other job.
+          python-version: "3.10"
+          cache: pip
+      # The `agent` extra as a fresh install resolves it, so its tests run on
+      # the releases a user gets. A release of the ACP SDK that breaks the
+      # transport fails this job; 1.0.0 did, and no job ran against it.
+      # `test_acp_simple.py` is left out: it drives a real OpenCode agent.
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e ".[dev,agent]"
+      - run: python -m pytest tests/ -q --ignore tests/test_acp_simple.py
 
   typecheck:
     name: mypy (strict)
