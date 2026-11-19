@@ -608,7 +608,7 @@ class TestTheCommand:
         assert "in-the-table" in out
         assert f"repository: {project.resolve()}" in out
 
-    def test_a_table_outside_a_repository_says_how_far_up_the_folders_are_searched(
+    def test_a_table_outside_a_repository_says_where_the_project_ends(
         self, tmp_path, monkeypatch, capsys
     ):
         project = tmp_path / "project"
@@ -619,7 +619,7 @@ class TestTheCommand:
         code, out = self.run(monkeypatch, capsys, str(project / "flows" / "flow.py"))
 
         assert code == 0
-        assert f"repository: none (project folders searched up to {project.resolve()})" in out
+        assert f"repository: none (the project's top: {project.resolve()})" in out
 
     def test_a_file_that_is_not_there_is_an_error(self, tmp_path, monkeypatch, capsys):
         code, out = self.run(monkeypatch, capsys, "--json", str(tmp_path / "nowhere.py"))

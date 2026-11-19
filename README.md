@@ -416,9 +416,9 @@ wfpy also searches Claude-compatible skill roots in order:
 - `<cwd>/.claude/skills/<skill-name>/SKILL.md`
 - `~/.claude/skills/<skill-name>/SKILL.md`
 
-The project is the workflow's git repository. With no repository git
-accepts, it is `<cwd>` when the workflow's directory is in it, and otherwise
-the workflow's directory alone. A folder found by walking up, wfpy's own
+The project is the workflow's git repository (a submodule is a repository
+of its own). With no repository git accepts, it is `<cwd>` when the
+workflow's directory is in it, and otherwise the workflow's directory alone. A folder found by walking up, wfpy's own
 and the other tools' below, is searched from where the walk starts up to
 the project's top, included, and never above it. So a folder above the
 project, such as `/tmp/.claude/skills` or `/tmp/.claude/agents`, is not read

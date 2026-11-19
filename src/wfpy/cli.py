@@ -461,7 +461,7 @@ def cmd_skills(args: argparse.Namespace) -> None:
     if repository is None:
         workflow_dir = Path(lookup["workflow"]).parent
         top = _project_top_outside_a_repository(workflow_dir, Path(lookup["cwd"]))
-        repository = f"none (project folders searched up to {top})"
+        repository = f"none (the project's top: {top})"
     print(f"\nworking directory: {lookup['cwd']}  repository: {repository}")
 
 

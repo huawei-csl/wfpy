@@ -42,8 +42,8 @@ All notable changes to wfpy are documented here. The format follows
   stop there. A `.git` git does not take for a repository, or a repository
   of dubious ownership git refuses, bounds nothing: with no repository, or
   no git, the project is the working directory or the workflow's directory
-  (see Changed). So a folder above the project (`/tmp/.agents/skills`) is
-  not read, whoever planted a `/tmp/.git`.
+  (see Changed). So `/tmp/.agents/skills` is not read for a workflow in
+  `/tmp/job` started elsewhere, whoever planted a `/tmp/.git`.
   git is not handed the variables that name another repository's parts,
   which a git hook exports (`GIT_DIR`, `GIT_COMMON_DIR`, …); a git that does
   not answer within 10 s is said in the log.
@@ -100,25 +100,29 @@ All notable changes to wfpy are documented here. The format follows
   project, as the other agent tools' folders are. They were searched up to
   the filesystem root, so a `/tmp/.claude/skills` another local user planted
   handed a workflow in `/tmp/job` its prompt text and hook scripts. The
-  project is the workflow's git repository, as git says; with no repository
-  git accepts, the working directory when the workflow's directory is in
-  it, else the workflow's directory alone. The other tools' folders follow
-  the same rule, so outside a repository a run started in a directory that
+  project is the workflow's git repository, as git says (a submodule or a
+  nested repository is a project of its own); with no repository git
+  accepts, the working directory when the workflow's directory is in it,
+  else the workflow's directory alone. The other tools' folders follow the
+  same rule, so outside a repository a run started in a directory that
   holds the workflow searches them up to that directory, where it searched
   the workflow's directory alone. The working directory's own folders, the
   user's and what `WF_SKILLS_ROOT` and `WF_CLAUDE_AGENTS_ROOT` name are read
   as before, and a name resolves to the folder it did when that folder is
-  in the project. When the first `WF_SKILLS_ROOT` directory (or
-  `WF_CLAUDE_AGENTS_ROOT`) is outside the project, the walk from it is that
-  directory alone: its `.wf/skills` and `.claude/skills` are read, the
+  in the project. When the runtime root (the first `WF_SKILLS_ROOT`
+  directory that exists, or `WF_CLAUDE_AGENTS_ROOT` for presets) is outside
+  the project, the walk from it is that directory alone: its own
+  `.wf/skills`, `.claude/skills` or `.claude/agents` are read, the
   directories above it are not. **This changes what a run finds:** a skill
-  or preset kept in a folder above the repository's top, or above the
-  workflow's directory outside a repository, is no longer found; name its
-  folder in `WF_SKILLS_ROOT` (or `WF_CLAUDE_AGENTS_ROOT`). For a workflow
-  in a project below the home directory, `~/.claude/skills` and
-  `~/.claude/agents` come after the working directory's folders, as the
-  documented order has them; the walk reached them first. `wfpy skills` lists the folders a run
-  searches, its answer made as before.
+  or preset kept above the top of the workflow's repository (a
+  superproject's, for a submodule), or above the workflow's directory in a
+  project with no `.git` (an unpacked archive) that the run is not started
+  in, is no longer found; name its folder in `WF_SKILLS_ROOT` (or
+  `WF_CLAUDE_AGENTS_ROOT`). For a workflow in a project below the home
+  directory, `~/.claude/skills` and `~/.claude/agents` come after the
+  working directory's folders, as the documented order has them; the walk
+  reached them first. `wfpy skills` lists the folders a run searches, its
+  answer made as before.
 
 ### Fixed
 - An ACP agent runs on `agent-client-protocol` 1.0. That release removed the
