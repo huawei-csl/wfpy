@@ -18,12 +18,47 @@ AGENT_MAX_TOOL_ROUNDS = 6
 """Maximum tool-call continuation rounds per single agent firing."""
 
 
+def _explicit_skills_roots() -> list[Path]:
+    """Parse `WF_SKILLS_ROOT` into the roots it names, in priority order.
+
+    The variable holds one directory or several separated by `os.pathsep`
+    (`:` on POSIX, `;` on Windows), like `PATH`. A single directory — the
+    only form the variable used to take — parses to a one-element list, so
+    an existing setting keeps behaving exactly as before. That includes a
+    directory whose own path holds the separator (`skills:v2`): a value that
+    is itself a directory is that one directory, and is not split.
+    """
+
+    raw = os.environ.get("WF_SKILLS_ROOT", "")
+    whole = Path(raw.strip()).expanduser()
+    if os.pathsep in raw and whole.is_dir():
+        return [whole]
+    roots: list[Path] = []
+    for entry in raw.split(os.pathsep):
+        entry = entry.strip()
+        if entry:
+            roots.append(Path(entry).expanduser())
+    return roots
+
+
 def _runtime_root_for_skills(plan: Any) -> Path:
     """Resolve the runtime root used for `.wf/skills` discovery."""
 
-    explicit = os.environ.get("WF_SKILLS_ROOT", "").strip()
+    explicit = _explicit_skills_roots()
     if explicit:
-        return Path(explicit).expanduser().resolve()
+        # The runtime root is a single directory — it is the base of the
+        # ancestor walk in `_skill_search_roots()` and the working directory
+        # of a skill hook — so when `WF_SKILLS_ROOT` names several, the first
+        # (highest-priority) one is it. Every root it names is still searched
+        # directly by `_skill_search_roots()`.
+        #
+        # The first one that exists, that is. A list names the folders of
+        # several tools and a project seldom has them all; a hook cannot run
+        # in a directory that is not there (`subprocess` raises), and the walk
+        # from one finds nothing. With none present it is the first, as a
+        # single missing directory always was.
+        present = next((root for root in explicit if root.is_dir()), explicit[0])
+        return present.resolve()
     if plan.source_path:
         try:
             return Path(plan.source_path).resolve().parent
@@ -56,8 +91,9 @@ def _skill_search_roots(plan: Any) -> list[Path]:
     - `<cwd>/.claude/skills`
     - `~/.claude/skills`
 
-    If `WF_SKILLS_ROOT` is set, it is treated as a highest-priority
-    directory that directly contains skill folders.
+    If `WF_SKILLS_ROOT` is set, each directory it names is treated as a
+    highest-priority directory that directly contains skill folders. It may
+    name several, separated by `os.pathsep`, searched in the order written.
     """
 
     roots: list[Path] = []
@@ -70,9 +106,8 @@ def _skill_search_roots(plan: Any) -> list[Path]:
         seen.add(key)
         roots.append(path.resolve())
 
-    explicit = os.environ.get("WF_SKILLS_ROOT", "").strip()
-    if explicit:
-        add_root(Path(explicit).expanduser())
+    for explicit in _explicit_skills_roots():
+        add_root(explicit)
 
     runtime_root = _runtime_root_for_skills(plan)
     current = runtime_root
@@ -149,11 +184,24 @@ def _resolve_skill_dir(skill_name: str, plan: Any) -> Path | None:
 
     _validate_skill_name(skill_name)
     for root in _skill_search_roots(plan):
-        skill_dir = (root / skill_name).resolve()
+        candidate = root / skill_name
+        # Containment is tested on the joined path, before resolving it: a
+        # skill directory is very often a symlink — that is how tools install
+        # shared skills into `.claude/skills` — and such a directory resolves
+        # outside its root, so testing after `.resolve()` silently skipped
+        # every symlinked install.
+        #
+        # Nothing is lost by testing it unresolved. `_validate_skill_name()`
+        # already rejects path separators and `..`, so `root / skill_name` is
+        # a direct child of `root` (or, for the name `.`, `root` itself). What
+        # remains is a Windows drive-relative name like `d:bar`, which passes
+        # that validation and does join outside `root` — this check is what
+        # catches it. Do not reinstate the `.resolve()` before it.
         try:
-            skill_dir.relative_to(root)
+            candidate.relative_to(root)
         except ValueError:
             continue
+        skill_dir = candidate.resolve()
         if (skill_dir / "SKILL.md").exists():
             return skill_dir
     return None

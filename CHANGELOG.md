@@ -7,6 +7,22 @@ All notable changes to wfpy are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- `WF_SKILLS_ROOT` names several skill directories, separated by
+  `os.pathsep`, searched in the order written; a single directory still
+  means what it always did, one whose own path holds the separator
+  included (a value that is itself a directory is not split). A skill name
+  may not hold a path separator, so
+  a skill nested inside another collection
+  (`pypto-op-perf-tune/tune-swimlane`) is only reachable when its own
+  directory is a root, which one value could not say while also naming the
+  collection around it. It also lets an operator point wfpy at the skill
+  directories of several tools (`.claude/skills`, `.codex/skills`,
+  `.agents/skills`) without wfpy knowing any of their layouts. The first
+  directory listed that exists is the runtime root: the base of the walk up
+  the tree for `.wf/skills`, `.claude/skills` and `.claude/agents`, and the
+  directory a skill hook runs in. The order therefore decides more than
+  priority: a project's own `.wf/skills` and `.claude/agents` are found
+  only when the walk starts in that project, so its directory goes first.
 - The sidecar answers `pythonEnvironment` for a workflow file: the
   interpreter running it, the import roots `wfpy plan` loads the file with,
   and the folders its installed packages come from. An IDE configures its
@@ -59,6 +75,13 @@ All notable changes to wfpy are documented here. The format follows
   the output was put in its queue, so a failed run's checkpoint held the
   rejected output beside the input given back, and a resume delivered both the
   rejected output and the accepted one.
+- A skill whose directory is a symlink is found. The lookup resolved
+  `<root>/<name>` before checking that it was still under `<root>`, and a
+  symlink resolves elsewhere, so every skill installed into `.claude/skills`
+  as a link into a checkout was passed over in silence and reported as not
+  found. Containment is now checked on the path as written, which is where
+  it was doing its work: `_validate_skill_name()` already refuses a name
+  holding a path separator or `..`.
 - A run whose workflow holds a sub-workflow taking no input ends. The
   sub-workflow node had its inputs whenever it had none, so after its one
   firing the scheduler fired it again forever, each empty re-run counted as
