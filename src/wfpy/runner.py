@@ -138,7 +138,6 @@ _parse_retry_after_ms = _agent_tools_runtime._parse_retry_after_ms
 
 _effective_max_tool_rounds = _agent_prompt_runtime._effective_max_tool_rounds
 _run_skill_hook = _agent_prompt_runtime._run_skill_hook
-_resolve_skill_dir = _agent_prompt_runtime._resolve_skill_dir
 _skill_hook_name = _agent_prompt_runtime._skill_hook_name
 _build_effective_agent_prompt = _agent_prompt_runtime._build_effective_agent_prompt
 
@@ -1677,13 +1676,13 @@ def _step_agent(
     pre_hook_result: dict[str, Any] | None = None
     post_hook_result: dict[str, Any] | None = None
     hook_timeout_ms = int(plan.options.get("skill_hook_timeout_ms", 30_000))
-    # Both hooks run from the folder the skill is taken from now, before the
-    # agent's turn: a folder the turn makes where the name resolves first is
-    # not the skill whose `SKILL.md` declared them.
+    # Both hooks run from the folder whose `SKILL.md` declared them, which
+    # the firing has just read: a folder the agent's turn makes, or a
+    # parallel worker's, where the name resolves first is another skill.
+    # Reading the skill either names its folder or fails, so None here means
+    # there is no skill to take a hook from.
     hook_skill_dir = (
-        _resolve_skill_dir(skill_name, plan)
-        if agent_spec.use_skill and agent_spec.use_skill_hooks and skill_name
-        else None
+        Path(skill_debug_meta["skillFolder"]) if skill_debug_meta.get("skillFolder") else None
     )
     _mcp_available_servers: list[str] = []
     _mcp_discovered_tool_names: list[str] = []
@@ -1693,6 +1692,7 @@ def _step_agent(
         agent_spec.use_skill
         and agent_spec.use_skill_hooks
         and skill_name
+        and hook_skill_dir is not None
         and isinstance(skill_meta, dict)
     ):
         pre_hook = _skill_hook_name(skill_meta, "pre")
@@ -2417,6 +2417,7 @@ def _step_agent(
         agent_spec.use_skill
         and agent_spec.use_skill_hooks
         and skill_name
+        and hook_skill_dir is not None
         and isinstance(skill_meta, dict)
     ):
         post_hook = _skill_hook_name(skill_meta, "post")

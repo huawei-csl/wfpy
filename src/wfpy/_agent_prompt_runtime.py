@@ -572,8 +572,9 @@ def _resolve_skill_dir(skill_name: str, plan: Any) -> Path | None:
     return found[1] if found is not None else None
 
 
-def _resolve_skill_md_path(skill_name: str, plan: Any) -> Path:
-    """Resolve `SKILL.md` for a skill name from supported roots."""
+def _skill_folder(skill_name: str, plan: Any) -> Path:
+    """The folder a skill name resolves to, or `FileNotFoundError` naming
+    the roots searched."""
 
     roots, found = _lookup_skill(skill_name, plan)
     if found is None:
@@ -581,7 +582,13 @@ def _resolve_skill_md_path(skill_name: str, plan: Any) -> Path:
             f"Skill '{skill_name}' was not found. Searched roots: "
             + ", ".join(str(root) for root in roots)
         )
-    return (found[1] / "SKILL.md").resolve()
+    return found[1]
+
+
+def _resolve_skill_md_path(skill_name: str, plan: Any) -> Path:
+    """Resolve `SKILL.md` for a skill name from supported roots."""
+
+    return (_skill_folder(skill_name, plan) / "SKILL.md").resolve()
 
 
 def _read_capped_text(path: Path, what: str, limit: int) -> str:
@@ -610,8 +617,19 @@ def _read_skill_md_file(skill_name: str, skill_md: Path) -> str:
 def _read_skill_md(skill_name: str, plan: Any) -> tuple[str, Path]:
     """Read and return SKILL.md body text for a skill name."""
 
-    skill_md = _resolve_skill_md_path(skill_name, plan)
-    return _read_skill_md_file(skill_name, skill_md), skill_md
+    text, skill_md, _folder = _read_skill(skill_name, plan)
+    return text, skill_md
+
+
+def _read_skill(skill_name: str, plan: Any) -> tuple[str, Path, Path]:
+    """A skill's `SKILL.md` text, the file, resolved, and the skill's folder,
+    from one lookup. The folder is the one its hooks run from, which the
+    file's own path does not give: `SKILL.md` may be a link that resolves
+    elsewhere."""
+
+    folder = _skill_folder(skill_name, plan)
+    skill_md = (folder / "SKILL.md").resolve()
+    return _read_skill_md_file(skill_name, skill_md), skill_md, folder
 
 
 def _parse_skill_frontmatter(skill_text: str) -> tuple[dict[str, Any], str]:
@@ -955,7 +973,10 @@ def _load_skill_hook_policy(path_str: str) -> dict[str, Any]:
         raise RuntimeError(f"Cannot load skill hook policy '{path_str}': {exc}") from exc
 
 
-SKILL_HOOK_POLICY_ENTRY_KEYS = ("skill", "hook", "interpreter", "dir")
+SKILL_HOOK_POLICY_REQUIRED_KEYS = ("skill", "hook")
+"""The keys an object entry of a skill-hook policy's `allow` must hold."""
+
+SKILL_HOOK_POLICY_OPTIONAL_KEYS = ("interpreter", "dir")
 """The keys an object entry of a skill-hook policy's `allow` may hold."""
 
 SKILL_HOOK_INTERPRETERS = ("python", "sh")
@@ -992,7 +1013,7 @@ class SkillHookPolicy(NamedTuple):
     """Its object entries that it reads."""
 
     unread: tuple[str, ...]
-    """Its object entries that it cannot read, and why: they approve nothing."""
+    """What it cannot read, and why: it approves nothing."""
 
     require_dir: bool
     """`requireDir`: an entry that names no folder approves nothing."""
@@ -1000,27 +1021,35 @@ class SkillHookPolicy(NamedTuple):
 
 def _object_entry(entry: dict[Any, Any], base: Path) -> HookApproval | str:
     """An object entry of `allow`, read; or why it cannot be. `base` is the
-    folder a relative `dir` is read from."""
+    folder a relative `dir` is read from. Text is taken without the spaces
+    around it, as a run takes a skill's and a hook's name."""
 
-    unknown = sorted(str(key) for key in entry if key not in SKILL_HOOK_POLICY_ENTRY_KEYS)
+    keys = (*SKILL_HOOK_POLICY_REQUIRED_KEYS, *SKILL_HOOK_POLICY_OPTIONAL_KEYS)
+    unknown = sorted(str(key) for key in entry if key not in keys)
     if unknown:
         return f"it holds {', '.join(unknown)}, which is not read"
-    for key in SKILL_HOOK_POLICY_ENTRY_KEYS:
-        if key not in entry and key in ("interpreter", "dir"):
-            continue
-        value = entry.get(key)
-        if not isinstance(value, str) or not value.strip():
-            return f"its {key} is not text"
-    interpreter = entry.get("interpreter")
+    missing = [key for key in SKILL_HOOK_POLICY_REQUIRED_KEYS if key not in entry]
+    if missing:
+        return f"it has no {' and no '.join(missing)}"
+    text: dict[str, str] = {}
+    for key in keys:
+        if key in entry:
+            value = entry[key]
+            if not isinstance(value, str) or not value.strip():
+                return f"its {key} is not text"
+            text[key] = value.strip()
+    interpreter = text.get("interpreter")
     if interpreter is not None and interpreter not in SKILL_HOOK_INTERPRETERS:
         return f"its interpreter is not {' or '.join(SKILL_HOOK_INTERPRETERS)}"
     folder: Path | None = None
-    if "dir" in entry:
+    if "dir" in text:
         try:
-            folder = (base / Path(entry["dir"]).expanduser()).resolve()
+            folder = (base / Path(text["dir"]).expanduser()).resolve()
         except (OSError, RuntimeError) as exc:
             return f"its dir cannot be resolved: {exc}"
-    return HookApproval(entry["skill"], entry["hook"], interpreter, folder)
+        if folder.exists() and not folder.is_dir():
+            return f"its dir is no folder: {folder}"
+    return HookApproval(text["skill"], text["hook"], interpreter, folder)
 
 
 def _read_skill_hook_policy(policy: Any, policy_path: str) -> SkillHookPolicy:
@@ -1034,41 +1063,58 @@ def _read_skill_hook_policy(policy: Any, policy_path: str) -> SkillHookPolicy:
     a policy linked from a dotfiles checkout reads it from there), `~`
     expanded, and resolved, so a link and the folder it points at are one.
 
-    An object entry it cannot read (a key it does not take, a value that is
-    not text, `null` included) approves nothing, and a refusal says so: a
-    misspelt `dir` read as no `dir` would approve the hook in every folder.
-    Any other entry (a number, `null`) approves nothing, as before objects
-    were read, and an `allow` that is an object has its keys read as text
-    entries, as they were. A policy that is no object, an `allow` of another
-    kind and a `requireDir` that is not true or false are an error.
+    What it cannot read approves nothing, and a refusal says what it is: an
+    object entry with a key it does not take, a key missing or a value that
+    is not text (`null` included), since read as an entry without `dir` a
+    misspelt `dir` would approve the hook in every folder; an entry that is
+    neither text nor an object (a number, `null`), which approves nothing
+    as it did before objects were read; an `allow` that is no list, a
+    policy that is no object, approving nothing; a `requireDir` that is not
+    true or false, taken as true. An `allow` that is an object has its keys
+    read as text entries, as they were, and what they hold is not read: a
+    `dir` written there is said to be unread rather than quietly dropped,
+    which would approve the hook in every folder. A policy that does not
+    load stops the firing, as before.
+
+    What it cannot read is in the log as well as in a refusal: an entry
+    read as approving less stops a hook, which says so, but one read as
+    approving more (a `dir` an object `allow` holds) runs it, and then only
+    the log would say the folder was not read.
     """
 
-    def unreadable(why: str) -> RuntimeError:
-        return RuntimeError(f"Cannot read skill hook policy '{policy_path}': {why}")
-
+    unread: list[str] = []
     if not isinstance(policy, dict):
-        raise unreadable("it is not a JSON object")
+        unread.append("the policy is not a JSON object")
+        policy = {}
     require_dir = policy.get("requireDir", False)
     if not isinstance(require_dir, bool):
-        raise unreadable("`requireDir` is not true or false")
+        unread.append(f"requireDir {json.dumps(require_dir)} is not true or false: taken as true")
+        require_dir = True
     allow = policy.get("allow", [])
     if isinstance(allow, dict):
+        unread.append("allow is an object: its keys are read as entries, what they hold is not")
         allow = list(allow)
     if not isinstance(allow, list):
-        raise unreadable("`allow` is not a list")
+        unread.append(f"allow {json.dumps(allow)} is not a list")
+        allow = []
     base = Path(policy_path).resolve().parent
     names: set[str] = set()
     approvals: list[HookApproval] = []
-    unread: list[str] = []
     for entry in allow:
         if isinstance(entry, str):
-            names.add(entry)
+            names.add(entry.strip())
         elif isinstance(entry, dict):
             read = _object_entry(entry, base)
             if isinstance(read, HookApproval):
                 approvals.append(read)
             else:
                 unread.append(f"{json.dumps(entry)} ({read})")
+        else:
+            unread.append(f"{json.dumps(entry)} (it is neither text nor an object)")
+    if unread:
+        logger.warning(
+            "skill hook policy '%s': what it cannot read: %s", policy_path, "; ".join(unread)
+        )
     return SkillHookPolicy(frozenset(names), tuple(approvals), tuple(unread), require_dir)
 
 
@@ -1113,15 +1159,18 @@ def _authorize_skill_hook(
     held: list[str] = []
     if by_name:
         held.append("by name only, which requireDir makes count for nothing")
-    if any(approval.dir is not None for approval in named):
-        held.append("for other folders only")
+    others = sorted({str(approval.dir) for approval in named if approval.dir is not None})
+    if others:
+        # Naming them is how a `dir` that is misspelt, or no longer the
+        # folder the run resolves, is seen for what it is.
+        held.append(f"for other folders only ({', '.join(others)})")
     said = (
         f"is approved in policy '{policy_path}' {', and '.join(held)}"
         if held
         else f"not listed in policy '{policy_path}'"
     )
     if policy.unread:
-        said += "; the policy's entries it cannot read: " + "; ".join(policy.unread)
+        said += "; what it cannot read of the policy: " + "; ".join(policy.unread)
     return False, f"hook '{skill_name}:{hook_name}' of {where} {said}"
 
 
@@ -1167,16 +1216,20 @@ def _run_skill_hook(
     """Execute one skill hook script and return debug metadata.
 
     The script is taken from `skill_dir`, the folder the firing read the
-    skill from, when given; else from the folder `skill_name` resolves to
-    now. A firing passes it, so its post hook does not run a folder made
-    during the agent's turn where the name resolves first. The metadata
-    names that folder, `skillDir`, the one the approval is checked against.
+    skill's `SKILL.md` from (`skillFolder` of the firing's debug data); a
+    firing passes it to both its hooks, so neither runs a folder made
+    during the agent's turn, or by a parallel worker, where the name
+    resolves first. Without it the name is resolved now, for a caller that
+    runs one hook of its own. The metadata names the folder it took,
+    `skillDir`, resolved, the one the approval was checked against.
     """
 
     _validate_skill_name(skill_name)
     _validate_skill_name(hook_name)
     if skill_dir is None:
         skill_dir = _resolve_skill_dir(skill_name, plan)
+    if skill_dir is not None:
+        skill_dir = skill_dir.resolve()
     resolved = _skill_hook_script_in(skill_dir, hook_name) if skill_dir is not None else None
     if skill_dir is None or resolved is None:
         return {
@@ -1314,7 +1367,7 @@ def _build_effective_agent_prompt(spec: AgentSpec, plan: Any) -> tuple[str, dict
     # named but cannot be read still raises, from _read_skill_md.
     skill_name = (spec.skill or "").strip()
     if spec.use_skill and skill_name:
-        skill_text, skill_path = _read_skill_md(skill_name, plan)
+        skill_text, skill_path, skill_folder = _read_skill(skill_name, plan)
         skill_meta, skill_body = _parse_skill_frontmatter(skill_text)
         skill_dir = skill_path.parent
         skill_body = _rewrite_skill_body_paths(skill_body, skill_dir)
@@ -1322,6 +1375,9 @@ def _build_effective_agent_prompt(spec: AgentSpec, plan: Any) -> tuple[str, dict
         debug_meta["skillPath"] = str(skill_path)
         debug_meta["skillDir"] = str(skill_dir)
         debug_meta["skillMeta"] = skill_meta
+        # The folder the skill was read from, where its hooks run from
+        # (`_run_skill_hook`); `skillDir` is `SKILL.md`'s, which a link moves.
+        debug_meta["skillFolder"] = str(skill_folder)
 
     if spec.use_prompt:
         prompt_text = (spec.prompt or "").strip()

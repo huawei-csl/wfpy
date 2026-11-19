@@ -20,7 +20,7 @@ All notable changes to wfpy are documented here. The format follows
   makes them, and object entries without `dir`, count for nothing. An
   object entry wfpy cannot read (a key it does not take, a value that is
   not text) approves nothing, not the hook by name, and a refusal lists
-  it. Both hooks of a firing run from the folder its skill was read from:
+  it, as the log does. Both hooks of a firing run from the folder its skill was read from:
   the post hook resolved the name again after the agent's turn, which could
   have made another folder where the name resolves first. The reason a hook
   ran or was refused names its skill folder, and the hook's debug record

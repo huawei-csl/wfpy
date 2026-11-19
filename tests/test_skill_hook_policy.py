@@ -11,6 +11,7 @@ entries that name none count for nothing.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import types
 from pathlib import Path
@@ -303,8 +304,48 @@ class TestAnEntryThatCannotBeRead:
         result = run_pre(workflow(project), {"allow": [entry]}, tmp_path / "policy.json")
 
         assert result["ran"] is False
-        assert "entries it cannot read" in result["reason"]
+        assert "what it cannot read" in result["reason"]
         assert json.dumps(entry) in result["reason"]
+
+    @pytest.mark.parametrize(
+        ("entry", "said"),
+        [
+            ({"hook": "pre"}, "it has no skill"),
+            ({"dir": "x"}, "it has no skill and no hook"),
+            ({"skill": "review", "hook": "pre", "directory": "x"}, "it holds directory"),
+            ({"skill": "review", "hook": "pre", "dir": None}, "its dir is not text"),
+            ({"skill": "review", "hook": "pre", "interpreter": "bash"}, "its interpreter is not"),
+        ],
+    )
+    def test_the_refusal_says_what_it_is_that_cannot_be_read(self, entry, said, tmp_path):
+        project = tmp_path / "project"
+        hooked_skill(project / ".claude" / "skills")
+
+        result = run_pre(workflow(project), {"allow": [entry]}, tmp_path / "policy.json")
+
+        assert said in result["reason"]
+
+    def test_a_dir_that_names_a_file_is_not_read(self, tmp_path):
+        """`SKILL.md` or `scripts/pre.sh` in place of the folder: it would
+        match no folder and the refusal would not say why."""
+        project = tmp_path / "project"
+        folder = hooked_skill(project / ".claude" / "skills")
+        entry = {"skill": "review", "hook": "pre", "dir": str(folder / "SKILL.md")}
+
+        result = run_pre(workflow(project), {"allow": [entry]}, tmp_path / "policy.json")
+
+        assert result["ran"] is False
+        assert "its dir is no folder" in result["reason"]
+
+    def test_the_spaces_around_a_name_are_not_part_of_it(self, tmp_path):
+        """A run takes `skill=" review "` as `review`; so does an entry."""
+        project = tmp_path / "project"
+        folder = hooked_skill(project / ".claude" / "skills")
+        entry = {"skill": " review ", "hook": " pre ", "dir": f" {folder} "}
+
+        result = run_pre(workflow(project), {"allow": [entry]}, tmp_path / "policy.json")
+
+        assert ran(result), result
 
     def test_the_entries_it_reads_still_approve(self, tmp_path):
         """A note beside the entries (`{"comment": ...}`) stops no run."""
@@ -325,6 +366,7 @@ class TestAnEntryThatCannotBeRead:
 
         assert result["ran"] is False
         assert "not listed" in result["reason"]
+        assert "7 (it is neither text nor an object)" in result["reason"]
 
     def test_an_allow_that_is_an_object_has_its_keys_read_as_before(self, tmp_path):
         """`set(str(v) for v in allow)` took an object's keys."""
@@ -337,26 +379,125 @@ class TestAnEntryThatCannotBeRead:
 
         assert ran(result), result
 
-    @pytest.mark.parametrize("policy", [["review:pre"], {"allow": "review:pre"}])
-    def test_a_policy_that_is_no_object_or_whose_allow_is_no_list_is_an_error(
-        self, policy, tmp_path
-    ):
+    def test_what_an_objects_keys_hold_is_said_to_be_unread(self, tmp_path, caplog):
+        """A `dir` written there is not read, and the entry approves the
+        hook by name, in every folder: only the log can say so, the hook
+        having run."""
+        project = tmp_path / "project"
+        folder = hooked_skill(project / ".claude" / "skills")
+        policy = {"allow": {"review:pre": {"dir": str(folder)}}}
+
+        with caplog.at_level(logging.WARNING, logger="wfpy"):
+            result = run_pre(workflow(project), policy, tmp_path / "policy.json")
+
+        assert ran(result), result
+        assert "allow is an object: its keys are read as entries" in caplog.text
+
+    def test_the_log_says_what_it_cannot_read(self, tmp_path, caplog):
         project = tmp_path / "project"
         hooked_skill(project / ".claude" / "skills")
+        policy = {"allow": [{"skill": "review", "hook": "pre", "dir": None}]}
 
-        with pytest.raises(RuntimeError, match="skill hook policy"):
+        with caplog.at_level(logging.WARNING, logger="wfpy"):
             run_pre(workflow(project), policy, tmp_path / "policy.json")
 
-    def test_a_require_dir_that_is_not_true_or_false_is_an_error(self, tmp_path):
-        """Read either way, it would change what every entry approves."""
+        assert "what it cannot read" in caplog.text
+        assert "its dir is not text" in caplog.text
+
+    @pytest.mark.parametrize(
+        ("policy", "said"),
+        [
+            (["review:pre"], "the policy is not a JSON object"),
+            ({"allow": "review:pre"}, "is not a list"),
+            ({"allow": 3}, "is not a list"),
+        ],
+    )
+    def test_a_policy_or_an_allow_of_another_kind_approves_nothing(self, policy, said, tmp_path):
+        """It stops the hooks, as it did before, rather than the firing: an
+        approval is what a policy gives, and this one gives none."""
         project = tmp_path / "project"
         hooked_skill(project / ".claude" / "skills")
 
-        with pytest.raises(RuntimeError, match="requireDir"):
-            run_pre(workflow(project), {"requireDir": "yes", "allow": []}, tmp_path / "policy.json")
+        result = run_pre(workflow(project), policy, tmp_path / "policy.json")
+
+        assert result["ran"] is False
+        assert said in result["reason"]
+
+    def test_a_require_dir_that_is_not_true_or_false_is_taken_as_true(self, tmp_path):
+        """The reading that approves less: a name-only entry counts for
+        nothing, and the refusal says the setting was not read."""
+        project = tmp_path / "project"
+        hooked_skill(project / ".claude" / "skills")
+        policy = {"requireDir": "yes", "allow": ["review:pre"]}
+
+        result = run_pre(workflow(project), policy, tmp_path / "policy.json")
+
+        assert result["ran"] is False
+        assert '"yes" is not true or false: taken as true' in result["reason"]
+
+    def test_a_policy_file_that_does_not_load_stops_the_firing(self, tmp_path):
+        """As before: a policy that is not JSON is read as approving nothing
+        by no one."""
+        project = tmp_path / "project"
+        hooked_skill(project / ".claude" / "skills")
+        written = tmp_path / "policy.json"
+        written.write_text("{not json", encoding="utf-8")
+        plan = types.SimpleNamespace(
+            source_path=str(workflow(project)),
+            work_dir=None,
+            options={"skill_hook_auth": "policy", "skill_hook_policy": str(written)},
+        )
+
+        with pytest.raises(RuntimeError, match="policy"):
+            _run_skill_hook(
+                skill_name="review",
+                hook_name="pre",
+                phase="pre",
+                actor_name="reviewer",
+                payload={},
+                response_text=None,
+                plan=plan,
+                timeout_ms=10_000,
+            )
 
 
 class TestTheRecordNamesTheFolder:
+    def test_it_names_it_resolved_as_the_approval_was_checked(self, tmp_path):
+        """A firing names the folder it read the skill from; the record and
+        the approval must be the same folder, links and all."""
+        project = tmp_path / "project"
+        folder = hooked_skill(project / ".claude" / "skills")
+        linked = tmp_path / "link-to-review"
+        try:
+            linked.symlink_to(folder)
+        except OSError as error:
+            pytest.skip(f"cannot create a symlink here: {error}")
+        plan = types.SimpleNamespace(
+            source_path=str(workflow(project)),
+            work_dir=None,
+            options={
+                "skill_hook_auth": "policy",
+                "skill_hook_policy": str(tmp_path / "policy.json"),
+            },
+        )
+        entry = {"skill": "review", "hook": "pre", "dir": str(folder)}
+        (tmp_path / "policy.json").write_text(json.dumps({"allow": [entry]}), encoding="utf-8")
+
+        result = _run_skill_hook(
+            skill_name="review",
+            hook_name="pre",
+            phase="pre",
+            actor_name="reviewer",
+            payload={},
+            response_text=None,
+            plan=plan,
+            timeout_ms=10_000,
+            skill_dir=linked,
+        )
+
+        assert ran(result), result
+        assert result["skillDir"] == str(folder.resolve())
+
     def test_a_hook_that_ran_says_which_folder_it_ran_from(self, tmp_path):
         project = tmp_path / "project"
         skill_dir = hooked_skill(project / ".claude" / "skills")
@@ -408,6 +549,19 @@ class TestTheListGivesTheFolderToApprove:
 
 
 class TestTheRefusalSaysWhatThePolicyHolds:
+    def test_it_names_the_folders_the_policy_approves_for_the_hook(self, tmp_path):
+        """A `dir` misspelt, or no longer the folder the run resolves, is
+        seen for what it is only when the refusal names it."""
+        project = tmp_path / "project"
+        hooked_skill(project / ".claude" / "skills")
+        misspelt = str(project / ".claude" / "skils" / "review")
+        policy = {"allow": [{"skill": "review", "hook": "pre", "dir": misspelt}]}
+
+        result = run_pre(workflow(project), policy, tmp_path / "policy.json")
+
+        assert result["ran"] is False
+        assert f"for other folders only ({misspelt})" in result["reason"]
+
     def test_by_name_under_require_dir_and_for_another_folder(self, tmp_path, isolated):
         project = tmp_path / "project"
         hooked_skill(project / ".claude" / "skills")

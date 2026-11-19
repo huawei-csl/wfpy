@@ -502,7 +502,9 @@ resolved. It approves that folder's hook and no other. `interpreter`
 `allow`, makes the entries that name no folder count for nothing, as
 `lint:pre` would above. An object entry with a key wfpy does not read, or a
 value that is not text (`null` included), approves nothing rather than
-approving by name, and a refusal lists it. Both hooks of a firing run from
+approving by name, and a refusal lists it, as the log does. An `allow`
+written as an object has its keys read as text entries and what they hold
+is not read. Both hooks of a firing run from
 the folder its skill was read from, though the agent's turn makes another
 where the name resolves first. Why a hook ran or did not names the skill
 folder, and the hook's record in the firing's debug data (`WF_AGENT_DEBUG`)
