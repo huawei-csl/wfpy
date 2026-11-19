@@ -262,6 +262,19 @@ All notable changes to wfpy are documented here. The format follows
 - The live files go only after the run's record is in `run-log.jsonl`, on
   success as on failure. They went before it, and in between a reader found
   only the previous run.
+- A run refuses a skill, agent preset or hook name that starts with `.`,
+  saying why. `wfpy skills` does not list a hidden entry, as Codex and
+  Claude Code skip one, but `skill=".draft"` loaded
+  `.claude/skills/.draft`, which no list offers, and `skill=".system"` took
+  Codex's `.system` root for a skill. A preset that preloads such a skill
+  is warned about it, as one that preloads a missing skill is, and a hook
+  declared with such a name does not run. A name is also refused when it
+  begins or ends with whitespace, since a run reads one without it and so
+  can never resolve that folder. A hook's script is held inside the
+  skill's `scripts/`, as a skill is held inside its root: what validation
+  leaves is a Windows drive-relative name (`d:evil`), which joined outside
+  the folder. The list leaves such names out by the same
+  check, so what it offers and what a run takes cannot differ.
 
 ## [1.1.0] — 2026-10-14
 

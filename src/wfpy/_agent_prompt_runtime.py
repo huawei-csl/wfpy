@@ -611,21 +611,46 @@ def _claude_agent_search_roots(plan: Any, cwd: Path | None = None) -> list[Path]
     return [root.path for root in _claude_agent_lookup_roots(plan, cwd)]
 
 
-def _validate_skill_name(skill_name: str) -> None:
-    """Validate user-provided skill names used for filesystem lookup."""
+def _validate_skill_name(skill_name: str, what: str = "Skill name") -> None:
+    """Validate user-provided skill names used for filesystem lookup.
+
+    The same rule holds for an agent preset's name and a hook's, which name
+    a file or folder the same way; `what` names the kind in the error. A
+    name that starts with `.` names a hidden entry, which is no skill: the
+    `.git` of a skills folder kept in git, or Codex's `.system`, a root of
+    its own; `.` and `..` name a folder of the walk itself. Codex and
+    Claude Code skip hidden entries, `wfpy skills` does not list them, and
+    so a run does not take one either.
+
+    A name is taken without the whitespace around it everywhere a run reads
+    one (`spec.skill`, `claude_agent`, a preset's `skills`, a hook in
+    `SKILL.md`), so what reaches this with whitespace around it is a name
+    read from a folder, which no run can resolve: refusing it is what keeps
+    `wfpy skills` to the names a run takes.
+    """
 
     if not skill_name or not skill_name.strip():
-        raise ValueError("Skill name is empty.")
+        raise ValueError(f"{what} is empty.")
+    if skill_name != skill_name.strip():
+        raise ValueError(
+            f"{what} must not begin or end with whitespace: {skill_name!r} is read"
+            " without it, so it names no file a run finds."
+        )
     if "/" in skill_name or "\\" in skill_name:
-        raise ValueError("Skill name must not include path separators.")
+        raise ValueError(f"{what} must not include path separators.")
     if ".." in skill_name:
-        raise ValueError("Skill name must not include '..'.")
+        raise ValueError(f"{what} must not include '..'.")
+    if skill_name.startswith("."):
+        raise ValueError(
+            f"{what} must not start with '.': '{skill_name}' names a hidden entry, or a"
+            " folder of the search itself, which is no skill, preset or hook."
+        )
 
 
 def _validate_claude_agent_name(agent_name: str) -> None:
     """Validate Claude agent names used for filesystem lookup."""
 
-    _validate_skill_name(agent_name)
+    _validate_skill_name(agent_name, "Agent preset name")
 
 
 def _find_skill(skill_name: str, roots: Iterable[Path]) -> tuple[Path, Path] | None:
@@ -641,8 +666,8 @@ def _find_skill(skill_name: str, roots: Iterable[Path]) -> tuple[Path, Path] | N
         # every symlinked install.
         #
         # Nothing is lost by testing it unresolved. `_validate_skill_name()`
-        # already rejects path separators and `..`, so `root / skill_name` is
-        # a direct child of `root` (or, for the name `.`, `root` itself). What
+        # already rejects path separators, `..` and a leading `.` (so `.`
+        # too), so `root / skill_name` is a direct child of `root`. What
         # remains is a Windows drive-relative name like `d:bar`, which passes
         # that validation and does join outside `root` — this check is what
         # catches it. Do not reinstate the `.resolve()` before it.
@@ -1280,7 +1305,7 @@ def _resolve_skill_hook_script(
     """Resolve a skill hook script by convention under `<skill>/scripts`."""
 
     _validate_skill_name(skill_name)
-    _validate_skill_name(hook_name)
+    _validate_skill_name(hook_name, "Hook name")
     skill_dir = _resolve_skill_dir(skill_name, plan)
     if skill_dir is None:
         return None
@@ -1289,15 +1314,24 @@ def _resolve_skill_hook_script(
 
 def _skill_hook_script_in(skill_dir: Path, hook_name: str) -> tuple[Path, str] | None:
     """A hook's script in a skill's directory: `scripts/<hook>.py`, else
-    `scripts/<hook>.sh`. `hook_name` is validated already."""
+    `scripts/<hook>.sh`. `hook_name` is validated already.
+
+    The joined name is held inside `scripts/`, as a skill's is inside its
+    root (`_find_skill`): validation leaves a Windows drive-relative name
+    such as `d:evil`, which joins outside the folder, and a hook's script
+    is executed.
+    """
 
     scripts_root = (skill_dir / "scripts").resolve()
-    py = (scripts_root / f"{hook_name}.py").resolve()
-    sh = (scripts_root / f"{hook_name}.sh").resolve()
-    if py.exists() and py.is_file():
-        return py, "python"
-    if sh.exists() and sh.is_file():
-        return sh, "sh"
+    for suffix, interpreter in ((".py", "python"), (".sh", "sh")):
+        candidate = scripts_root / f"{hook_name}{suffix}"
+        try:
+            candidate.relative_to(scripts_root)
+        except ValueError:
+            continue
+        script = candidate.resolve()
+        if script.exists() and script.is_file():
+            return script, interpreter
     return None
 
 

@@ -471,7 +471,11 @@ project's, and ranks a user's skill after a repository's. A relative
 
 A skill is found by its folder's name, `<folder>/<skill-name>/SKILL.md`, as
 in wfpy's own folders; a skill nested deeper in a collection is reached by
-naming the collection in `WF_SKILLS_ROOT`.
+naming the collection in `WF_SKILLS_ROOT`. A name that starts with `.` is
+refused, a preset's and a hook's too: a hidden folder (`.git`, Codex's
+`.system`) is no skill, as Codex and Claude Code skip it. So is a name
+with a space at either end, a run reading one without them. `wfpy skills`
+offers the names a run takes, by the same check.
 
 `wfpy skills <workflow.py>` lists the skills and agent presets a run of the
 workflow started in the current directory finds, from the folder it takes,
