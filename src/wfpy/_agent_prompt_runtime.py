@@ -1359,7 +1359,7 @@ def _run_skill_hook(
     """
 
     _validate_skill_name(skill_name)
-    _validate_skill_name(hook_name)
+    _validate_skill_name(hook_name, "Hook name")
     if skill_dir is None:
         skill_dir = _resolve_skill_dir(skill_name, plan)
     if skill_dir is not None:
