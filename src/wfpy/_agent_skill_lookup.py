@@ -243,11 +243,13 @@ def _description(meta: dict[str, Any], body: str) -> str | None:
 
     The runtime's front-matter reader takes one line per field, so a YAML
     block scalar (`description: |` or `>`) reads as its indicator alone;
-    that is no description to show. A description is for the picker; the
-    run does not read one.
+    that is no description to show, nor is the list or mapping the preset
+    reader makes of indented lines under `description:`. A description is
+    for the picker; the run does not read one.
     """
 
-    text = str(meta.get("description", "")).strip()
+    raw = meta.get("description")
+    text = raw.strip() if isinstance(raw, str) else ""
     if BLOCK_SCALAR.fullmatch(text):
         text = ""
     if not text:

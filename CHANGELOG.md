@@ -43,6 +43,9 @@ All notable changes to wfpy are documented here. The format follows
   of dubious ownership git refuses, bounds nothing: with no repository, or
   no git, only the workflow's directory is searched. So a folder above the
   project (`/tmp/.agents/skills`) is not read, whoever planted a `/tmp/.git`.
+  git is not handed the variables that name another repository's parts,
+  which a git hook exports (`GIT_DIR`, `GIT_COMMON_DIR`, …); a git that does
+  not answer within 10 s is said in the log.
   A user-level folder is searched in its user-level place however the walk
   reaches it; a home directory kept in git has its other folders
   (`~/.opencode/skills`) searched as a project's. A `CODEX_HOME` that names

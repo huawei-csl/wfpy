@@ -364,6 +364,24 @@ class TestWhatTheRunReads:
 
         assert skills["folded"]["description"] == "First line."
 
+    def test_a_preset_description_that_is_no_text_shows_the_body_instead(self, tmp_path):
+        """The preset reader makes indented lines under `description:` a list
+        or a mapping; that is no text to show."""
+        source = workflow(tmp_path / "project")
+        agents = tmp_path / "project" / ".claude" / "agents"
+        agents.mkdir(parents=True)
+        (agents / "listed.md").write_text(
+            "---\ndescription:\n  - Reviews code\n---\nFirst line.\n", encoding="utf-8"
+        )
+        (agents / "mapped.md").write_text(
+            "---\ndescription:\n  when: reviewing\n---\nSecond line.\n", encoding="utf-8"
+        )
+
+        presets = by_name(agent_skill_lookup(str(source), os.getcwd())["presets"])
+
+        assert presets["listed"]["description"] == "First line."
+        assert presets["mapped"]["description"] == "Second line."
+
 
 class TestPresets:
     def test_presets_are_what_a_run_resolves(self, tmp_path):

@@ -17,6 +17,7 @@ name that tries to leave its root.
 
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import subprocess
@@ -952,6 +953,40 @@ class TestGitDecidesTheRepository:
         monkeypatch.setenv("GIT_WORK_TREE", str(tmp_path))
 
         assert runtime._repository_root(loose.resolve()) is None
+
+    def test_variables_naming_a_repositorys_parts_are_not_passed_on(self, tmp_path, monkeypatch):
+        """A git hook, or a push git holds in quarantine, exports where its
+        own repository keeps its parts; passed on, they make git take the
+        workflow's repository for none."""
+        project = tmp_path / "project"
+        git_init(project)
+        flows = project / "flows"
+        flows.mkdir()
+        nowhere = tmp_path / "nowhere"
+        monkeypatch.setenv("GIT_COMMON_DIR", str(nowhere))
+        monkeypatch.setenv("GIT_OBJECT_DIRECTORY", str(nowhere))
+        monkeypatch.setenv("GIT_INDEX_FILE", str(nowhere / "index"))
+
+        assert runtime._repository_root(flows.resolve()) == project.resolve()
+
+    def test_a_git_that_does_not_answer_is_said(self, tmp_path, monkeypatch, caplog):
+        """The tool folders above the workflow's directory are then left out,
+        and the log says why."""
+        sleep = shutil.which("sleep")
+        if sleep is None:
+            pytest.skip("no sleep on PATH")
+        bin_dir = tmp_path / "bin"
+        fake_git(bin_dir, f"exec '{sleep}' 5")
+        monkeypatch.setenv("PATH", str(bin_dir))
+        monkeypatch.setattr(runtime, "GIT_TIMEOUT_SECONDS", 0.2)
+        flows = tmp_path / "project" / "flows"
+        flows.mkdir(parents=True)
+
+        with caplog.at_level(logging.WARNING, logger="wfpy"):
+            assert runtime._repository_root(flows.resolve()) is None
+
+        assert "git did not say within 0.2 s" in caplog.text
+        assert str(flows.resolve()) in caplog.text
 
     def test_wfpy_own_folders_are_read_as_they_always_were(self, tmp_path):
         """`.wf/skills` and `.claude/skills` walk to the filesystem root, with

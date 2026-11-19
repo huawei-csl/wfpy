@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import stat
@@ -14,11 +15,34 @@ from typing import Any, NamedTuple
 
 from wfpy.core import AgentSpec
 
+logger = logging.getLogger("wfpy")
+
 SKILL_MD_MAX_BYTES = 256_000
 """Maximum SKILL.md size accepted by the runtime loader."""
 
 GIT_TIMEOUT_SECONDS = 10
 """How long the lookup waits for git to say which repository a workflow is in."""
+
+GIT_REPOSITORY_VARIABLES = (
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_COMMON_DIR",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_INDEX_FILE",
+    "GIT_GRAFT_FILE",
+    "GIT_SHALLOW_FILE",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_PREFIX",
+)
+"""The variables naming one repository's own parts, not passed on when the
+lookup asks git which repository a workflow is in: those `git rev-parse
+--local-env-vars` lists, which git clears itself before it runs a
+command in a submodule. Its configuration ones (`GIT_CONFIG_PARAMETERS`,
+`GIT_CONFIG_COUNT`) are passed on: they carry the user's choices, such
+as the `safe.directory` a container sets that way."""
 
 AGENT_MAX_TOOL_ROUNDS = 6
 """Maximum tool-call continuation rounds per single agent firing."""
@@ -182,18 +206,18 @@ def _repository_root(start: Path) -> Path | None:
     trusts. It refuses a repository of dubious ownership, such as a
     `/tmp/.git` another user planted, unless the user lists it in
     `safe.directory`, as containers and CI already do for their checkouts.
-    `GIT_DIR` and `GIT_WORK_TREE` are not passed on: the question is which
-    repository the workflow's directory is in, not which one the
-    environment names.
+    `GIT_DIR`, `GIT_WORK_TREE` and the other `GIT_REPOSITORY_VARIABLES` are
+    not passed on: a git hook, or a push git holds in quarantine, exports
+    its own repository's, and the question is which repository the
+    workflow's directory is in, not which one the environment names. A git
+    that does not answer within `GIT_TIMEOUT_SECONDS` is said in the log.
 
     `cli._discover_project_root` answers another question: it also stops at
     a `pyproject.toml`. The folders bounded here are those of Codex and
     OpenCode, which stop at the git repository.
     """
 
-    env = {
-        key: value for key, value in os.environ.items() if key not in ("GIT_DIR", "GIT_WORK_TREE")
-    }
+    env = {key: value for key, value in os.environ.items() if key not in GIT_REPOSITORY_VARIABLES}
     try:
         found = subprocess.run(
             ["git", "-C", str(start), "rev-parse", "--show-toplevel"],
@@ -203,6 +227,14 @@ def _repository_root(start: Path) -> Path | None:
             timeout=GIT_TIMEOUT_SECONDS,
             check=False,
         )
+    except subprocess.TimeoutExpired:
+        logger.warning(
+            "git did not say within %s s which repository %s is in: the other agent"
+            " tools' project folders are searched there alone",
+            GIT_TIMEOUT_SECONDS,
+            start,
+        )
+        return None
     except (OSError, subprocess.SubprocessError):
         return None
     top = os.fsdecode(found.stdout).rstrip("\r\n")
