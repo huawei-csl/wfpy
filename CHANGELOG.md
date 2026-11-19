@@ -301,6 +301,13 @@ All notable changes to wfpy are documented here. The format follows
   leaves is a Windows drive-relative name (`d:evil`), which joined outside
   the folder. The list leaves such names out by the same
   check, so what it offers and what a run takes cannot differ.
+- A parallel run does not end with a token an actor could have taken. An
+  actor that does not fire is held until another makes progress, and "since
+  when" was read when its answer was collected, not when it was asked.
+  Progress made in between was lost: a task that looked at an empty queue
+  while its producer was firing was never asked again, and the run reached
+  quiescence with no error. The race has been there since 1.0.0b1 and shows
+  on a loaded machine. A sequential run (`max_workers=1`) was not affected.
 
 ## [1.1.0] — 2026-10-14
 
