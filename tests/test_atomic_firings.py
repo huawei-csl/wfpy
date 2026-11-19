@@ -13,8 +13,15 @@ from typing import Any
 
 import pytest
 
-from wfpy import Port, action, agent, connect, guard, loop, task, tool, workflow
-from wfpy.runner import Queue, _atomic_firing, _build_workflow_graph, build_plan, execute_plan
+from wfpy import File, Port, action, agent, connect, guard, loop, run, task, tool, workflow
+from wfpy.runner import (
+    Queue,
+    _atomic_firing,
+    _build_workflow_graph,
+    build_plan,
+    execute_plan,
+    load_validator_registry,
+)
 
 
 @task
@@ -143,6 +150,97 @@ def test_a_failed_agent_gives_its_token_back(
     _fail(plan, tmp_path, inputs={"In": "brief"})
 
     assert _queued(plan, "w", "In") == ["brief"]
+
+
+def _put(plan: Any, actor_name: str, port: str) -> list[Any]:
+    actor = next(a for a in plan.actors if a.name == actor_name)
+    return [item for q in actor.out_queues[port] for item in q.items]
+
+
+def test_an_agents_output_that_fails_validation_is_not_left_in_its_queue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The firing fails, so its input is given back. What it wrote must not
+    stay in the output queue beside it: a worker downstream could take it, and
+    a resume would deliver it together with the next attempt's."""
+    monkeypatch.setattr("wfpy.runner._invoke_agent", lambda *_a, **_k: ("<a>", [], None, {}))
+
+    @agent(prompt="x", useSkill=False)
+    class Writer:
+        class Ports:
+            In = Port[str](direction="in")
+            Out = Port[File](direction="out", ext=".xml", validate=["xml.wellFormed"])
+
+    @workflow(inputs={"In": str}, outputs={"Out": File(ext=".xml")})
+    def wf():
+        w = Writer()
+        connect("In", w.In)
+        connect(w.Out, "Out")
+
+    plan = _plan(wf)
+    plan.validator_registry = load_validator_registry("", {})
+    with pytest.raises(RuntimeError, match=r"Output validation failed on w\.Out"):
+        execute_plan(plan, out_dir=tmp_path, max_workers=1, inputs={"In": "brief"})
+
+    assert _queued(plan, "w", "In") == ["brief"]
+    assert _put(plan, "w", "Out") == []
+
+
+def test_a_tools_output_that_fails_validation_is_not_left_in_its_queue(tmp_path: Path) -> None:
+    write_unclosed = "import sys; open(sys.argv[1], 'w').write('<a>')"
+
+    @tool(cmd=sys.executable, args=["-c", write_unclosed, "{out.Out}", "{in.In}"])
+    class Writes:
+        class Ports:
+            In = Port[str](direction="in")
+            Out = Port[File](direction="out", ext=".xml", validate=["xml.wellFormed"])
+
+    @workflow(inputs={"In": str}, outputs={"Out": File(ext=".xml")})
+    def wf():
+        t = Writes()
+        connect("In", t.In)
+        connect(t.Out, "Out")
+
+    plan = _plan(wf)
+    plan.validator_registry = load_validator_registry("", {})
+    with pytest.raises(RuntimeError, match=r"Output validation failed on t\.Out"):
+        execute_plan(plan, out_dir=tmp_path, max_workers=1, inputs={"In": "payload"})
+
+    assert _queued(plan, "t", "In") == ["payload"]
+    assert _put(plan, "t", "Out") == []
+
+
+def test_a_resume_after_a_rejected_output_delivers_the_accepted_one_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The checkpoint of the failed run held the rejected file in the output
+    queue and the input given back, so the resumed run delivered two outputs
+    for one input: the one that failed validation, then the one that passed."""
+    reply = {"text": "<a>"}
+    monkeypatch.setattr(
+        "wfpy.runner._invoke_agent", lambda *_a, **_k: (reply["text"], [], None, {})
+    )
+
+    @agent(prompt="x", useSkill=False)
+    class Writer:
+        class Ports:
+            In = Port[str](direction="in")
+            Out = Port[File](direction="out", ext=".xml", validate=["xml.wellFormed"])
+
+    @workflow(inputs={"In": str}, outputs={"Out": File(ext=".xml")})
+    def wf():
+        w = Writer()
+        connect("In", w.In)
+        connect(w.Out, "Out")
+
+    with pytest.raises(RuntimeError, match=r"Output validation failed on w\.Out"):
+        run(wf, inputs={"In": "brief"}, out_dir=tmp_path, run_id="first", verbose=False)
+
+    reply["text"] = "<a></a>"
+    outputs = run(
+        wf, out_dir=tmp_path, run_id="second", resume_from=str(tmp_path / "first"), verbose=False
+    )
+    assert [Path(p).read_text() for p in outputs["Out"]] == ["<a></a>"]
 
 
 def test_a_failure_inside_a_child_keeps_the_token_in_the_child_only(tmp_path: Path) -> None:
