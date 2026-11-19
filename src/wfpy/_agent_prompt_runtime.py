@@ -518,20 +518,32 @@ def _validate_skill_name(skill_name: str, what: str = "Skill name") -> None:
     a file or folder the same way; `what` names the kind in the error. A
     name that starts with `.` names a hidden entry, which is no skill: the
     `.git` of a skills folder kept in git, or Codex's `.system`, a root of
-    its own. Codex and Claude Code skip hidden entries, `wfpy skills` does
-    not list them, and so a run does not take one either.
+    its own; `.` and `..` name a folder of the walk itself. Codex and
+    Claude Code skip hidden entries, `wfpy skills` does not list them, and
+    so a run does not take one either.
+
+    A name is taken without the spaces around it everywhere a run reads one
+    (`spec.skill`, `claude_agent`, a preset's `skills`, a hook in
+    `SKILL.md`), so a folder whose name has them is no name a run can
+    resolve, and this refuses it: what `wfpy skills` offers is what a run
+    takes.
     """
 
     if not skill_name or not skill_name.strip():
         raise ValueError(f"{what} is empty.")
+    if skill_name != skill_name.strip():
+        raise ValueError(
+            f"{what} must not begin or end with a space: '{skill_name}' is read without"
+            " them, so it names no file a run finds."
+        )
     if "/" in skill_name or "\\" in skill_name:
         raise ValueError(f"{what} must not include path separators.")
     if ".." in skill_name:
         raise ValueError(f"{what} must not include '..'.")
     if skill_name.startswith("."):
         raise ValueError(
-            f"{what} must not start with '.': '{skill_name}' names a hidden entry, which"
-            " is no skill, preset or hook."
+            f"{what} must not start with '.': '{skill_name}' names a hidden entry, or a"
+            " folder of the search itself, which is no skill, preset or hook."
         )
 
 

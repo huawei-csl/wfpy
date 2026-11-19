@@ -208,8 +208,12 @@ All notable changes to wfpy are documented here. The format follows
   saying why. `wfpy skills` does not list a hidden entry, as Codex and
   Claude Code skip one, but `skill=".draft"` loaded
   `.claude/skills/.draft`, which no list offers, and `skill=".system"` took
-  Codex's `.system` root for a skill. The list now leaves such a name out
-  by the same check, so the two cannot differ.
+  Codex's `.system` root for a skill. A preset that preloads such a skill
+  is warned about it, as one that preloads a missing skill is, and a hook
+  declared with such a name does not run. A name is also refused when it
+  begins or ends with a space, since a run reads one without them and so
+  can never resolve that folder. The list leaves such names out by the same
+  check, so what it offers and what a run takes cannot differ.
 
 ## [1.1.0] — 2026-10-14
 

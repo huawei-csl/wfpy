@@ -133,10 +133,12 @@ def _names_in(roots: list[Path], suffix: str = "") -> list[str]:
     `suffix` taken off an entry that has it (a preset is `<name>.md`, or a
     directory `<name>` for `<name>/AGENT.md`).
 
-    A hidden entry (the `.git` of a skills folder kept in git, Codex's
-    `.system`, a root of its own) is in the list, and goes with every name a
-    run refuses: a caller checks each name as the run does
-    (`_validate_skill_name`), which refuses one that starts with `.`.
+    Every entry is a name, hidden ones included (the `.git` of a skills
+    folder kept in git, Codex's `.system`, a root of its own). They are not
+    skipped here: a caller holds each name against what a run takes
+    (`_validate_skill_name`), which refuses a hidden name, so the list
+    offers what a run resolves and nothing else. A caller that does not
+    check is offering names no run takes.
     """
 
     names: dict[str, None] = {}

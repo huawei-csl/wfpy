@@ -88,7 +88,7 @@ class TestASkillName:
             _resolve_skill_dir(".system", plan)
         assert _resolve_skill_dir("bundled", plan) == (system / "bundled").resolve()
 
-    @pytest.mark.parametrize("name", ["v1.2", "my.skill", "draft."])
+    @pytest.mark.parametrize("name", ["v1.2", "my.skill", "draft.v2"])
     def test_a_dot_elsewhere_is_allowed(self, name, tmp_path):
         project = tmp_path / "project"
         found = skill(project / ".claude" / "skills", name)
@@ -109,6 +109,28 @@ class TestAPresetName:
 
         with pytest.raises(ValueError, match="must not start with"):
             _resolve_claude_agent_path(".hidden", flow(project))
+
+    def test_a_run_whose_preset_preloads_a_hidden_skill_is_warned(self, tmp_path):
+        """A preloaded skill that cannot be read is a warning of the
+        preset's, as a missing one is: the agent runs with the rest of its
+        instructions, and the warning is in the firing's debug data."""
+        from wfpy._agent_prompt_runtime import _build_effective_agent_prompt
+        from wfpy.core import AgentSpec
+
+        project = tmp_path / "project"
+        skill(project / ".claude" / "skills", ".draft")
+        agents = project / ".claude" / "agents"
+        agents.mkdir(parents=True)
+        (agents / "writer.md").write_text("---\nskills: .draft\n---\nbody\n", encoding="utf-8")
+        spec = AgentSpec(
+            prompt="do it", claude_agent="writer", use_claude_agent=True, use_skill=False
+        )
+
+        _prompt, debug = _build_effective_agent_prompt(spec, flow(project))
+
+        [warning] = debug["claudeAgentProfile"]["warnings"]
+        assert "failed to preload claude-agent skill '.draft'" in warning
+        assert "must not start with" in warning
 
     def test_a_preset_that_preloads_a_hidden_skill_is_told_why(self, tmp_path):
         project = tmp_path / "project"
@@ -151,6 +173,21 @@ class TestAHookName:
 
 
 class TestTheListAndTheRunAgree:
+    def test_a_name_with_spaces_around_it_is_refused_and_not_listed(self, tmp_path):
+        """A run reads `skill=" draft "` as `draft`, so the folder
+        `" draft "` is no name it can resolve; the list offered it."""
+        project = tmp_path / "project"
+        root = project / ".claude" / "skills"
+        skill(root, " .draft ")
+        skill(root, "shown")
+        plan = flow(project)
+
+        with pytest.raises(ValueError, match="must not begin or end with a space"):
+            _resolve_skill_dir(" .draft ", plan)
+        assert [entry["name"] for entry in agent_skill_lookup(plan.source_path)["skills"]] == [
+            "shown"
+        ]
+
     def test_a_name_the_run_refuses_is_not_listed(self, tmp_path):
         """The list offers the names a run takes, and no other."""
         project = tmp_path / "project"
