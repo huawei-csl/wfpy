@@ -3638,6 +3638,81 @@ class TestStepAgentBehavior:
         assert outputs == {"Out": ["tick"] * firings}
         assert len(calls) == firings
 
+    @pytest.mark.parametrize(
+        ("given", "outputs"),
+        [({}, ["1:tick"]), ({"fireable_without_input": 3}, ["1:tick", "2:tick", "3:tick"])],
+    )
+    @pytest.mark.parametrize("around", ["child workflow", "loop body"])
+    def test_the_count_is_for_the_run_not_for_each_token_around_the_agent(
+        self, around, given, outputs, tmp_path, monkeypatch
+    ):
+        """Three tokens pass by an agent that reads none of them. It fires as
+        often as its count says, once when it has none, and not once a token."""
+        calls = []
+
+        def fake_invoke(agent_spec, payload_text, verbose, **kwargs):
+            calls.append(payload_text)
+            assert len(calls) <= 20, "the agent did not stop firing"
+            return "tick", [{"role": "assistant", "content": "tick"}], None, {}
+
+        monkeypatch.setattr("wfpy.runner._invoke_agent", fake_invoke)
+
+        @agent(prompt="Tick.", use_skill=False, **given)
+        class Ticker:
+            class Ports:
+                Out = Port[str](direction="out")
+
+        @task
+        class Three:
+            _sent: int = 0
+
+            class Ports:
+                Out = Port[int](direction="out")
+
+            @action(consumes={}, produces={"Out": 1})
+            @guard(lambda self: self._sent < 3)
+            def emit(self) -> int:
+                self._sent += 1
+                return self._sent
+
+        @task
+        class Join:
+            class Ports:
+                Number = Port[int](direction="in")
+                Word = Port[str](direction="in")
+                Out = Port[str](direction="out")
+
+            @action(consumes={"Number": 1, "Word": 1}, produces={"Out": 1})
+            def join(self, number: int, word: str) -> str:
+                return f"{number}:{word}"
+
+        @workflow(inputs={"Number": int}, outputs={"Out": str})
+        def inner():
+            ticker, join = Ticker(), Join()
+            connect("Number", join.Number)
+            connect(ticker.Out, join.Word)
+            connect(join.Out, "Out")
+
+        @workflow(inputs={}, outputs={"Out": str})
+        def with_child():
+            three, child = Three(), inner()
+            connect(three.Out, child.Number)
+            connect(child.Out, "Out")
+
+        @workflow(inputs={}, outputs={"Out": str})
+        def with_loop():
+            items = loop([1, 2, 3])
+            with items:
+                ticker, join = Ticker(), Join()
+                connect(items.item, join.Number)
+                connect(ticker.Out, join.Word)
+                connect(join.Out, "Out")
+
+        wf = with_child if around == "child workflow" else with_loop
+
+        assert run(wf, {}, out_dir=tmp_path, max_workers=1)["Out"] == outputs
+        assert len(calls) == len(outputs)
+
     def test_an_agent_with_an_input_port_does_not_get_the_one_firing(
         self, tmp_path, make_task_meta, make_port, make_agent_spec, mock_invoke_agent
     ):

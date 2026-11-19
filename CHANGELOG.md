@@ -314,8 +314,9 @@ All notable changes to wfpy are documented here. The format follows
   input port" holds at every step of an agent that has none, so its count
   was never read. A run with one did not end, and on a real transport each
   firing was a model turn. The count is for the run: the agent fires once
-  inside a child workflow that receives several tokens, and a resume does
-  not give the firing again. An agent that has input ports is unchanged.
+  inside a child workflow or a loop body that several tokens pass through,
+  and a resume does not give the firing again. An agent that has input
+  ports is unchanged.
 
 ## [1.1.0] — 2026-10-14
 
