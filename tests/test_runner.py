@@ -6041,6 +6041,80 @@ class TestNestedWorkflows:
         assert not any("Leftover tokens in queue" in r.message for r in caplog.records)
 
 
+class TestParallelSchedulerAsksAgain:
+    def test_an_actor_told_no_while_another_fired_is_asked_again(self, tmp_path, monkeypatch):
+        """An actor that does not fire is held until something makes progress.
+        "Since when" was read when its answer was collected, not when it was
+        asked, so progress made in between was lost: the run ended with a token
+        the actor could have taken, and no error.
+
+        The gate is asked before its key exists, and its "no" is held back until
+        the task that makes the key has fired and said so."""
+        import time
+
+        import wfpy.runner as runner
+
+        gate_said_no = threading.Event()
+
+        @task
+        class Late:
+            class Ports:
+                In = Port[str](direction="in")
+                Out = Port[str](direction="out")
+
+            @action(consumes={"In": 1}, produces={"Out": 1})
+            def go(self, key: str) -> str:
+                assert gate_said_no.wait(timeout=20), "the gate was never asked"
+                return key
+
+        @task
+        class Gate:
+            _open: bool = False
+
+            class Ports:
+                Data = Port[str](direction="in")
+                Key = Port[str](direction="in")
+                Out = Port[str](direction="out")
+
+            @action(consumes={"Data": 1}, produces={"Out": 1})
+            @guard(lambda self, data: self._open)
+            def passes(self, data: str) -> str:
+                return data
+
+            @action(consumes={"Key": 1})
+            def unlock(self, key: str) -> None:
+                self._open = True
+
+        step = runner._step_actor
+        held: list[str] = []
+
+        def step_and_hold_the_first_no(actor, plan, *args, **kwargs):
+            before = plan._scheduler_progress_seq
+            fired = step(actor, plan, *args, **kwargs)
+            if actor.name == "gate" and not fired and not held:
+                held.append(actor.name)
+                gate_said_no.set()
+                deadline = time.monotonic() + 20
+                while plan._scheduler_progress_seq == before and time.monotonic() < deadline:
+                    time.sleep(0.001)
+            return fired
+
+        monkeypatch.setattr(runner, "_step_actor", step_and_hold_the_first_no)
+
+        @workflow(inputs={"Data": str, "Key": str}, outputs={"Out": str})
+        def wf():
+            gate, late = Gate(), Late()
+            connect("Data", gate.Data)
+            connect("Key", late.In)
+            connect(late.Out, gate.Key)
+            connect(gate.Out, "Out")
+
+        outputs = run(wf, {"Data": "d", "Key": "k"}, out_dir=tmp_path, max_workers=4)
+
+        assert held == ["gate"]
+        assert outputs["Out"] == ["d"]
+
+
 class TestNestedWorkflowParallelGate:
     """Reproduce: after a slow reviewer completes inside a nested workflow,
     the downstream gate task must fire before the next nested work item starts."""

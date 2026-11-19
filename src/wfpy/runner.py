@@ -1019,6 +1019,8 @@ def execute_plan(
             in_flight: dict[concurrent.futures.Future[Any], RuntimeActor] = {}
             running_actors: set[RuntimeActor] = set()
             blocked_until_progress: dict[RuntimeActor, int] = {}
+            # The progress count when each actor in flight was asked to fire.
+            asked_at: dict[RuntimeActor, int] = {}
 
             def _record_actor_fire(actor: RuntimeActor) -> None:
                 nonlocal steps
@@ -1106,6 +1108,7 @@ def execute_plan(
                         continue
                     if blocked_until_progress.get(actor) == plan._scheduler_progress_seq:
                         continue
+                    asked_at[actor] = plan._scheduler_progress_seq
                     future = executor.submit(_fire_one, actor)
                     in_flight[future] = actor
                     running_actors.add(actor)
@@ -1118,11 +1121,16 @@ def execute_plan(
                 for future in completed:
                     actor = in_flight.pop(future)
                     running_actors.discard(actor)
+                    asked = asked_at.pop(actor)
                     fired = future.result()  # propagate any exception
                     if fired:
                         blocked_until_progress.pop(actor, None)
                     else:
-                        blocked_until_progress[actor] = plan._scheduler_progress_seq
+                        # Held until there is progress since it was *asked*.
+                        # Another actor may have fired after this one looked at
+                        # its queues and before its answer is read here; held
+                        # from now, it would never see the token that made.
+                        blocked_until_progress[actor] = asked
 
                 streamed = _stream_workflow_outputs(plan, out_dir)
 
