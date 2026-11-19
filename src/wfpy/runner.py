@@ -2454,16 +2454,11 @@ def _step_agent(
                     f"{post_hook_result.get('error') or post_hook_result.get('stderr') or 'non-zero exit'}"
                 )
 
-    # ── Route materialized outputs to queues ─────────────────────────
-    for port_name in meta.output_ports:
-        output_val = materialized.get(port_name)
-        if output_val is None:
-            continue
-        for q in actor.out_queues.get(port_name, []):
-            q.enqueue(output_val)
-            _record_edge_token(plan, q, output_val)
-
     # ── Post-validation: validate File outputs after agent invocation ─
+    # Before they are routed: an output that fails under `enforce` raises
+    # here, and one already in a queue would stay there. A worker downstream
+    # could take it, and the checkpoint of the failed run would hold it beside
+    # the inputs given back, so a resume would deliver it with the new one.
     if plan.validator_registry:
         for port_name, pd in meta.output_ports.items():
             if _is_resource_type(pd.port_type):

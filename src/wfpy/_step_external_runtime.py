@@ -332,13 +332,9 @@ def _step_external(
             f"{returncode}:\n{stderr}"
         )
 
-    # Enqueue output values
-    for port_name, file_path in output_values.items():
-        for q in actor.out_queues.get(port_name, []):
-            q.enqueue(file_path)
-            _record_edge_token(plan, q, file_path)
-
     # ── Post-validation: validate File outputs after subprocess ───────
+    # Before they are enqueued, as for an agent (`runner._step_agent`): an
+    # output that fails under `enforce` must not be left in a queue.
     if plan.validator_registry:
         for port_name, file_path in output_values.items():
             pd = meta.output_ports.get(port_name)
@@ -353,6 +349,12 @@ def _step_external(
                     out_dir=out_dir,
                     verbose=verbose,
                 )
+
+    # Enqueue output values
+    for port_name, file_path in output_values.items():
+        for q in actor.out_queues.get(port_name, []):
+            q.enqueue(file_path)
+            _record_edge_token(plan, q, file_path)
 
     _apply_context_patch(
         plan,
