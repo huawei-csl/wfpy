@@ -401,17 +401,35 @@ class Writer:
         Out = Port[dict](direction="out")
 ```
 
-Skill names resolve by convention under your runtime root:
+Skill names resolve by convention under your runtime root (the workflow's
+directory, or the first directory `WF_SKILLS_ROOT` names that exists), and
+in each directory above it up to the top of the project:
 
 - `.wf/skills/<skill-name>/SKILL.md`
 - `.wf/skills/<skill-name>/scripts/<hook>.py|.sh`
 
 wfpy also searches Claude-compatible skill roots in order:
 
-- `<runtime-root>/.claude/skills/<skill-name>/SKILL.md`
+- `<runtime-root>/.claude/skills/<skill-name>/SKILL.md`, at each level of
+  the same walk
 - `<cwd>/.wf/skills/<skill-name>/SKILL.md`
 - `<cwd>/.claude/skills/<skill-name>/SKILL.md`
 - `~/.claude/skills/<skill-name>/SKILL.md`
+
+The project is the workflow's git repository (a submodule is a repository
+of its own). With no repository git accepts, it is `<cwd>` when the
+workflow's directory is in it, and otherwise the workflow's directory
+alone. A folder found by walking up, wfpy's own and the other tools'
+below, is searched from where the walk starts up to the project's top,
+included, and never above it. So a folder above the project, such as
+`/tmp/.claude/skills` or `/tmp/.claude/agents`, is not read for a workflow
+in `/tmp/job` started elsewhere: any local user can write there. `<cwd>`'s
+own folders and the user's (`~/.claude/skills`) are read wherever they
+are, and so is what `WF_SKILLS_ROOT` names. When its first
+directory is outside the project, the walk from it is that directory alone:
+its `.wf/skills` and `.claude/skills` are inside what the variable names,
+and the directories above it are neither named nor the project's. A skill
+kept in a folder above the project is named with `WF_SKILLS_ROOT`.
 
 Then the folders other agent tools install skills into, so a skill installed
 for Codex or OpenCode can be named too. They come after every folder above,
@@ -419,8 +437,8 @@ so a name found above never resolves here:
 
 - `.agents/skills`, `.codex/skills`, `.opencode/skills` and
   `.opencode/skill`, in the workflow's directory and each directory above it
-  up to the top of its git repository, then in `<cwd>` when `<cwd>` is in
-  that repository
+  up to the top of the project, then in `<cwd>` when `<cwd>` is in the
+  workflow's git repository
 - `~/.agents/skills`
 - `$CODEX_HOME/skills` (`~/.codex/skills` when `CODEX_HOME` is unset; a
   relative `CODEX_HOME` is read from `<cwd>`, as Codex reads it), then
@@ -429,24 +447,27 @@ so a name found above never resolves here:
   `XDG_CONFIG_HOME` is unset)
 
 The walk starts at the workflow's directory even when `WF_SKILLS_ROOT` makes
-another directory the runtime root, and stops at the top of the git
-repository, as Codex and OpenCode stop there. git says where that is
-(`git rev-parse --show-toplevel` from the workflow's directory), so what
-git refuses bounds nothing: a `.git` that is no repository, and a
+another directory the runtime root, and stops at the top of the project,
+as Codex and OpenCode stop at the top of the git repository. git says where
+that is (`git rev-parse --show-toplevel` from the workflow's directory), so
+what git refuses bounds nothing: a `.git` that is no repository, and a
 repository owned by a user git does not trust (add it to `safe.directory`,
 as for `git status`). Without a repository git accepts, or without git,
-only the workflow's directory is searched. So a folder above a project,
-such as `/tmp/.agents/skills`, is not read for a workflow in `/tmp/job`,
-nor for a run started in `/tmp`. A user-level folder the walk or `<cwd>`
-reaches, as in a home directory kept in git, is searched once, in its
-user-level place; the home directory's other folders (`~/.opencode/skills`)
-are a project's, as they are for OpenCode. The same holds for a
+the project is `<cwd>` or the workflow's directory, as above, and a git
+that cannot be run or refuses a checkout is said in the log: the folders
+of that checkout's top are then not searched, and `WF_SKILLS_ROOT` names
+them. So
+`/tmp/.agents/skills` is not read for a workflow in `/tmp/job` started
+elsewhere; a run started in `/tmp` reads it, as it reads
+`/tmp/.claude/skills`. A user-level folder the walk or `<cwd>` reaches, as
+in a home directory kept in git, is searched once, in its user-level place;
+the home directory's other folders (`~/.opencode/skills`, `~/.wf/skills`)
+are a project's, as they are for OpenCode, so a run whose project is
+elsewhere does not read them. The same holds for a
 `CODEX_HOME` that names a project's `.codex` (`CODEX_HOME=.codex`, started
 in the project): Codex reads that folder as `CODEX_HOME`, not as the
 project's, and ranks a user's skill after a repository's. A relative
 `XDG_CONFIG_HOME` counts as unset.
-wfpy's own folders above (`.wf/skills`, `.claude/skills`) are read as
-before, up to the filesystem root.
 
 A skill is found by its folder's name, `<folder>/<skill-name>/SKILL.md`, as
 in wfpy's own folders; a skill nested deeper in a collection is reached by
@@ -492,7 +513,9 @@ class Reviewer:
 
 Discovery roots (ordered):
 
-- `<runtime-root>/.claude/agents`
+- `<runtime-root>/.claude/agents` (`WF_CLAUDE_AGENTS_ROOT`, else the skills'
+  runtime root), and in each directory above it up to the top of the
+  project, as for a skill
 - `<cwd>/.claude/agents`
 - `~/.claude/agents`
 

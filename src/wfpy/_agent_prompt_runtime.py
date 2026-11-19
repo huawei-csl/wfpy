@@ -11,7 +11,7 @@ import subprocess
 import threading
 from collections.abc import Callable, Iterable
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any, Generic, NamedTuple, TypeVar, cast
 
 from wfpy.core import AgentSpec
 
@@ -206,15 +206,20 @@ def _repository_root(start: Path) -> Path | None:
     trusts. It refuses a repository of dubious ownership, such as a
     `/tmp/.git` another user planted, unless the user lists it in
     `safe.directory`, as containers and CI already do for their checkouts.
+    A git that does not answer, one that cannot be run and a repository it
+    refuses are said in the log: the project's folders are then searched as
+    outside a repository, which is a narrower search than the user expects
+    of a checkout, and nothing else would say why.
+
     `GIT_DIR`, `GIT_WORK_TREE` and the other `GIT_REPOSITORY_VARIABLES` are
     not passed on: a git hook, or a push git holds in quarantine, exports
     its own repository's, and the question is which repository the
-    workflow's directory is in, not which one the environment names. A git
-    that does not answer within `GIT_TIMEOUT_SECONDS` is said in the log.
+    workflow's directory is in, not which one the environment names.
 
     `cli._discover_project_root` answers another question: it also stops at
-    a `pyproject.toml`. The folders bounded here are those of Codex and
-    OpenCode, which stop at the git repository.
+    a `pyproject.toml`. The project folders bounded here (`_project`) are
+    wfpy's own and those of Codex and OpenCode, which stop at the git
+    repository.
     """
 
     env = {key: value for key, value in os.environ.items() if key not in GIT_REPOSITORY_VARIABLES}
@@ -229,16 +234,33 @@ def _repository_root(start: Path) -> Path | None:
         )
     except subprocess.TimeoutExpired:
         logger.warning(
-            "git did not say within %s s which repository %s is in: the other agent"
-            " tools' project folders are searched there alone",
+            "git did not say within %s s which repository %s is in: the project folders"
+            " are searched as outside a repository",
             GIT_TIMEOUT_SECONDS,
             start,
         )
         return None
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError) as error:
+        logger.warning(
+            "git could not be run to say which repository %s is in (%s): the project"
+            " folders are searched as outside a repository, so a folder of the"
+            " repository's top is not searched; WF_SKILLS_ROOT names one that is",
+            start,
+            error,
+        )
         return None
     top = os.fsdecode(found.stdout).rstrip("\r\n")
     if found.returncode != 0 or not top:
+        said = os.fsdecode(found.stderr)
+        if "dubious ownership" in said:
+            # A checkout owned by another user: a bind mount in a container,
+            # a CI checkout. git lists the remedy itself, and without this
+            # the run just stops finding the repository's own skills.
+            logger.warning(
+                "git refuses the repository %s is in: %s",
+                start,
+                " ".join(said.split()),
+            )
         return None
     try:
         root = Path(top).resolve()
@@ -247,16 +269,63 @@ def _repository_root(start: Path) -> Path | None:
     return root if root == start or root in start.parents else None
 
 
-def _project_levels(start: Path) -> tuple[list[Path], Path | None]:
-    """The directories whose project folders of other tools are searched,
-    and the repository: from `start` up to the repository root
-    (`_repository_root`), included; `start` alone outside a repository."""
+class Project(NamedTuple):
+    """The project a workflow is in: how far up its project folders are
+    searched (`_project`)."""
 
-    repository = _repository_root(start)
-    if repository is None:
-        return [start], None
+    top: Path
+    """The project's top directory, resolved: no project folder above it is
+    searched."""
+
+    repository: Path | None
+    """The git repository that is the project, or None outside one."""
+
+
+def _project_top_outside_a_repository(workflow_dir: Path, cwd_root: Path) -> Path:
+    """The top of a project that is no git repository: the run's working
+    directory `cwd_root` when the workflow's directory is in it, else the
+    workflow's directory. Both are resolved."""
+
+    if cwd_root == workflow_dir or cwd_root in workflow_dir.parents:
+        return cwd_root
+    return workflow_dir
+
+
+def _project(workflow_dir: Path, cwd_root: Path) -> Project:
+    """The project the workflow in `workflow_dir` is in, for a run started
+    in `cwd_root`, both resolved.
+
+    A project is its git repository (`_repository_root`). With no
+    repository git accepts, it is the run's working directory, when the
+    workflow's directory is in it: the user started the run there, and its
+    own folders are searched anyway. Otherwise it is the workflow's
+    directory alone. Every project folder found by walking up, wfpy's own
+    (`.wf/skills`, `.claude/skills`, `.claude/agents`) and the other tools'
+    (`OTHER_TOOL_PROJECT_SKILL_DIRS`), is searched from where the walk
+    starts up to the project's top, included, and never above it
+    (`_levels_up_to`).
+    """
+
+    repository = _repository_root(workflow_dir)
+    if repository is not None:
+        return Project(repository, repository)
+    return Project(_project_top_outside_a_repository(workflow_dir, cwd_root), None)
+
+
+def _levels_up_to(start: Path, top: Path) -> list[Path]:
+    """`start` and the directories above it up to `top`, included; `start`
+    alone when `top` does not hold it.
+
+    The walk of a runtime root that `WF_SKILLS_ROOT` or
+    `WF_CLAUDE_AGENTS_ROOT` puts outside the project is that directory
+    alone: what is in it is what the variable names, and what is above it is
+    neither named nor the project's.
+    """
+
+    if start != top and top not in start.parents:
+        return [start]
     levels = [start, *start.parents]
-    return levels[: levels.index(repository) + 1], repository
+    return levels[: levels.index(top) + 1]
 
 
 def _workflow_dir(plan: Any, cwd: Path | None = None) -> Path:
@@ -315,30 +384,33 @@ _ROOTS_ON_PLAN = "_wfpy_lookup_roots"
 _ROOTS_LOCK = threading.Lock()
 
 
-class _Once:
-    """Lookup roots worked out by the first caller; the others wait for them."""
+_T = TypeVar("_T")
+
+
+class _Once(Generic[_T]):
+    """A value worked out by the first caller; the others wait for it."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._roots: tuple[LookupRoot, ...] | None = None
+        self._value: tuple[_T] | None = None
 
-    def get(self, compute: Callable[[], list[LookupRoot]]) -> list[LookupRoot]:
+    def get(self, compute: Callable[[], _T]) -> _T:
         with self._lock:
-            if self._roots is None:
-                self._roots = tuple(compute())
-            return list(self._roots)
+            if self._value is None:
+                self._value = (compute(),)
+            return self._value[0]
 
 
-def _once_per_plan(
-    plan: Any, kind: str, cwd_root: Path, compute: Callable[[], list[LookupRoot]]
-) -> list[LookupRoot]:
+def _once_per_plan(plan: Any, kind: str, cwd_root: Path, compute: Callable[[], _T]) -> _T:
     """`compute()`, worked out once per plan and kept on it.
 
     A firing reads a skill, its hooks and an agent preset, each through the
     lookup roots, and building them asks git and walks the tree. They are
-    built once per plan instead. Parallel workers share the plan: the first
-    to ask builds them, and the others wait for that answer rather than run
-    git too.
+    built once per plan instead, and the project they are bounded by
+    (`_plan_project`) once for both. Parallel workers share the plan: the
+    first to ask builds them, and the others wait for that answer rather
+    than run git too. A value kept is not changed: the roots are kept as a
+    tuple.
 
     What is kept is the list of folders, in order, and so the repository git
     found when it was built. It is built again when something it is built
@@ -361,7 +433,7 @@ def _once_per_plan(
         *(os.environ.get(name) for name in LOOKUP_VARIABLES),
     )
     with _ROOTS_LOCK:
-        kept: dict[tuple[Any, ...], _Once] | None = getattr(plan, _ROOTS_ON_PLAN, None)
+        kept: dict[tuple[Any, ...], _Once[Any]] | None = getattr(plan, _ROOTS_ON_PLAN, None)
         if not isinstance(kept, dict):
             kept = {}
             try:
@@ -371,7 +443,16 @@ def _once_per_plan(
         once = kept.setdefault(key, _Once()) if kept is not None else None
     if once is None:
         return compute()
-    return once.get(compute)
+    return cast("_Once[_T]", once).get(compute)
+
+
+def _plan_project(plan: Any, cwd_root: Path) -> Project:
+    """The project of the plan's workflow (`_project`), for a run started in
+    `cwd_root`; worked out once per plan, for skills and presets alike."""
+
+    return _once_per_plan(
+        plan, "project", cwd_root, lambda: _project(_workflow_dir(plan, cwd_root), cwd_root)
+    )
 
 
 def _skill_lookup_roots(plan: Any, cwd: Path | None = None) -> list[LookupRoot]:
@@ -389,14 +470,19 @@ def _skill_lookup_roots(plan: Any, cwd: Path | None = None) -> list[LookupRoot]:
     - `<cwd>/<folder>` for each of them, when `<cwd>` is in the same project
     - the user-level ones of `_other_tool_user_skill_dirs()`
 
-    The `<runtime-root>` entries of wfpy's own folders walk up to the
-    filesystem root. Those of the other tools start at the workflow's own
-    directory, `WF_SKILLS_ROOT` or not, and walk up only as far as the tools
-    themselves do: to the top of the git repository (`_repository_root`),
-    included. With no repository git accepts, only the workflow's
-    directory. So a folder above the project, say `/tmp/.agents/skills` for
-    a workflow in `/tmp/job`, is not read. `<cwd>`'s folders of other tools
-    are read only when `<cwd>` is in that repository.
+    The `<runtime-root>` and `<workflow-dir>` entries walk up the tree, and
+    only as far as the project's top, included (`_project`): the top of the
+    git repository (`_repository_root`), as Codex and OpenCode stop there;
+    with no repository git accepts, `<cwd>` when the workflow's directory is
+    in it, else the workflow's directory alone. So a folder above the
+    project, say `/tmp/.claude/skills` or `/tmp/.agents/skills` for a
+    workflow in `/tmp/job`, is not read. The walk of wfpy's own folders
+    starts at the runtime root, that of the other tools at the workflow's
+    own directory, `WF_SKILLS_ROOT` or not. A runtime root `WF_SKILLS_ROOT`
+    puts outside the project is searched at its own level alone
+    (`_levels_up_to`). `<cwd>`'s own folders are read wherever it is, as
+    they always were; its folders of other tools only when `<cwd>` is in
+    the workflow's repository.
 
     A user-level folder reached by the walk or at `<cwd>`, as in a home
     directory kept in git, is searched once, in the user-level place; the
@@ -416,14 +502,17 @@ def _skill_lookup_roots(plan: Any, cwd: Path | None = None) -> list[LookupRoot]:
     """
 
     cwd_root = (cwd or Path.cwd()).resolve()
-    return _once_per_plan(
-        plan, "skills", cwd_root, lambda: _build_skill_lookup_roots(plan, cwd_root)[0]
+    roots = _once_per_plan(
+        plan,
+        "skills",
+        cwd_root,
+        lambda: tuple(_build_skill_lookup_roots(plan, cwd_root, _plan_project(plan, cwd_root))),
     )
+    return list(roots)
 
 
-def _build_skill_lookup_roots(plan: Any, cwd_root: Path) -> tuple[list[LookupRoot], Path | None]:
-    """`_skill_lookup_roots`, worked out, and the repository that bounds the
-    other tools' project folders (`_repository_root`), or None."""
+def _build_skill_lookup_roots(plan: Any, cwd_root: Path, project: Project) -> list[LookupRoot]:
+    """`_skill_lookup_roots`, worked out, bounded by `project`."""
 
     home_root = Path.home().resolve()
     user_tool_dirs = [
@@ -437,7 +526,7 @@ def _build_skill_lookup_roots(plan: Any, cwd_root: Path) -> tuple[list[LookupRoo
         roots.add(explicit.resolve(), "WF_SKILLS_ROOT", "explicit")
 
     runtime_root = _runtime_root_for_skills(plan, cwd_root)
-    for level in (runtime_root, *runtime_root.parents):
+    for level in _levels_up_to(runtime_root, project.top):
         roots.add((level / ".wf" / "skills").resolve(), ".wf/skills", "project")
         roots.add((level / ".claude" / "skills").resolve(), ".claude/skills", "project")
 
@@ -448,8 +537,10 @@ def _build_skill_lookup_roots(plan: Any, cwd_root: Path) -> tuple[list[LookupRoo
     # Other agent tools' folders come after every root above, so that a
     # skill already found keeps resolving to the same directory.
     roots.others_from_here()
-    levels, repository = _project_levels(_workflow_dir(plan, cwd_root))
-    places = [(level, "project") for level in levels]
+    places = [
+        (level, "project") for level in _levels_up_to(_workflow_dir(plan, cwd_root), project.top)
+    ]
+    repository = project.repository
     if repository is not None and (cwd_root == repository or repository in cwd_root.parents):
         places.append((cwd_root, "cwd"))
     for level, scope in places:
@@ -458,7 +549,7 @@ def _build_skill_lookup_roots(plan: Any, cwd_root: Path) -> tuple[list[LookupRoo
     for path, name in user_tool_dirs:
         roots.add(path, name, "user")
 
-    return roots.roots, repository
+    return roots.roots
 
 
 def _skill_search_roots(plan: Any, cwd: Path | None = None) -> list[Path]:
@@ -473,17 +564,26 @@ def _skill_search_roots(plan: Any, cwd: Path | None = None) -> list[Path]:
 def _claude_agent_lookup_roots(plan: Any, cwd: Path | None = None) -> list[LookupRoot]:
     """The directories an agent preset is looked up in, in order: the one
     `WF_CLAUDE_AGENTS_ROOT` names, `.claude/agents` from its runtime root up
-    to the filesystem root, then the working directory's and the user's.
-    Worked out once per plan (`_once_per_plan`)."""
+    to the project's top, included, as for a skill (`_skill_lookup_roots`),
+    then the working directory's and the user's. Worked out once per plan
+    (`_once_per_plan`)."""
 
     cwd_root = (cwd or Path.cwd()).resolve()
-    return _once_per_plan(
-        plan, "presets", cwd_root, lambda: _build_claude_agent_lookup_roots(plan, cwd_root)
+    roots = _once_per_plan(
+        plan,
+        "presets",
+        cwd_root,
+        lambda: tuple(
+            _build_claude_agent_lookup_roots(plan, cwd_root, _plan_project(plan, cwd_root))
+        ),
     )
+    return list(roots)
 
 
-def _build_claude_agent_lookup_roots(plan: Any, cwd_root: Path) -> list[LookupRoot]:
-    """`_claude_agent_lookup_roots`, worked out."""
+def _build_claude_agent_lookup_roots(
+    plan: Any, cwd_root: Path, project: Project
+) -> list[LookupRoot]:
+    """`_claude_agent_lookup_roots`, worked out, bounded by `project`."""
 
     home_agents = (Path.home().resolve() / ".claude" / "agents").resolve()
     roots = _Roots({home_agents: "~/.claude/agents"})
@@ -497,7 +597,7 @@ def _build_claude_agent_lookup_roots(plan: Any, cwd_root: Path) -> list[LookupRo
         )
 
     runtime_root = _runtime_root_for_claude_agents(plan, cwd_root)
-    for level in (runtime_root, *runtime_root.parents):
+    for level in _levels_up_to(runtime_root, project.top):
         roots.add((level / ".claude" / "agents").resolve(), ".claude/agents", "project")
 
     roots.add((cwd_root / ".claude" / "agents").resolve(), ".claude/agents", "cwd")

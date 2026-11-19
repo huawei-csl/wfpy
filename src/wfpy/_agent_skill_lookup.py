@@ -29,11 +29,13 @@ from wfpy._agent_prompt_runtime import (
     _find_claude_agent,
     _find_skill,
     _parse_skill_frontmatter,
+    _project,
     _read_skill_md_file,
     _runtime_root_for_skills,
     _skill_hook_name,
     _skill_hook_script_in,
     _validate_skill_name,
+    _workflow_dir,
 )
 
 __all__ = ["agent_skill_lookup"]
@@ -61,21 +63,24 @@ def agent_skill_lookup(file_path: str, cwd: str | None = None) -> dict[str, Any]
     builds them on each call, so it answers what is there now.
 
     `roots` are the folders searched, in order, whether they exist or not.
-    `repository` is the git repository that bounds other tools' folders, or
-    None. Each of `skills` is a name a run resolves, with the directory it
-    takes (`dir`), the root that holds it and, when the run takes it but
-    cannot read its `SKILL.md`, the `problem` it fails with. A name whose
-    folders hold no `SKILL.md` is listed with `found: false`: a run that
-    names it fails. `presets` are the same for agent presets, over
-    `presetRoots`.
+    `repository` is the git repository that is the workflow's project, or
+    None; with none, the project is the working directory when the workflow
+    is in it, else the workflow's directory (`_project`). No project folder
+    above the project's top is in `roots`. Each of `skills` is a name a run
+    resolves, with the directory it takes (`dir`), the root that holds it
+    and, when the run takes it but cannot read its `SKILL.md`, the `problem`
+    it fails with. A name whose folders hold no `SKILL.md` is listed with
+    `found: false`: a run that names it fails. `presets` are the same for
+    agent presets, over `presetRoots`.
     """
 
     run_cwd = Path(cwd).resolve() if cwd else Path.cwd().resolve()
     workflow = (run_cwd / file_path).resolve()
     plan = types.SimpleNamespace(source_path=str(workflow), work_dir=None)
-    roots, repository = _build_skill_lookup_roots(plan, run_cwd)
+    project = _project(_workflow_dir(plan, run_cwd), run_cwd)
+    roots = _build_skill_lookup_roots(plan, run_cwd, project)
     # A root that is no directory holds no skill: leaving it out changes no
-    # answer of `_find_skill` and spares it most of the walk to `/`.
+    # answer of `_find_skill` and spares it the folders no one made.
     root_paths = [root.path for root in roots if root.path.is_dir()]
     by_path = {root.path: root for root in roots}
 
@@ -93,7 +98,7 @@ def agent_skill_lookup(file_path: str, cwd: str | None = None) -> dict[str, Any]
             continue
         skills.append(_skill(name, by_path[found[0]], found[1]))
 
-    preset_roots = _build_claude_agent_lookup_roots(plan, run_cwd)
+    preset_roots = _build_claude_agent_lookup_roots(plan, run_cwd, project)
     preset_paths = [root.path for root in preset_roots if root.path.is_dir()]
     preset_by_path = {root.path: root for root in preset_roots}
     presets: list[dict[str, Any]] = []
@@ -112,7 +117,7 @@ def agent_skill_lookup(file_path: str, cwd: str | None = None) -> dict[str, Any]
         "workflow": str(workflow),
         "cwd": str(run_cwd),
         "runtimeRoot": str(_runtime_root_for_skills(plan, run_cwd)),
-        "repository": str(repository) if repository is not None else None,
+        "repository": str(project.repository) if project.repository is not None else None,
         "roots": [_root(root) for root in roots],
         "skills": skills,
         "presetRoots": [_root(root) for root in preset_roots],

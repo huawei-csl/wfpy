@@ -33,6 +33,7 @@ from wfpy._agent_prompt_runtime import (
     _claude_agent_search_roots,
     _read_skill_md,
     _read_skill_md_file,
+    _resolve_claude_agent_path,
     _resolve_skill_dir,
     _run_skill_hook,
     _runtime_root_for_skills,
@@ -265,7 +266,10 @@ class TestAncestorWalk:
         assert _resolve_skill_dir("wfroot-walk-claude", plan) == skill_dir
 
     def test_a_wf_skill_above_the_workflow_is_found(self, tmp_path):
+        """Up to the top of the workflow's repository
+        (`TestWfpyOwnFoldersStopAtTheProject`)."""
         project = tmp_path / "project"
+        git_init(project)
         skill_dir = make_skill(project / ".wf" / "skills", "wfroot-walk-wf")
         nested = project / "flows" / "nested"
         nested.mkdir(parents=True)
@@ -447,8 +451,9 @@ class TestOtherToolsSkillFolders:
         self, tmp_path, isolated_home
     ):
         """What was searched before the other tools' folders is searched in
-        the same order, ahead of all of them. `<cwd>` is outside the
-        repository, so its folders of other tools are not searched."""
+        the same order, ahead of all of them, up to the top of the
+        repository. `<cwd>` is outside the repository, so its folders of
+        other tools are not searched."""
         project = tmp_path / "project"
         plan = self.workflow(project)
         runtime_root = (project / "flows").resolve()
@@ -456,7 +461,7 @@ class TestOtherToolsSkillFolders:
         home = isolated_home.resolve()
 
         before: list[Path] = []
-        for level in [runtime_root, *runtime_root.parents]:
+        for level in [runtime_root, project.resolve()]:
             for candidate in (level / ".wf" / "skills", level / ".claude" / "skills"):
                 if candidate not in before:
                     before.append(candidate)
@@ -565,9 +570,8 @@ class TestOtherToolsFoldersStopAtTheRepository:
     them, so it must not be now: `/tmp/.agents/skills`, which any local user
     can write, would hand a workflow in `/tmp/job` its prompt text and hook
     scripts. Codex and OpenCode stop at the git repository, and so does
-    this walk, at the top git gives (`git rev-parse --show-toplevel`). wfpy's
-    own `.wf` and `.claude` folders keep walking to the filesystem root, as
-    they always have.
+    this walk, at the top git gives (`git rev-parse --show-toplevel`), as
+    wfpy's own folders do (`TestWfpyOwnFoldersStopAtTheProject`).
     """
 
     @pytest.fixture(autouse=True)
@@ -604,12 +608,6 @@ class TestOtherToolsFoldersStopAtTheRepository:
 
         assert _resolve_skill_dir("wfroot-beside", self.flow(shared_tmp / "job")) == beside
 
-    def test_wfpy_own_folders_above_still_walk_to_the_filesystem_root(self, tmp_path):
-        shared_tmp = tmp_path / "tmp"
-        above = make_skill(shared_tmp / ".claude" / "skills", "wfroot-own-above")
-
-        assert _resolve_skill_dir("wfroot-own-above", self.flow(shared_tmp / "job")) == above
-
     @pytest.mark.parametrize("marker", ["directory", "file"])
     def test_the_walk_stops_at_the_repository_root_included(self, marker, tmp_path):
         """`.git` is a directory, or a file in a linked worktree or a submodule."""
@@ -644,10 +642,16 @@ class TestOtherToolsFoldersStopAtTheRepository:
             _resolve_skill_dir("wfroot-in-cwd", self.flow(repository / "flows")) == in_cwd
         ) is read
 
-    @pytest.mark.parametrize(("started_in", "read"), [("tmp/job", True), ("tmp", False)])
-    def test_outside_a_repository_the_working_directory_is_searched_only_if_the_workflows(
+    @pytest.mark.parametrize(
+        ("started_in", "read"), [("tmp/job", True), ("tmp", True), ("elsewhere", False)]
+    )
+    def test_outside_a_repository_the_working_directory_is_searched_if_it_holds_the_workflow(
         self, started_in, read, tmp_path, monkeypatch
     ):
+        """With no repository, the project is the working directory when the
+        workflow is in it: a run started in `/tmp` reads `/tmp/.agents/skills`
+        as it reads `/tmp/.claude/skills`. Started elsewhere, the project is
+        the workflow's directory."""
         shared_tmp = tmp_path / "tmp"
         plan = self.flow(shared_tmp / "job")
         cwd = tmp_path / started_in
@@ -655,6 +659,223 @@ class TestOtherToolsFoldersStopAtTheRepository:
         monkeypatch.chdir(cwd)
 
         assert (_resolve_skill_dir("wfroot-cwd-no-repository", plan) == in_cwd) is read
+
+
+OWN_FOLDERS = [(".wf", "skills"), (".claude", "skills")]
+
+
+def make_preset(root: Path, name: str, body: str = "A preset.\n") -> Path:
+    """Create `<root>/<name>.md` and return it."""
+
+    root.mkdir(parents=True, exist_ok=True)
+    preset = root / f"{name}.md"
+    preset.write_text(body, encoding="utf-8")
+    return preset
+
+
+class TestWfpyOwnFoldersStopAtTheProject:
+    """How far up wfpy's own `.wf/skills`, `.claude/skills` and
+    `.claude/agents` are searched: to the top of the project, included, as
+    the other tools' folders are, and never above it.
+
+    The project is the workflow's git repository (`_repository_root`); with
+    none git accepts, the run's working directory when the workflow's
+    directory is in it; otherwise the workflow's directory alone. The walk
+    went to the filesystem root, so a `/tmp/.claude/skills` another user
+    planted handed a workflow in `/tmp/job` its prompt text and hook scripts.
+    The working directory's own folders and the user's are read as before.
+    """
+
+    @pytest.fixture(autouse=True)
+    def isolated_home(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        home.mkdir()
+        cwd = tmp_path / "cwd"
+        cwd.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.chdir(cwd)
+        return home
+
+    @staticmethod
+    def flow(directory: Path) -> types.SimpleNamespace:
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "flow.py").write_text("", encoding="utf-8")
+        return make_plan(source_path=str(directory / "flow.py"))
+
+    @pytest.mark.parametrize("folder", OWN_FOLDERS)
+    def test_a_folder_above_a_workflow_outside_a_repository_is_not_read(self, folder, tmp_path):
+        """The `/tmp` case: `/tmp/.claude/skills/review` and `/tmp/job/flow.py`,
+        the run started elsewhere."""
+        shared_tmp = tmp_path / "tmp"
+        make_skill(shared_tmp.joinpath(*folder), "wfroot-planted")
+        plan = self.flow(shared_tmp / "job")
+
+        assert _resolve_skill_dir("wfroot-planted", plan) is None
+        assert shared_tmp.joinpath(*folder).resolve() not in _skill_search_roots(plan)
+
+    def test_a_preset_above_a_workflow_outside_a_repository_is_not_read(self, tmp_path):
+        shared_tmp = tmp_path / "tmp"
+        make_preset(shared_tmp / ".claude" / "agents", "wfroot-planted")
+        plan = self.flow(shared_tmp / "job")
+
+        with pytest.raises(FileNotFoundError):
+            _resolve_claude_agent_path("wfroot-planted", plan)
+        assert (shared_tmp / ".claude" / "agents").resolve() not in _claude_agent_search_roots(plan)
+
+    @pytest.mark.parametrize("folder", OWN_FOLDERS)
+    def test_the_walk_stops_at_the_repository_root_included(self, folder, tmp_path):
+        outer = tmp_path / "outer"
+        repository = outer / "repository"
+        git_init(repository)
+        make_skill(outer.joinpath(*folder), "wfroot-above-repository")
+        at_root = make_skill(repository.joinpath(*folder), "wfroot-at-repository-root")
+        plan = self.flow(repository / "flows" / "nested")
+
+        assert _resolve_skill_dir("wfroot-at-repository-root", plan) == at_root
+        assert _resolve_skill_dir("wfroot-above-repository", plan) is None
+
+    def test_presets_stop_at_the_repository_root_included(self, tmp_path):
+        outer = tmp_path / "outer"
+        repository = outer / "repository"
+        git_init(repository)
+        make_preset(outer / ".claude" / "agents", "wfroot-above-repository")
+        at_root = make_preset(repository / ".claude" / "agents", "wfroot-at-repository-root")
+        plan = self.flow(repository / "flows" / "nested")
+
+        assert _resolve_claude_agent_path("wfroot-at-repository-root", plan) == at_root.resolve()
+        with pytest.raises(FileNotFoundError):
+            _resolve_claude_agent_path("wfroot-above-repository", plan)
+
+    def test_outside_a_repository_the_walk_goes_up_to_the_working_directory(
+        self, tmp_path, monkeypatch
+    ):
+        """With no repository, a run started in a directory that holds the
+        workflow takes that directory for the project: the folders between
+        the two are searched, the other tools' too, and none above it."""
+        project = tmp_path / "project"
+        own = make_skill(project / "flows" / ".wf" / "skills", "wfroot-between")
+        tool = make_skill(project / "flows" / ".agents" / "skills", "wfroot-between-tool")
+        preset = make_preset(project / "flows" / ".claude" / "agents", "wfroot-between")
+        make_skill(tmp_path / ".claude" / "skills", "wfroot-above-cwd")
+        monkeypatch.chdir(project)
+        plan = self.flow(project / "flows" / "nested")
+
+        assert _resolve_skill_dir("wfroot-between", plan) == own
+        assert _resolve_skill_dir("wfroot-between-tool", plan) == tool
+        assert _resolve_claude_agent_path("wfroot-between", plan) == preset.resolve()
+        assert _resolve_skill_dir("wfroot-above-cwd", plan) is None
+
+    def test_outside_a_repository_and_the_working_directory_the_workflows_directory_alone(
+        self, tmp_path
+    ):
+        project = tmp_path / "project"
+        make_skill(project / ".wf" / "skills", "wfroot-above-workflow")
+        make_preset(project / ".claude" / "agents", "wfroot-above-workflow")
+        beside = make_skill(project / "flows" / ".claude" / "skills", "wfroot-beside-workflow")
+        plan = self.flow(project / "flows")
+
+        assert _resolve_skill_dir("wfroot-beside-workflow", plan) == beside
+        assert _resolve_skill_dir("wfroot-above-workflow", plan) is None
+        with pytest.raises(FileNotFoundError):
+            _resolve_claude_agent_path("wfroot-above-workflow", plan)
+
+    def test_the_working_directorys_and_the_users_folders_are_read_as_before(
+        self, tmp_path, isolated_home, monkeypatch
+    ):
+        """A run started in `/tmp` reads `/tmp/.claude/skills`, as it always
+        has, though the workflow's repository is below it; `~/.claude` is
+        the user's."""
+        shared_tmp = tmp_path / "tmp"
+        repository = shared_tmp / "job"
+        git_init(repository)
+        in_cwd = make_skill(shared_tmp / ".claude" / "skills", "wfroot-in-cwd")
+        in_home = make_skill(isolated_home / ".claude" / "skills", "wfroot-in-home")
+        preset_in_cwd = make_preset(shared_tmp / ".claude" / "agents", "wfroot-in-cwd")
+        preset_in_home = make_preset(isolated_home / ".claude" / "agents", "wfroot-in-home")
+        monkeypatch.chdir(shared_tmp)
+        plan = self.flow(repository / "flows")
+        scopes = {root.path: root.scope for root in _skill_lookup_roots(plan)}
+
+        assert _resolve_skill_dir("wfroot-in-cwd", plan) == in_cwd
+        assert _resolve_skill_dir("wfroot-in-home", plan) == in_home
+        assert scopes[in_cwd.parent.resolve()] == "cwd"
+        assert scopes[in_home.parent.resolve()] == "user"
+        assert _resolve_claude_agent_path("wfroot-in-cwd", plan) == preset_in_cwd.resolve()
+        assert _resolve_claude_agent_path("wfroot-in-home", plan) == preset_in_home.resolve()
+
+    def test_the_users_folder_above_the_project_comes_after_the_working_directorys(
+        self, tmp_path, isolated_home, monkeypatch
+    ):
+        """For a workflow in a repository under the home directory, the walk
+        reached `~/.claude/skills` before `<cwd>`'s folders. It stops at the
+        repository now, and `~/.claude/skills` keeps its place in the list,
+        after them."""
+        repository = isolated_home / "work" / "repository"
+        git_init(repository)
+        make_skill(isolated_home / ".claude" / "skills", "wfroot-both")
+        in_cwd = make_skill(tmp_path / "cwd" / ".claude" / "skills", "wfroot-both")
+        plan = self.flow(repository / "flows")
+        roots = _skill_search_roots(plan)
+
+        assert _resolve_skill_dir("wfroot-both", plan) == in_cwd
+        assert roots.index((isolated_home / ".claude" / "skills").resolve()) > roots.index(
+            in_cwd.parent.resolve()
+        )
+
+    def test_a_runtime_root_outside_the_project_is_searched_at_its_own_level(
+        self, tmp_path, monkeypatch
+    ):
+        """`WF_SKILLS_ROOT` names a folder elsewhere: its own `.wf/skills` and
+        `.claude/skills` are inside what it names, and are searched; the
+        directories above it are not named, and are not."""
+        project = tmp_path / "project"
+        git_init(project)
+        explicit = tmp_path / "team" / "skills"
+        own_level = make_skill(explicit / ".claude" / "skills", "wfroot-own-level")
+        named = make_skill(explicit, "wfroot-named")
+        make_skill(tmp_path / "team" / ".wf" / "skills", "wfroot-above-explicit")
+        monkeypatch.setenv("WF_SKILLS_ROOT", str(explicit))
+        plan = self.flow(project / "flows")
+
+        assert _runtime_root_for_skills(plan) == explicit.resolve()
+        assert _resolve_skill_dir("wfroot-named", plan) == named
+        assert _resolve_skill_dir("wfroot-own-level", plan) == own_level
+        assert _resolve_skill_dir("wfroot-above-explicit", plan) is None
+
+    def test_a_runtime_root_inside_the_project_walks_to_the_projects_top(
+        self, tmp_path, monkeypatch
+    ):
+        outer = tmp_path / "outer"
+        project = outer / "project"
+        git_init(project)
+        explicit = project / "tools" / "skills"
+        explicit.mkdir(parents=True)
+        between = make_skill(project / "tools" / ".claude" / "skills", "wfroot-between")
+        at_top = make_skill(project / ".wf" / "skills", "wfroot-at-top")
+        make_skill(outer / ".wf" / "skills", "wfroot-above-top")
+        monkeypatch.setenv("WF_SKILLS_ROOT", str(explicit))
+        plan = self.flow(project / "flows")
+
+        assert _resolve_skill_dir("wfroot-between", plan) == between
+        assert _resolve_skill_dir("wfroot-at-top", plan) == at_top
+        assert _resolve_skill_dir("wfroot-above-top", plan) is None
+
+    def test_a_presets_root_outside_the_project_is_searched_at_its_own_level(
+        self, tmp_path, monkeypatch
+    ):
+        project = tmp_path / "project"
+        git_init(project)
+        explicit = tmp_path / "team" / "agents"
+        named = make_preset(explicit, "wfroot-named")
+        own_level = make_preset(explicit / ".claude" / "agents", "wfroot-own-level")
+        make_preset(tmp_path / "team" / ".claude" / "agents", "wfroot-above-explicit")
+        monkeypatch.setenv("WF_CLAUDE_AGENTS_ROOT", str(explicit))
+        plan = self.flow(project / "flows")
+
+        assert _resolve_claude_agent_path("wfroot-named", plan) == named.resolve()
+        assert _resolve_claude_agent_path("wfroot-own-level", plan) == own_level.resolve()
+        with pytest.raises(FileNotFoundError):
+            _resolve_claude_agent_path("wfroot-above-explicit", plan)
 
 
 class TestHomeKeptInGit:
@@ -846,7 +1067,8 @@ class TestGitDecidesTheRepository:
     --show-toplevel`, which refuses what `git status` there would refuse: a
     `.git` that is no repository, and one owned by a user git does not trust
     (`safe.directory`). Without that answer, the other tools' project
-    folders are the workflow's directory's alone.
+    folders are the workflow's directory's alone, the run being started
+    elsewhere.
     """
 
     @pytest.fixture(autouse=True)
@@ -854,7 +1076,9 @@ class TestGitDecidesTheRepository:
         home = tmp_path / "home"
         home.mkdir()
         monkeypatch.setenv("HOME", str(home))
-        monkeypatch.chdir(tmp_path)
+        cwd = tmp_path / "cwd"
+        cwd.mkdir()
+        monkeypatch.chdir(cwd)
         return home
 
     @staticmethod
@@ -969,6 +1193,70 @@ class TestGitDecidesTheRepository:
 
         assert runtime._repository_root(flows.resolve()) == project.resolve()
 
+    def test_wfpys_own_folders_at_the_repositorys_top_need_gits_answer(self, tmp_path, monkeypatch):
+        """Without git, the project is the workflow's directory: the
+        repository's own `.wf/skills` and `.claude/skills` are not searched
+        either, so a run in an image without git must name them in
+        `WF_SKILLS_ROOT`."""
+        project = tmp_path / "project"
+        git_init(project)
+        at_top = make_skill(project / ".wf" / "skills", "wfroot-top-of-repo")
+        empty = tmp_path / "empty-path"
+        empty.mkdir()
+        monkeypatch.setenv("PATH", str(empty))
+        plan = self.flow(project / "flows")
+
+        assert _resolve_skill_dir("wfroot-top-of-repo", plan) is None
+        monkeypatch.setenv("WF_SKILLS_ROOT", str(project / ".wf" / "skills"))
+        assert _resolve_skill_dir("wfroot-top-of-repo", self.flow(project / "flows")) == at_top
+
+    def test_a_git_that_cannot_be_run_is_said(self, tmp_path, monkeypatch, caplog):
+        """An image without git searches a checkout as no repository, which
+        is less than the user expects: the log says so, and how to say where
+        the skills are."""
+        empty = tmp_path / "empty-path"
+        empty.mkdir()
+        monkeypatch.setenv("PATH", str(empty))
+        flows = tmp_path / "project" / "flows"
+        flows.mkdir(parents=True)
+
+        with caplog.at_level(logging.WARNING, logger="wfpy"):
+            assert runtime._repository_root(flows.resolve()) is None
+
+        assert "git could not be run" in caplog.text
+        assert "WF_SKILLS_ROOT" in caplog.text
+        assert str(flows.resolve()) in caplog.text
+
+    def test_a_repository_git_refuses_is_said(self, tmp_path, monkeypatch, caplog):
+        """A checkout owned by another user (a bind mount in a container)
+        stops being a project, and only git's own words say why."""
+        project = tmp_path / "project"
+        git_init(project)
+        bin_dir = tmp_path / "bin"
+        refusal = f"fatal: detected dubious ownership in repository at '{project}'"
+        fake_git(bin_dir, f'echo "{refusal}" >&2\nexit 128')
+        monkeypatch.setenv("PATH", str(bin_dir))
+        flows = (project / "flows").resolve()
+        flows.mkdir()
+
+        with caplog.at_level(logging.WARNING, logger="wfpy"):
+            assert runtime._repository_root(flows) is None
+
+        assert "git refuses the repository" in caplog.text
+        assert "dubious ownership" in caplog.text
+
+    def test_a_directory_that_is_in_no_repository_is_said_nothing_of(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """The common case: a workflow outside a checkout is no warning."""
+        flows = tmp_path / "loose" / "flows"
+        flows.mkdir(parents=True)
+
+        with caplog.at_level(logging.WARNING, logger="wfpy"):
+            assert runtime._repository_root(flows.resolve()) is None
+
+        assert caplog.text == ""
+
     def test_a_git_that_does_not_answer_is_said(self, tmp_path, monkeypatch, caplog):
         """The tool folders above the workflow's directory are then left out,
         and the log says why."""
@@ -988,15 +1276,17 @@ class TestGitDecidesTheRepository:
         assert "git did not say within 0.2 s" in caplog.text
         assert str(flows.resolve()) in caplog.text
 
-    def test_wfpy_own_folders_are_read_as_they_always_were(self, tmp_path):
-        """`.wf/skills` and `.claude/skills` walk to the filesystem root, with
-        no repository or git asked."""
-        theirs = make_skill(tmp_path / "tmp" / ".claude" / "skills", "wfroot-own-unchecked")
+    def test_a_planted_git_bounds_nothing_for_wfpy_own_folders_either(self, tmp_path):
+        """`.wf/skills` and `.claude/skills` stop where git says, too."""
+        shared_tmp = tmp_path / "tmp"
+        shared_tmp.mkdir()
+        (shared_tmp / ".git").write_text("gitdir: /nowhere\n", encoding="utf-8")
+        make_skill(shared_tmp / ".claude" / "skills", "wfroot-own-planted")
+        beside = make_skill(shared_tmp / "job" / ".claude" / "skills", "wfroot-own-beside")
+        plan = self.flow(shared_tmp / "job")
 
-        assert (
-            _resolve_skill_dir("wfroot-own-unchecked", self.flow(tmp_path / "tmp" / "job"))
-            == theirs
-        )
+        assert _resolve_skill_dir("wfroot-own-planted", plan) is None
+        assert _resolve_skill_dir("wfroot-own-beside", plan) == beside
 
 
 class TestTheRootsAreWorkedOutOncePerPlan:
@@ -1018,9 +1308,12 @@ class TestTheRootsAreWorkedOutOncePerPlan:
         (tmp_path / "flows" / "flow.py").write_text("", encoding="utf-8")
         plan = make_plan(source_path=str(tmp_path / "flows" / "flow.py"))
 
+        make_preset(tmp_path / "flows" / ".claude" / "agents", "wfroot-once")
+
         _read_skill_md("wfroot-once", plan)
         _resolve_skill_dir("wfroot-once", plan)
         assert runtime._resolve_skill_hook_script("wfroot-once", "pre", plan) is not None
+        assert _resolve_claude_agent_path("wfroot-once", plan) is not None
         assert len(calls) == 1
 
         other = make_plan(source_path=str(tmp_path / "flows" / "flow.py"))
