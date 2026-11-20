@@ -108,5 +108,9 @@ Public API is re-exported from `src/wfpy/__init__.py`.
   `.[dev,agent]` without that file (`test-agent`).
 - `tests/test_dependency_docs.py` holds the README's Dependencies table to the
   bounds in `pyproject.toml`: change a pin and the table in one commit.
+- `tests/test_version.py` holds the README's install lines and the CHANGELOG's
+  first section to the version in `pyproject.toml`; a release changes the
+  three in one commit. `wfpy.__version__` is read from the installed
+  distribution, so an editable install says the version it was installed at.
 - There are no `examples/` in this repo yet; nothing in `tests/` may depend on
   example files, or a missing example will abort collection for the whole suite.
