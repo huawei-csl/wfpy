@@ -6,6 +6,12 @@ All notable changes to wfpy are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.3.0] — 2026-11-20
+
+wfpy ships four Agent Skills for building a workflow with it, and `wfpy skills
+install` links them where an agent tool looks for them. They were merged after
+1.2.0 was cut, and are the whole of this release.
+
 ### Added
 - wfpy ships Agent Skills for building a wfpy workflow, and `wfpy skills
   install` links them where a tool looks for them. Four skills:
