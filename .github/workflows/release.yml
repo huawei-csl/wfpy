@@ -55,6 +55,9 @@ jobs:
           python -m venv /tmp/smoke
           /tmp/smoke/bin/pip install --quiet dist/*.whl
           /tmp/smoke/bin/python -c "import wfpy; print('import OK:', wfpy.__doc__.splitlines()[0])"
+          # The wheel says the version it was built as (it said 0.1.0 in 1.1.0).
+          ver="$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")"
+          /tmp/smoke/bin/python -c "import sys, wfpy; print('version:', wfpy.__version__); sys.exit(wfpy.__version__ != '$ver')"
           /tmp/smoke/bin/wfpy --help > /dev/null && echo "CLI OK"
 
       - uses: actions/upload-artifact@v4

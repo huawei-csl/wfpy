@@ -86,4 +86,19 @@ __all__ = [
     "run",
 ]
 
-__version__ = "0.1.0"
+
+
+def _installed_version() -> str:
+    """The version of the wfpy that is installed, as `pip show wfpy` gives it.
+
+    Read from the distribution, so that it cannot differ from the release: a
+    constant here has to be changed by hand at each one, and was not."""
+    from importlib.metadata import PackageNotFoundError, version
+
+    try:
+        return version("wfpy")
+    except PackageNotFoundError:  # a source tree on the path, never installed
+        return "0+unknown"
+
+
+__version__ = _installed_version()
