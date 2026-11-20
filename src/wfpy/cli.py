@@ -395,6 +395,47 @@ def cmd_run(args: argparse.Namespace) -> None:
             print(f"  {port_name}: {values}")
 
 
+# What `wfpy skills` takes in place of a workflow file. These act on the skills
+# wfpy ships; a file is asked which skills a run of it finds.
+SHIPPED_SKILLS_COMMANDS = ("install", "path", "list")
+
+
+def cmd_shipped_skills(args: argparse.Namespace) -> None:
+    """`wfpy skills install|path|list`: the Agent Skills this wfpy ships."""
+    from wfpy.skills import SKILLS_DIR, install, install_root, print_install, shipped
+
+    command = args.file
+    if args.json:
+        print(f"Error: --json goes with a workflow file, not with '{command}'", file=sys.stderr)
+        sys.exit(2)
+    if command != "install" and (args.scope or args.workspace or args.force):
+        print(
+            f"Error: --scope, --workspace and --force go with 'install', not with '{command}'",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    skills = shipped()
+    if not skills:
+        print("this wfpy ships no skills", file=sys.stderr)
+        raise SystemExit(1)
+
+    if command == "path":
+        print(SKILLS_DIR)
+        return
+
+    if command == "list":
+        for skill in skills:
+            print(f"{skill.name:<26} {skill.description[:110]}")
+        return
+
+    root = install_root(args.scope or "user", args.workspace or ".")
+    results = install(root, skills, force=args.force)
+    print_install(root, results)
+    if any("--force" in what or "in the way" in what for _, what in results):
+        raise SystemExit(1)
+
+
 def cmd_connectors(args: argparse.Namespace) -> None:
     """List the ACP connectors a run from the workspace would see."""
     import json as _json
@@ -443,6 +484,15 @@ def cmd_skills(args: argparse.Namespace) -> None:
     from wfpy._agent_prompt_runtime import _project_top_outside_a_repository, _workflow_dir
     from wfpy._agent_skill_lookup import agent_skill_lookup
 
+    if args.file in SHIPPED_SKILLS_COMMANDS:
+        cmd_shipped_skills(args)
+        return
+    if args.scope or args.workspace or args.force:
+        print(
+            "Error: --scope, --workspace and --force go with 'install', not with a workflow file",
+            file=sys.stderr,
+        )
+        sys.exit(2)
     if not Path(args.file).is_file():
         print(f"Error: no such file: {args.file}", file=sys.stderr)
         sys.exit(1)
@@ -875,13 +925,35 @@ def main() -> None:
     # ── skills ──
     skills_parser = subparsers.add_parser(
         "skills",
-        help="List the skills and agent presets a run of a workflow started here finds",
+        help="List the skills and agent presets a run of a workflow started here finds; "
+        "or install, locate and list the skills wfpy ships",
+        description="With a workflow file: the skills and agent presets a run of it started "
+        "here finds. With install, path or list in its place: the Agent Skills wfpy ships "
+        "for building a workflow. A file that has one of those names is written ./install.",
     )
     skills_parser.add_argument(
-        "file", help="Python file containing @workflow definitions (not loaded)"
+        "file",
+        metavar="file | install | path | list",
+        help="Python file containing @workflow definitions (not loaded). "
+        "install: link the skills wfpy ships where a tool looks for them. "
+        "path: print their directory, to use as WF_SKILLS_ROOT. "
+        "list: say which skills wfpy ships",
     )
     skills_parser.add_argument(
-        "--json", action="store_true", help="One JSON object instead of a table"
+        "--json", action="store_true", help="With a file: one JSON object instead of a table"
+    )
+    skills_parser.add_argument(
+        "--scope",
+        choices=("user", "project"),
+        default=None,
+        help="With install: user links into ~/.claude/skills (default), "
+        "project into <workspace>/.wf/skills",
+    )
+    skills_parser.add_argument(
+        "--workspace", default=None, help="With install --scope project: the workspace (default: .)"
+    )
+    skills_parser.add_argument(
+        "--force", action="store_true", help="With install: replace a link that points elsewhere"
     )
     skills_parser.set_defaults(func=cmd_skills)
 

@@ -77,6 +77,50 @@ With those releases, keep the SDK below 1.0:
 pip install "agent-client-protocol<1"
 ```
 
+## Skills for building workflows
+
+wfpy ships Agent Skills that describe how to build a wfpy workflow: the rules
+that fail silently rather than raise. `wfpy skills install` links them where a
+tool looks for them, so they reach an `@agent` in a graph and your own editor
+alike.
+
+```bash
+wfpy skills list                     # what is shipped
+wfpy skills install                  # link into ~/.claude/skills
+wfpy skills install --scope project  # or into <workspace>/.wf/skills
+wfpy skills path                     # the directory, to use as WF_SKILLS_ROOT
+wfpy skills src/flow.py              # what a run of that workflow finds
+```
+
+| Skill | Covers |
+|---|---|
+| `wfpy-workflow-builder` | the entry point: which skill to read, and the project layout a new project starts from |
+| `wfpy-actor-authoring` | one node: a field with a default is state not a parameter, a returned dict is a port map, `File` ports need `ext=`, and a `Schedule` and a `Priority` say which action fires |
+| `wfpy-graph-composition` | wiring and nesting: boundary ports, output ports broadcast but input ports do not fan in, a loop must stop itself |
+| `wfpy-agent-nodes` | an agent in the graph: transport, the connector's model names, loading a skill and matching its inputs and outputs onto ports |
+
+`install`, `path` and `list` are taken in place of the workflow file of
+`wfpy skills <workflow.py>` ([below](#agent-skills-skillmd-draft)), which
+lists the skills a run finds; a file that has one of those names is written
+`./install`. The install links rather than copies, so `pip install -U wfpy`
+updates the skills in place. `--scope user` links into `~/.claude/skills`,
+the user-level folder a run searches after a project's own folders, and the
+one the Claude tools read. `--scope project` links into
+`<workspace>/.wf/skills`, which a run finds when the workspace is the
+directory it starts in, or lies between the workflow's directory and the top
+of its project. `wfpy skills <workflow.py>` shows the installed skills with
+the folder each comes from, which is the check that an install took.
+
+The install keeps a link that points elsewhere unless `--force` says
+otherwise, and never deletes a real directory of the same name. A link made
+from an environment that has gone since (a venv rebuilt on another Python)
+points at nothing; the install says so, and `--force` replaces it.
+
+What each skill says wfpy does is run by `tests/test_shipped_skill_claims.py`,
+one small workflow a sentence, so a change in behaviour that makes a skill
+wrong fails the suite. The claims that need a real agent (the model names a
+connector offers, the lines an ACP turn logs) are not run there.
+
 ## Agent connectors (ACP)
 
 An `@agent` on the `acp` transport, and the chat in the wfpy IDE, talk to a
@@ -480,7 +524,8 @@ offers the names a run takes, by the same check.
 `wfpy skills <workflow.py>` lists the skills and agent presets a run of the
 workflow started in the current directory finds, from the folder it takes,
 with what reading each fails with; `--json` prints the same as one JSON
-object. An editor that offers skill names runs it with the command it runs
+object. (`install`, `path` and `list` in place of the file act on the skills
+wfpy ships, [above](#skills-for-building-workflows).) An editor that offers skill names runs it with the command it runs
 workflows with, from the directory it runs them in, rather than repeating
 these rules. The workflow is not loaded, and a relative path, in the
 argument or in `WF_SKILLS_ROOT`, is read from that directory. A hidden entry
