@@ -6,6 +6,11 @@ All notable changes to wfpy are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.3.1] — 2026-11-20
+
+One fix, to what a run writes about the edges of nested workflows (the run
+overlay and the queue trace). It is the whole of this release.
+
 ### Fixed
 - The run overlay (`run.wf-viewer.json`) has one entry per edge of a
   workflow with nested workflows. It keyed an edge by its name within its
