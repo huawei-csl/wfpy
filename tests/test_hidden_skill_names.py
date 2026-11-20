@@ -19,6 +19,7 @@ from wfpy._agent_prompt_runtime import (
     _resolve_claude_agent_path,
     _resolve_skill_dir,
     _resolve_skill_hook_script,
+    _run_skill_hook,
     _validate_claude_agent_name,
     _validate_skill_name,
 )
@@ -155,6 +156,24 @@ class TestAHookName:
 
         with pytest.raises(ValueError, match=r"Hook name must not start with '\.'"):
             _resolve_skill_hook_script("review", ".pre", flow(project))
+
+    def test_a_run_of_one_is_refused_as_a_hook_name(self, tmp_path):
+        project = tmp_path / "project"
+        directory = skill(project / ".claude" / "skills", "review")
+        (directory / "scripts").mkdir()
+        (directory / "scripts" / ".pre.sh").write_text("echo ran\n", encoding="utf-8")
+
+        with pytest.raises(ValueError, match=r"Hook name must not start with '\.'"):
+            _run_skill_hook(
+                skill_name="review",
+                hook_name=".pre",
+                phase="pre",
+                actor_name="reviewer",
+                payload={},
+                response_text=None,
+                plan=flow(project),
+                timeout_ms=10_000,
+            )
 
     def test_the_list_says_why_a_hidden_hook_does_not_run(self, tmp_path):
         project = tmp_path / "project"

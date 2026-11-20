@@ -33,6 +33,20 @@ All notable changes to wfpy are documented here. The format follows
   gone) is said to, and a real directory of that name is never deleted, with
   or without `--force`. `wfpy skills path` prints the directory to use as
   `WF_SKILLS_ROOT`, and `wfpy skills list` says what is shipped.
+
+## [1.2.0] — 2026-11-20
+
+A skill is found where the other agent tools install it (Codex, OpenCode,
+`.agents/skills`), and `wfpy skills <workflow.py>` lists what a run of that
+workflow finds. The `agent` extra runs on `agent-client-protocol` 1.0. Two of
+the fixes are to runs that went wrong with no error: an agent with no input
+port fired without end, and a parallel run could end with a token an actor
+could have taken.
+
+`wfpy.__version__` is the installed version. It was a constant that no release
+had updated, and said `0.1.0` in the 1.1.0 wheel.
+
+### Added
 - A skill-hook policy entry may name the skill folder it approves:
   `{"skill": "review", "hook": "pre", "interpreter": "sh", "dir": "<path>"}`,
   `interpreter` optional, `dir` read from the policy file's folder (a link
