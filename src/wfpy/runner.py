@@ -397,6 +397,21 @@ class Queue:
 # ═══════════════════════════════════════════════════════════════════════════
 
 
+def _agent_fire_budget(meta: Any) -> int:
+    """How many times an agent may fire with nothing on its inputs.
+
+    `@agent(fireable_without_input=N)` says it. An agent that declares no input
+    port can fire in no other way, so N is all its firings; when the decorator
+    gives no count it fires once, as the `@source` at the head of a graph does.
+    No count is 0 in the spec. The decorator refuses a 0 that was written for
+    such an agent, so 0 here never stands for "do not fire".
+    """
+    count = max(0, int(meta.agent_spec.fireable_without_input))
+    if not meta.input_ports:
+        return max(1, count)
+    return count
+
+
 class RuntimeActor:
     """Runtime wrapper around a task / workflow instance."""
 
@@ -445,12 +460,10 @@ class RuntimeActor:
         # conversations (for example, opencode --session).
         self.agent_cli_session_ids: dict[str, str] = {}
 
-        # For agent actors with fireable_without_input budget
+        # How many times an agent may still fire with nothing on its inputs.
         self.agent_fire_budget: int | None = None
-        if kind == "agent":
-            agent_spec = getattr(meta, "agent_spec", None)
-            if agent_spec is not None:
-                self.agent_fire_budget = max(0, int(agent_spec.fireable_without_input))
+        if kind == "agent" and getattr(meta, "agent_spec", None) is not None:
+            self.agent_fire_budget = _agent_fire_budget(meta)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -877,8 +890,9 @@ def _is_actor_maybe_ready(actor: RuntimeActor) -> bool:
     if actor.kind == "agent" and actor.agent_fire_budget is not None and actor.agent_fire_budget > 0:
         return True
 
-    # No input ports → always fireable
-    if not actor.in_queues:
+    # No input ports → always fireable. Not an agent: with nothing to read it
+    # fires out of its budget, and the check above has just found none left.
+    if not actor.in_queues and actor.kind != "agent":
         return True
 
     if actor.kind == "internal":
@@ -1019,6 +1033,8 @@ def execute_plan(
             in_flight: dict[concurrent.futures.Future[Any], RuntimeActor] = {}
             running_actors: set[RuntimeActor] = set()
             blocked_until_progress: dict[RuntimeActor, int] = {}
+            # The progress count when each actor in flight was asked to fire.
+            asked_at: dict[RuntimeActor, int] = {}
 
             def _record_actor_fire(actor: RuntimeActor) -> None:
                 nonlocal steps
@@ -1106,6 +1122,7 @@ def execute_plan(
                         continue
                     if blocked_until_progress.get(actor) == plan._scheduler_progress_seq:
                         continue
+                    asked_at[actor] = plan._scheduler_progress_seq
                     future = executor.submit(_fire_one, actor)
                     in_flight[future] = actor
                     running_actors.add(actor)
@@ -1118,11 +1135,16 @@ def execute_plan(
                 for future in completed:
                     actor = in_flight.pop(future)
                     running_actors.discard(actor)
+                    asked = asked_at.pop(actor)
                     fired = future.result()  # propagate any exception
                     if fired:
                         blocked_until_progress.pop(actor, None)
                     else:
-                        blocked_until_progress[actor] = plan._scheduler_progress_seq
+                        # Held until there is progress since it was *asked*.
+                        # Another actor may have fired after this one looked at
+                        # its queues and before its answer is read here; held
+                        # from now, it would never see the token that made.
+                        blocked_until_progress[actor] = asked
 
                 streamed = _stream_workflow_outputs(plan, out_dir)
 
@@ -1599,7 +1621,7 @@ def _step_agent(
         # Check fireable_without_input budget
         remaining_budget = actor.agent_fire_budget
         if remaining_budget is None:
-            remaining_budget = max(0, int(agent_spec.fireable_without_input))
+            remaining_budget = _agent_fire_budget(meta)
             actor.agent_fire_budget = remaining_budget
         if remaining_budget <= 0:
             return False

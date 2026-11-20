@@ -26,8 +26,12 @@ def _dequeue_agent_inputs(
         (has_inputs, input_values) — has_inputs is True when tokens were
         available on all input ports. input_values is empty when has_inputs
         is False.
+
+    An agent that declares no input port has no inputs: "a token on every
+    port" would hold of it at every step, and it would fire without end. Such
+    an agent fires out of its budget (`_agent_fire_budget`).
     """
-    has_inputs = True
+    has_inputs = bool(input_ports)
     for port_name in input_ports:
         queues = actor.in_queues.get(port_name, [])
         if not queues or queues[0].size() < 1:

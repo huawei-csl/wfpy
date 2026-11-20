@@ -21,7 +21,7 @@ def _normalize_agent_kwargs(
     ask_user: bool,
     ask_permissions: bool,
     timeout_ms: int,
-    fireable_without_input: int,
+    fireable_without_input: int | None,
     context_budget: int,
     truncation_strategy: str,
     cli_tools_mode: str,

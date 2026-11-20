@@ -8,6 +8,8 @@ import types
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from wfpy import agent, task, action, guard, workflow, connect, if_, loop, run, Port
 from wfpy.runner import build_plan, execute_plan, _build_workflow_graph, FifoPlan
 from wfpy.runner import (
@@ -3572,6 +3574,171 @@ class TestStepAgentBehavior:
         assert _step_agent(actor1, tmp_path, plan, verbose=False) is False
         assert _step_agent(actor2, tmp_path, plan, verbose=False) is True
 
+    @pytest.mark.parametrize(("count", "firings"), [(None, 1), (1, 1), (3, 3)])
+    def test_an_agent_with_no_input_port_fires_as_often_as_its_decorator_says(
+        self,
+        count,
+        firings,
+        tmp_path,
+        make_task_meta,
+        make_port,
+        make_agent_spec,
+        mock_invoke_agent,
+    ):
+        """Nothing can arrive at it, so "a token on every port" held of it at
+        every step and it fired without end, whatever the decorator said."""
+        from wfpy.runner import _is_actor_maybe_ready, _step_agent
+
+        given = {} if count is None else {"fireable_without_input": count}
+        spec = make_agent_spec(prompt="p", model="m", **given)
+        meta = make_task_meta(
+            name="AgentTask",
+            kind="agent",
+            output_ports={"out": make_port("out", str, "out")},
+            agent_spec=spec,
+        )
+        actor = RuntimeActor(name="agent1", kind="agent", instance=object(), meta=meta)
+        actor.out_queues = {"out": [Queue(queue_id="q")]}
+        plan = FifoPlan(name="wf")
+        plan.options = {}
+
+        assert _is_actor_maybe_ready(actor) is True
+        fired = [_step_agent(actor, tmp_path, plan, verbose=False) for _ in range(firings + 2)]
+        assert fired == [True] * firings + [False, False]
+        assert mock_invoke_agent["calls"] == firings
+        # The scheduler does not offer it another turn.
+        assert _is_actor_maybe_ready(actor) is False
+
+    @pytest.mark.parametrize("max_workers", [1, None])
+    @pytest.mark.parametrize(("given", "firings"), [({}, 1), ({"fireable_without_input": 3}, 3)])
+    def test_a_run_with_an_agent_that_has_no_input_port_ends(
+        self, given, firings, max_workers, tmp_path, monkeypatch
+    ):
+        calls = []
+
+        def fake_invoke(agent_spec, payload_text, verbose, **kwargs):
+            calls.append(payload_text)
+            # A run that does not end is a test that does not end: fail it.
+            assert len(calls) <= 20, "the agent did not stop firing"
+            return "tick", [{"role": "assistant", "content": "tick"}], None, {}
+
+        monkeypatch.setattr("wfpy.runner._invoke_agent", fake_invoke)
+
+        @agent(prompt="Tick.", use_skill=False, **given)
+        class Ticker:
+            class Ports:
+                Out = Port[str](direction="out")
+
+        @workflow(inputs={}, outputs={"Out": str})
+        def wf():
+            connect(Ticker().Out, "Out")
+
+        outputs = run(wf, {}, out_dir=tmp_path, max_workers=max_workers)
+
+        assert outputs == {"Out": ["tick"] * firings}
+        assert len(calls) == firings
+
+    @pytest.mark.parametrize(
+        ("given", "outputs"),
+        [({}, ["1:tick"]), ({"fireable_without_input": 3}, ["1:tick", "2:tick", "3:tick"])],
+    )
+    @pytest.mark.parametrize("around", ["child workflow", "loop body"])
+    def test_the_count_is_for_the_run_not_for_each_token_around_the_agent(
+        self, around, given, outputs, tmp_path, monkeypatch
+    ):
+        """Three tokens pass by an agent that reads none of them. It fires as
+        often as its count says, once when it has none, and not once a token."""
+        calls = []
+
+        def fake_invoke(agent_spec, payload_text, verbose, **kwargs):
+            calls.append(payload_text)
+            assert len(calls) <= 20, "the agent did not stop firing"
+            return "tick", [{"role": "assistant", "content": "tick"}], None, {}
+
+        monkeypatch.setattr("wfpy.runner._invoke_agent", fake_invoke)
+
+        @agent(prompt="Tick.", use_skill=False, **given)
+        class Ticker:
+            class Ports:
+                Out = Port[str](direction="out")
+
+        @task
+        class Three:
+            _sent: int = 0
+
+            class Ports:
+                Out = Port[int](direction="out")
+
+            @action(consumes={}, produces={"Out": 1})
+            @guard(lambda self: self._sent < 3)
+            def emit(self) -> int:
+                self._sent += 1
+                return self._sent
+
+        @task
+        class Join:
+            class Ports:
+                Number = Port[int](direction="in")
+                Word = Port[str](direction="in")
+                Out = Port[str](direction="out")
+
+            @action(consumes={"Number": 1, "Word": 1}, produces={"Out": 1})
+            def join(self, number: int, word: str) -> str:
+                return f"{number}:{word}"
+
+        @workflow(inputs={"Number": int}, outputs={"Out": str})
+        def inner():
+            ticker, join = Ticker(), Join()
+            connect("Number", join.Number)
+            connect(ticker.Out, join.Word)
+            connect(join.Out, "Out")
+
+        @workflow(inputs={}, outputs={"Out": str})
+        def with_child():
+            three, child = Three(), inner()
+            connect(three.Out, child.Number)
+            connect(child.Out, "Out")
+
+        @workflow(inputs={}, outputs={"Out": str})
+        def with_loop():
+            items = loop([1, 2, 3])
+            with items:
+                ticker, join = Ticker(), Join()
+                connect(items.item, join.Number)
+                connect(ticker.Out, join.Word)
+                connect(join.Out, "Out")
+
+        wf = with_child if around == "child workflow" else with_loop
+
+        assert run(wf, {}, out_dir=tmp_path, max_workers=1)["Out"] == outputs
+        assert len(calls) == len(outputs)
+
+    def test_an_agent_with_an_input_port_does_not_get_the_one_firing(
+        self, tmp_path, make_task_meta, make_port, make_agent_spec, mock_invoke_agent
+    ):
+        """The firing an agent gets for free is for one that can read nothing.
+        One that has an input port waits for its token, as before."""
+        from wfpy.runner import _step_agent
+
+        meta = make_task_meta(
+            name="AgentTask",
+            kind="agent",
+            input_ports={"in": make_port("in", str, "in")},
+            output_ports={"out": make_port("out", str, "out")},
+            agent_spec=make_agent_spec(prompt="p", model="m"),
+        )
+        actor = RuntimeActor(name="agent1", kind="agent", instance=object(), meta=meta)
+        actor.in_queues = {"in": [Queue(queue_id="in")]}
+        actor.out_queues = {"out": [Queue(queue_id="q")]}
+        plan = FifoPlan(name="wf")
+        plan.options = {}
+
+        assert _step_agent(actor, tmp_path, plan, verbose=False) is False
+        actor.in_queues["in"][0].enqueue("x")
+        assert _step_agent(actor, tmp_path, plan, verbose=False) is True
+        assert _step_agent(actor, tmp_path, plan, verbose=False) is False
+        assert mock_invoke_agent["calls"] == 1
+
     def test_step_agent_stages_file_inputs_for_cli_transports(
         self, tmp_path, make_task_meta, make_port, make_agent_spec, mock_invoke_agent
     ):
@@ -6039,6 +6206,80 @@ class TestNestedWorkflows:
 
         assert outputs["Output"] == [3]
         assert not any("Leftover tokens in queue" in r.message for r in caplog.records)
+
+
+class TestParallelSchedulerAsksAgain:
+    def test_an_actor_told_no_while_another_fired_is_asked_again(self, tmp_path, monkeypatch):
+        """An actor that does not fire is held until something makes progress.
+        "Since when" was read when its answer was collected, not when it was
+        asked, so progress made in between was lost: the run ended with a token
+        the actor could have taken, and no error.
+
+        The gate is asked before its key exists, and its "no" is held back until
+        the task that makes the key has fired and said so."""
+        import time
+
+        import wfpy.runner as runner
+
+        gate_said_no = threading.Event()
+
+        @task
+        class Late:
+            class Ports:
+                In = Port[str](direction="in")
+                Out = Port[str](direction="out")
+
+            @action(consumes={"In": 1}, produces={"Out": 1})
+            def go(self, key: str) -> str:
+                assert gate_said_no.wait(timeout=20), "the gate was never asked"
+                return key
+
+        @task
+        class Gate:
+            _open: bool = False
+
+            class Ports:
+                Data = Port[str](direction="in")
+                Key = Port[str](direction="in")
+                Out = Port[str](direction="out")
+
+            @action(consumes={"Data": 1}, produces={"Out": 1})
+            @guard(lambda self, data: self._open)
+            def passes(self, data: str) -> str:
+                return data
+
+            @action(consumes={"Key": 1})
+            def unlock(self, key: str) -> None:
+                self._open = True
+
+        step = runner._step_actor
+        held: list[str] = []
+
+        def step_and_hold_the_first_no(actor, plan, *args, **kwargs):
+            before = plan._scheduler_progress_seq
+            fired = step(actor, plan, *args, **kwargs)
+            if actor.name == "gate" and not fired and not held:
+                held.append(actor.name)
+                gate_said_no.set()
+                deadline = time.monotonic() + 20
+                while plan._scheduler_progress_seq == before and time.monotonic() < deadline:
+                    time.sleep(0.001)
+            return fired
+
+        monkeypatch.setattr(runner, "_step_actor", step_and_hold_the_first_no)
+
+        @workflow(inputs={"Data": str, "Key": str}, outputs={"Out": str})
+        def wf():
+            gate, late = Gate(), Late()
+            connect("Data", gate.Data)
+            connect("Key", late.In)
+            connect(late.Out, gate.Key)
+            connect(gate.Out, "Out")
+
+        outputs = run(wf, {"Data": "d", "Key": "k"}, out_dir=tmp_path, max_workers=4)
+
+        assert held == ["gate"]
+        assert outputs["Out"] == ["d"]
 
 
 class TestNestedWorkflowParallelGate:

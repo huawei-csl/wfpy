@@ -275,6 +275,24 @@ All notable changes to wfpy are documented here. The format follows
   leaves is a Windows drive-relative name (`d:evil`), which joined outside
   the folder. The list leaves such names out by the same
   check, so what it offers and what a run takes cannot differ.
+- A parallel run does not end with a token an actor could have taken. An
+  actor that does not fire is held until another makes progress, and "since
+  when" was read when its answer was collected, not when it was asked.
+  Progress made in between was lost: a task that looked at an empty queue
+  while its producer was firing was never asked again, and the run reached
+  quiescence with no error. The race has been there since 1.0.0b1 and shows
+  on a loaded machine. A sequential run (`max_workers=1`) was not affected.
+- An `@agent` that declares no input port fires once in a run, and
+  `fireable_without_input=N` in its decorator makes that N times. Such an
+  agent fired without end, whatever the decorator said: "a token on every
+  input port" holds at every step of an agent that has none, so its count
+  was never read. A run with one did not end, and on a real transport each
+  firing was a model turn. The count is for the run: the agent fires once
+  inside a child workflow or a loop body that several tokens pass through,
+  and a resume does not give the firing again. On such an agent the count
+  is 1 or more: `fireable_without_input=0` is refused when the class is
+  made (`TypeError`), since the agent would never fire. An agent that has
+  input ports is unchanged, and may say 0.
 
 ## [1.1.0] — 2026-10-14
 
