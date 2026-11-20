@@ -6,6 +6,22 @@ All notable changes to wfpy are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- The run overlay (`run.wf-viewer.json`) has one entry per edge of a
+  workflow with nested workflows. It keyed an edge by its name within its
+  workflow (`queue:p.Out-->WF.Out`), so two nested workflows that connect
+  the same actor names (two instances of one workflow, above all) shared
+  one entry: the one merged last replaced the others, and an IDE showed on
+  every edge of the first instance the token of the second. A nested edge's
+  key now carries the instance path of the workflow it is in
+  (`queue:a/i/p.Out-->WF.Out`), and its entry says the path as
+  `instancePath` (`["a", "i"]`). The queue trace's entries
+  (`run.wf-queues.json`) say it too, beside `scope`, the workflow's name,
+  which two instances share. The top level's keys and entries are as
+  before, so a flat workflow's overlay does not change. An IDE that matches
+  an entry to an edge by its endpoints alone now finds one per instance,
+  and chooses by `instancePath` the one of the workflow it shows.
+
 ## [1.3.0] — 2026-11-20
 
 wfpy ships four Agent Skills for building a workflow with it, and `wfpy skills

@@ -106,65 +106,68 @@ def _record_edge_token(plan: Any, q: Any, value: Any) -> None:
 
 
 def _collect_edge_overlay(plan: Any) -> dict[str, dict[str, Any]]:
-    """Merge edge info + last tokens from *plan* and all sub-plans."""
+    """Edge info + last tokens of *plan* and all its sub-plans, one entry per edge.
 
-    info: dict[str, dict[str, str]] = {}
-    tokens: dict[str, Any] = {}
-    queue_info: dict[str, dict[str, str]] = {}
-    queue_tokens: dict[str, Any] = {}
-    _collect_edges_recursive(plan, info, tokens, queue_info, queue_tokens)
+    An edge is named within its workflow (`p.Out-->WF.Out`), so two nested
+    workflows that connect the same actor names -- two instances of one
+    workflow, above all -- have edges of the same name. A nested edge's key
+    is therefore prefixed with the instance path of the workflow it is in,
+    which its entry also carries as ``instancePath``; the top level's keys
+    and entries are as they were.
+    """
 
     edges: dict[str, dict[str, Any]] = {}
-    represented_queue_ids: set[str] = set()
-    for ast_path, edge_info in info.items():
-        entry: dict[str, Any] = {
-            "queueId": edge_info["queueId"],
-            "outPort": edge_info["outPort"],
-            "inPort": edge_info["inPort"],
-        }
-        represented_queue_ids.add(edge_info["queueId"])
-        if edge_info.get("fromEntity"):
-            entry["fromEntity"] = edge_info["fromEntity"]
-        if edge_info.get("toEntity"):
-            entry["toEntity"] = edge_info["toEntity"]
-        if ast_path in tokens:
-            entry["lastToken"] = tokens[ast_path]
-        edges[ast_path] = entry
-
-    for queue_id, queue_details in queue_info.items():
-        if queue_id in represented_queue_ids:
-            continue
-        queue_entry: dict[str, Any] = {
-            "queueId": queue_details["queueId"],
-            "outPort": queue_details["outPort"],
-            "inPort": queue_details["inPort"],
-        }
-        if queue_details.get("fromEntity"):
-            queue_entry["fromEntity"] = queue_details["fromEntity"]
-        if queue_details.get("toEntity"):
-            queue_entry["toEntity"] = queue_details["toEntity"]
-        if queue_id in queue_tokens:
-            queue_entry["lastToken"] = queue_tokens[queue_id]
-        edges[f"queue:{queue_id}"] = queue_entry
+    _collect_edges_recursive(plan, [], edges)
     return edges
+
+
+def _scoped(instance_path: list[str], name: str) -> str:
+    """*name*, an edge's name in its workflow, under that workflow's instance path."""
+
+    return "/".join([*instance_path, name])
+
+
+def _edge_entry(details: dict[str, str], instance_path: list[str]) -> dict[str, Any]:
+    entry: dict[str, Any] = {
+        "queueId": details["queueId"],
+        "outPort": details["outPort"],
+        "inPort": details["inPort"],
+    }
+    if details.get("fromEntity"):
+        entry["fromEntity"] = details["fromEntity"]
+    if details.get("toEntity"):
+        entry["toEntity"] = details["toEntity"]
+    if instance_path:
+        entry["instancePath"] = list(instance_path)
+    return entry
 
 
 def _collect_edges_recursive(
     plan: Any,
-    info: dict[str, dict[str, str]],
-    tokens: dict[str, Any],
-    queue_info: dict[str, dict[str, str]],
-    queue_tokens: dict[str, Any],
+    instance_path: list[str],
+    edges: dict[str, dict[str, Any]],
 ) -> None:
-    """Recursively gather edge info + tokens from *plan* and nested sub-plans."""
+    """Add the edges of *plan*, at *instance_path*, and of its sub-plans to *edges*."""
 
-    info.update(plan.edge_info_by_ast_path)
-    tokens.update(plan.edge_last_token_by_ast_path)
-    queue_info.update(plan.edge_info_by_queue_id)
-    queue_tokens.update(plan.edge_last_token_by_queue_id)
+    represented_queue_ids: set[str] = set()
+    for ast_path, details in plan.edge_info_by_ast_path.items():
+        entry = _edge_entry(details, instance_path)
+        represented_queue_ids.add(details["queueId"])
+        if ast_path in plan.edge_last_token_by_ast_path:
+            entry["lastToken"] = plan.edge_last_token_by_ast_path[ast_path]
+        edges[_scoped(instance_path, ast_path)] = entry
+
+    for queue_id, details in plan.edge_info_by_queue_id.items():
+        if queue_id in represented_queue_ids:
+            continue
+        entry = _edge_entry(details, instance_path)
+        if queue_id in plan.edge_last_token_by_queue_id:
+            entry["lastToken"] = plan.edge_last_token_by_queue_id[queue_id]
+        edges["queue:" + _scoped(instance_path, queue_id)] = entry
+
     for actor in plan.actors:
         if actor.kind == "workflow" and actor.sub_plan:
-            _collect_edges_recursive(actor.sub_plan, info, tokens, queue_info, queue_tokens)
+            _collect_edges_recursive(actor.sub_plan, [*instance_path, actor.name], edges)
 
 
 @dataclasses.dataclass
@@ -622,9 +625,17 @@ class QueueTraceCollector:
         }
 
 
-def _collect_queue_snapshot(plan: Any) -> list[dict[str, Any]]:
-    """Snapshot all queue sizes in a plan (including nested sub-plans)."""
+def _collect_queue_snapshot(
+    plan: Any, instance_path: list[str] | None = None
+) -> list[dict[str, Any]]:
+    """Snapshot all queue sizes in a plan (including nested sub-plans).
 
+    ``scope`` names the workflow a queue is in, and a nested queue's
+    ``instancePath`` says which instance of it, as the run overlay's edges do:
+    two instances of one workflow have queues of the same name and scope.
+    """
+
+    path = instance_path or []
     sizes: list[dict[str, Any]] = []
     for q in plan.all_queues:
         entry: dict[str, Any] = {
@@ -632,6 +643,8 @@ def _collect_queue_snapshot(plan: Any) -> list[dict[str, Any]]:
             "queueId": q.id,
             "size": q.size(),
         }
+        if path:
+            entry["instancePath"] = list(path)
         # Which edge the queue is, said as the overlay says it -- its source
         # path, or its endpoints. Without it the IDE's stepper has a size and a
         # token for every queue and no edge to draw them on.
@@ -646,7 +659,7 @@ def _collect_queue_snapshot(plan: Any) -> list[dict[str, Any]]:
         sizes.append(entry)
     for actor in plan.actors:
         if actor.kind == "workflow" and actor.sub_plan:
-            sizes.extend(_collect_queue_snapshot(actor.sub_plan))
+            sizes.extend(_collect_queue_snapshot(actor.sub_plan, [*path, actor.name]))
     return sizes
 
 
