@@ -1,4 +1,4 @@
-"""Advanced 03 — A workflow written for its data.
+"""Advanced 03: a workflow written for its data.
 
 In 01 the author wrote the same workflow whatever it was given. Here it is told
 about a folder, and asked for a graph with one counting node per file and one
@@ -10,7 +10,7 @@ nobody wrote that graph down before the run.
 
 ``Listing``, ``Author``, ``Execute`` and ``Read`` are in ``authoring.py``, beside
 this file. ``Shape`` reads the same run folder a second time (an output port
-feeds every consumer its own copy) and gives the nodes of the generated graph,
+feeds every input it is wired to) and gives the nodes of the generated graph,
 which is how the parent sees what was built: the child's run record lists them.
 The parent's own trace shows the tool node firing once, and nothing inside.
 
@@ -26,7 +26,7 @@ Run it::
     wfpy run examples/advanced/03_data_shaped_workflow.py
     python examples/advanced/03_data_shaped_workflow.py
 
-Expected output — four files, so four counting nodes::
+Expected output (four files, so four counting nodes)::
 
     {'Answer': [{'Total': 41, 'Counts': {'actors.txt': 9, 'guards.txt': 12,
     'queues.txt': 10, 'tokens.txt': 10}}], 'Nodes': [['count_actors',
@@ -34,7 +34,7 @@ Expected output — four files, so four counting nodes::
 
 Add a ``.txt`` file to ``data/notes`` and run it again: one more node.
 
-Next: 04_recursive_delegation.py — the generated workflow delegates in turn.
+Next: 04_recursive_delegation.py, the generated workflow delegates in turn.
 """
 
 import json

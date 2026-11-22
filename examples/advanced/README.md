@@ -53,22 +53,32 @@ after it for you.
 
 - **The generated file is code, and it runs with your rights.** `wfpy run`
   imports the file. There is no sandbox, and a coding agent may also use its
-  own tools during its turn. Run a real author only where you would run code
-  that agent wrote.
+  own tools during its turn: in one run of 04 an author left a scratch file in
+  the folder it was told about. The prompt now says not to, which is a
+  request and not a guarantee. Run a real author only where you would run
+  code that agent wrote.
 - **The result does not come back by itself.** The tool node's token is the
   folder of the child run. A node has to open `child/run.wf-run.json` in it and
   emit what the child gave (`Read` in 01).
 - **A failed child ends the parent, when a `@tool` runs it.** Run it from a
   `@task` to get the failure as a token (05).
 - **Nothing bounds the recursion.** 02 ends because its base case is a graph
-  with no author. 04 counts the levels through the tool node's environment and
-  refuses past a limit.
+  with no author. 04 counts the levels through the tool node's environment,
+  and `delegate` refuses in a run that is at the limit.
+- **Nothing bounds a child's run time.** A `@tool` node has no time limit. A
+  generated workflow that never ends holds its parent, and one whose node
+  fires without end (a source with no latch) is stopped by wfpy only after
+  100000 steps, with a large trace on disk by then. 05 runs the child from a
+  task, with a time limit.
 - **The parent does not see inside the child.** Its trace and its overlay show
   one tool firing. The child has a complete run folder of its own, under the
   parent's work folder, and its run record lists its nodes (`Shape` in 03).
 - **A generated file is not beside your modules.** It is written in the run's
   work folder, so what it imports from your project reaches it through
-  `PYTHONPATH` on the tool node (`Execute` in `authoring.py`).
+  `PYTHONPATH` on the tool node (`Execute` in `authoring.py`). A tool node's
+  working folder is the folder of its workflow file: give the paths in full,
+  since a relative `PYTHONPATH` does not mean in the child what it means in
+  your shell.
 - **Each level is a process.** About a quarter of a second for `wfpy run` to
   start, before any model turn. Its run folder is inside the one above, so the
   paths grow with every level.

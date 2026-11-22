@@ -1,4 +1,4 @@
-"""Advanced 01 — A workflow as a token: an agent writes one, a tool node runs it.
+"""Advanced 01: a workflow as a token. An agent writes one, a tool node runs it.
 
 A workflow file is text, and text is a token. So an ``@agent`` can emit a
 workflow on a ``File`` port, and a ``@tool`` node can run it with ``wfpy run``:
@@ -14,14 +14,18 @@ Three nodes carry the whole pattern:
   that file's path.
 * **Execute** is a tool node whose command is ``wfpy run`` on that path. Its
   input ``X`` goes to the generated workflow through ``--input``, so a token of
-  this graph becomes a token of the generated one. Its output ``Run`` is a path
-  the runtime chooses, given to ``--out-dir``: the folder of the child run.
+  this graph becomes a token of the generated one. It travels as text
+  (``{in.X}`` is ``str(token)``, which ``--input`` reads again): right for a
+  number or a word, not for a dict. Its output ``Run`` is a path the runtime
+  chooses, given to ``--out-dir``: the folder of the child run.
 * **Read** opens the child's run record and emits what the child gave. The
   result does not come back by itself: the tool's token is a folder, and a
   node has to read it.
 
 The command is ``sys.executable -m wfpy.cli``, so the child runs on the Python
-and the wfpy that run the parent, with nothing needed on ``PATH``.
+that runs the parent, with nothing needed on ``PATH``. A tool node's working
+folder is the folder of its workflow file, so the child finds wfpy when it is
+installed, or on a ``PYTHONPATH`` given in full, and not through a relative one.
 
 ``transport="mock"`` keeps it offline: the author replies with one fixed file,
 a doubling workflow like the tutorial's first example. A real author writes
@@ -36,7 +40,7 @@ Expected output::
 
     {'Answer': [42]}
 
-Next: 02_recursive_workflow.py — a generated workflow that generates the next.
+Next: 02_recursive_workflow.py, a generated workflow that generates the next.
 """
 
 import json
@@ -108,9 +112,12 @@ class Read:
         Answer = Port[int](direction="out")
 
     @action(consumes={"Run": 1}, produces={"Answer": 1})
-    def read(self, run_dir) -> int:
+    def read(self, run_dir) -> dict:
         record = json.loads((Path(str(run_dir)) / "child" / "run.wf-run.json").read_text())
-        return record["outputs"]["Answer"][0]  # every output is a list of tokens
+        answer = record["outputs"]["Answer"][0]  # every output is a list of tokens
+        # Named by its port: a returned dict is read as {port: value}, so a child
+        # whose answer is a dict would otherwise emit nothing here, with no error.
+        return {"Answer": answer}
 
 
 @workflow(inputs={"X": int}, outputs={"Answer": int})

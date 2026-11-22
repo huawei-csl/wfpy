@@ -1,4 +1,4 @@
-"""Advanced 04 — Recursive delegation: a generated workflow delegates in turn.
+"""Advanced 04: recursive delegation. A generated workflow delegates in turn.
 
 03 wired an author, a tool node and a reader by hand. ``authoring.delegate`` is
 those three as one sub-workflow, a task in and an answer out, and the author is
@@ -20,9 +20,10 @@ this file names none of them.
 What a recursion like this needs, and wfpy does not give by itself:
 
 * **A bound.** ``authoring.py`` counts the levels through the tool node's
-  environment and refuses to import past ``WFPY_EXAMPLE_MAX_LEVEL`` (5). Run
-  this with the limit at 1 and it ends with ``delegation is 2 levels deep; the
-  limit is 1``.
+  environment, and ``delegate`` refuses in a run that is at
+  ``WFPY_EXAMPLE_MAX_LEVEL`` (5). The runs here go down to level 3. Run this
+  with the limit at 2 and it ends with ``delegation stops at level 2, and this
+  run is at level 2``.
 * **A path for imports.** A generated file lives in the run's work folder, so
   ``authoring`` reaches it through ``PYTHONPATH``, set on the tool node.
 
@@ -39,13 +40,13 @@ Run it::
     wfpy run examples/advanced/04_recursive_delegation.py
     python examples/advanced/04_recursive_delegation.py
 
-Expected output — every file of the tree, counted three levels down::
+Expected output (every file of the tree, counted three levels down)::
 
     {'Answer': [{'Total': 44, 'Counts': {'readme.txt': 6, 'model/actors.txt': 8,
     'model/queues.txt': 7, 'model/rules/guards.txt': 7,
     'model/rules/priorities.txt': 9, 'tools/cli.txt': 7}}]}
 
-Next: 05_repair_generated_workflow.py — when the generated workflow is wrong.
+Next: 05_repair_generated_workflow.py, when the generated workflow is wrong.
 """
 
 from pathlib import Path

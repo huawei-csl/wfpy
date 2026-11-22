@@ -24,18 +24,16 @@ TRANSPORT = os.environ.get("WFPY_EXAMPLE_TRANSPORT", "mock")
 CONNECTOR = os.environ.get("WFPY_EXAMPLE_CONNECTOR", "claude")
 MODEL = os.environ.get("WFPY_EXAMPLE_MODEL", "sonnet")
 
-# How deep this process is in the chain of runs. Each Execute starts its child
-# one level down. wfpy does not bound a recursion, so this module does: past
-# the limit it does not import, and an author that delegates without end stops
-# there, with an error that says so.
+# How deep this process is in the chain of runs: 0 for the run you start, and
+# each Execute starts its child one level down. wfpy does not bound a
+# recursion, so `delegate` does: a run at the limit may not delegate again, and
+# an author that delegates without end stops there, with an error that says so.
 LEVEL = int(os.environ.get("WFPY_EXAMPLE_LEVEL", "0"))
 MAX_LEVEL = int(os.environ.get("WFPY_EXAMPLE_MAX_LEVEL", "5"))
-if LEVEL > MAX_LEVEL:
-    raise RuntimeError(f"delegation is {LEVEL} levels deep; the limit is {MAX_LEVEL}")
 
 PROMPT = f"""You write wfpy workflows. This is all of wfpy you need:
 
-{(HERE / "primer.md").read_text()}
+{(HERE / "primer.md").read_text(encoding="utf-8")}
 
 `inputs.Task` describes one folder: `folder` is its absolute path, `files` the names of
 the .txt files directly in it, `folders` the names of its sub-folders.
@@ -71,7 +69,8 @@ connect(listing_x.Task, sub_x.Task)
 connect(sub_x.Answer, join.X)
 ```
 
-Give the file's full content as the value of the `Workflow` output port. Do not run it."""
+Give the file's full content as the value of the `Workflow` output port. Do not run it,
+and do not create or change any file: your reply is the only thing that is used."""
 
 
 @task
@@ -92,8 +91,10 @@ class Listing:
         folder = Path(self.folder)
         listing = {
             "folder": str(folder),
-            "files": sorted(p.name for p in folder.glob("*.txt")),
-            "folders": sorted(p.name for p in folder.iterdir() if p.is_dir()),
+            "files": sorted(p.name for p in folder.glob("*.txt") if p.is_file()),
+            "folders": sorted(
+                p.name for p in folder.iterdir() if p.is_dir() and not p.name.startswith(".")
+            ),
         }
         return {"Task": listing}  # a returned dict is a port map: name the port
 
@@ -161,7 +162,11 @@ class Read:
 
 @workflow(inputs={"Task": dict}, outputs={"Answer": dict})
 def delegate() -> None:
-    """Hand a task to an author and run what it writes."""
+    """Hand a task to an author and run what it writes, one level down."""
+    if LEVEL >= MAX_LEVEL:
+        raise RuntimeError(
+            f"delegation stops at level {MAX_LEVEL}, and this run is at level {LEVEL}"
+        )
     author, execute, read = Author(), Execute(), Read()
     connect("Task", author.Task)
     connect(author.Workflow, execute.Workflow)

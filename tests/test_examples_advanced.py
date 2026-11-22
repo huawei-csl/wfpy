@@ -9,12 +9,16 @@ Beyond the results, three claims of that folder's README are held here: the
 generated graph follows the data it was written for (03), the recursion stops
 at its limit with an error that names it (04), and a failed candidate is a
 token and not the end of the run (05).
+
+No test here starts a model. The graphs that ask for one are built and
+planned, and not run.
 """
 
 from __future__ import annotations
 
 import json
 import shutil
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -137,7 +141,7 @@ def test_generated_graph_follows_the_folder(tmp_path: Path):
     scripted_author = _load_module(str(ADVANCED_DIR / "scripted_author.py"))
 
     def nodes(listing: dict[str, Any]) -> list[str]:
-        source = tmp_path / f"generated_{len(listing['files'])}_{len(listing['folders'])}.py"
+        source = tmp_path / f"generated_{len(list(tmp_path.iterdir()))}.py"
         source.write_text(scripted_author.workflow_source(listing), encoding="utf-8")
         workflow = _find_workflows(_load_module(str(source)))["counting"]
         graph = export_graph_json(_build_workflow_graph(workflow._wfpy_workflow))["graph"]
@@ -148,7 +152,13 @@ def test_generated_graph_follows_the_folder(tmp_path: Path):
     three = nodes({"folder": folder, "files": ["a.txt", "b.txt", "c.txt"], "folders": []})
     nested = nodes({"folder": folder, "files": ["readme.txt"], "folders": ["model", "tools"]})
 
+    # Names that differ only in punctuation are as many nodes, not one written twice.
+    alike = nodes({"folder": folder, "files": ["a-b.txt", "a_b.txt"], "folders": ["it's"]})
+    taken = nodes({"folder": folder, "files": ["a b.txt", "a b_1.txt", "a-b.txt"], "folders": []})
+
     assert two == ["count_a", "count_b", "join"]
+    assert alike == ["count_a_b", "count_a_b_1", "join", "listing_it_s", "sub_it_s"]
+    assert taken == ["count_a_b", "count_a_b_1", "count_a_b_2", "join"]
     assert three == ["count_a", "count_b", "count_c", "join"]
     assert nested == [
         "count_readme",
@@ -177,18 +187,28 @@ def test_generated_graph_changes_with_the_data(tmp_path: Path, monkeypatch: pyte
     assert answer["Counts"]["tools/extra/more.txt"] == 3
 
 
-def test_recursion_stops_at_its_limit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """04: the tree is three levels deep; with the limit at 1 the run ends, and says why."""
-    monkeypatch.setenv("WFPY_EXAMPLE_MAX_LEVEL", "1")
+@pytest.mark.parametrize("limit", [1, 2])
+def test_recursion_stops_at_its_limit(limit: int, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """04: its runs go down to level 3. With a lower limit the run ends, and says why."""
     workflow = _workflow(ADVANCED_DIR / "04_recursive_delegation.py")
-    with pytest.raises(RuntimeError, match="delegation is 2 levels deep; the limit is 1"):
+    monkeypatch.setenv("WFPY_EXAMPLE_MAX_LEVEL", str(limit))
+    stopped = f"delegation stops at level {limit}, and this run is at level {limit}"
+    with pytest.raises(RuntimeError, match=stopped):
         run(workflow, verbose=False, out_dir=str(tmp_path))
+
+
+def test_recursion_runs_at_the_limit_it_needs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """04: the limit is the deepest level a run may be at, and the last level is 3."""
+    workflow = _workflow(ADVANCED_DIR / "04_recursive_delegation.py")
+    monkeypatch.setenv("WFPY_EXAMPLE_MAX_LEVEL", "3")
+    outputs = run(workflow, verbose=False, out_dir=str(tmp_path))
+    assert outputs["Answer"][0]["Total"] == 44
 
 
 def test_failed_candidate_is_a_token_not_the_end_of_the_run(tmp_path: Path):
     """05: the first candidate fails, and what the reviser was sent says how."""
     module = _load_module(str(ADVANCED_DIR / "05_repair_generated_workflow.py"))
-    check = module.Check()
+    check = module.Check(timeout_s=60)
     candidate = tmp_path / "candidate.py"
 
     candidate.write_text(module.BROKEN, encoding="utf-8")
@@ -196,8 +216,10 @@ def test_failed_candidate_is_a_token_not_the_end_of_the_run(tmp_path: Path):
     assert not broken.ok
     assert "name 'six' is not defined" in broken.error
 
-    candidate.write_text("this is not python\n", encoding="utf-8")
-    assert not check._run(str(candidate)).ok
+    candidate.write_text("def broken(:\n    pass\n", encoding="utf-8")
+    unparsed = check._run(str(candidate))
+    assert not unparsed.ok
+    assert "SyntaxError" in unparsed.error
 
     # Exit 0 is not success: a workflow that runs and gives no `Answer` fails too.
     candidate.write_text(module.FIXED.replace('"Answer"', '"Other"'), encoding="utf-8")
@@ -207,6 +229,18 @@ def test_failed_candidate_is_a_token_not_the_end_of_the_run(tmp_path: Path):
 
     candidate.write_text(module.FIXED, encoding="utf-8")
     assert check._run(str(candidate)) == module.Outcome(True, str(candidate), answer=42)
+
+
+def test_candidate_that_does_not_end_is_a_token_too(tmp_path: Path):
+    """05: a `@tool` node would wait for ever; the task that runs the candidate does not."""
+    module = _load_module(str(ADVANCED_DIR / "05_repair_generated_workflow.py"))
+    candidate = tmp_path / "candidate.py"
+    candidate.write_text("import time\n\nwhile True:\n    time.sleep(1)\n", encoding="utf-8")
+
+    outcome = module.Check(timeout_s=2)._run(str(candidate))
+
+    assert not outcome.ok
+    assert outcome.error == "the run did not end within 2 seconds"
 
 
 def test_budget_ends_the_repair_loop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -221,3 +255,42 @@ def test_budget_ends_the_repair_loop(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert answer["ok"] is False
     assert answer["revisions"] == 2
     assert "name 'six' is not defined" in answer["error"]
+
+
+@pytest.fixture
+def real_transport(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """Ask for a real agent, and leave no module behind that was imported that way."""
+    saved = sys.modules.pop("authoring", None)
+    monkeypatch.setenv("WFPY_EXAMPLE_TRANSPORT", "acp")
+    try:
+        yield
+    finally:
+        sys.modules.pop("authoring", None)
+        if saved is not None:
+            sys.modules["authoring"] = saved
+
+
+@pytest.mark.parametrize(
+    ("stem", "agents"),
+    [
+        ("03_data_shaped_workflow", ["authoring.Author"]),
+        ("04_recursive_delegation", ["authoring.Author"]),
+        ("05_repair_generated_workflow", ["Author", "Reviser"]),
+    ],
+)
+def test_real_author_graph_builds_without_a_model(
+    stem: str, agents: list[str], real_transport: Any
+):
+    """The branch that makes the author an `@agent` is otherwise reached only by a billed run."""
+    module = _load_module(str(ADVANCED_DIR / f"{stem}.py"))
+    wf_def = _find_workflows(module)[EXPECTATIONS[stem][0]]._wfpy_workflow
+    graph = _build_workflow_graph(wf_def)
+    assert export_graph_json(graph), f"{stem}: empty graph IR"
+    assert export_plan_json(build_plan(graph, wf_def)), f"{stem}: empty plan IR"
+
+    for name in agents:
+        owner, _, cls = name.rpartition(".")
+        node = getattr(sys.modules[owner] if owner else module, cls)
+        spec = node._wfpy_meta.agent_spec
+        assert spec is not None, f"{name} should be an agent when a real transport is asked for"
+        assert spec.transport == "acp"

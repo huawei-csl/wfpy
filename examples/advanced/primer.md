@@ -12,8 +12,8 @@ class Start:
         Out = Port[int](direction="out")
 
     class Schedule:                # a node with NO input port needs this latch,
-        initial = "armed"          # or it fires without end: one transition out
-        transitions = [("armed", "emit", "spent")]   # of the first state
+        initial = "armed"          # or it fires again and again: one transition
+        transitions = [("armed", "emit", "spent")]   # out of the first state
 
     @action(consumes={}, produces={"Out": 1})
     def emit(self) -> int:
@@ -42,14 +42,16 @@ def flow():
     connect(add.Sum, "Total")      # a string names an output of the workflow
 ```
 
-Rules that are silent failures when broken:
+Rules. The first two give a wrong result with no error when broken:
 
+- An input port takes exactly ONE edge; a second one is ignored. To join N values, give
+  the joining node N input ports and consume them all in one action.
+- A dict returned from an action is read as `{port name: value}`; a dict without that
+  name emits nothing. To send a dict as the token of the port `Out`, return
+  `{"Out": the_dict}`.
 - Always state `direction="in"` or `direction="out"` on a port.
-- An input port takes exactly ONE edge. To join N values, give the joining node N input
-  ports and consume them all in one action.
-- An output port may feed several input ports; each gets its own copy.
-- A dict returned from an action is read as `{port name: value}`. To send a dict as the
-  token of the port `Out`, return `{"Out": the_dict}`.
+- An output port may feed several input ports. They receive the same object, so do not
+  change a token in place: build a new value.
 - A field with a default, or whose name starts with `_`, is per-node state, not a
   parameter. A parameter has no default.
 - The name in a `Schedule` transition is the name of the action's method.

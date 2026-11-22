@@ -1,4 +1,4 @@
-"""Advanced 02 — Recursion: a generated workflow that generates the next.
+"""Advanced 02: recursion. A generated workflow generates the next.
 
 Nothing in 01 says what the generated workflow may contain. It may contain an
 author and a tool node of its own, and then the workflow it runs is one that
@@ -25,11 +25,11 @@ Run it::
     wfpy run examples/advanced/02_recursive_workflow.py
     python examples/advanced/02_recursive_workflow.py
 
-Expected output — 4 * 3 * 2 * 1, through five nested runs::
+Expected output (4 * 3 * 2 * 1, through five nested runs)::
 
     {'Answer': [24]}
 
-Next: 03_data_shaped_workflow.py — an author that is told about the data.
+Next: 03_data_shaped_workflow.py, an author that is told about the data.
 """
 
 import json
@@ -41,7 +41,11 @@ from wfpy import File, Port, action, agent, connect, run, task, tool, workflow
 LEVEL = 4
 
 # What the author replies: this file, one level down.
-NEXT_LEVEL = Path(__file__).read_text().replace(f"LEVEL = {LEVEL}", f"LEVEL = {LEVEL - 1}", 1)
+NEXT_LEVEL = (
+    Path(__file__)
+    .read_text(encoding="utf-8")
+    .replace(f"LEVEL = {LEVEL}", f"LEVEL = {LEVEL - 1}", 1)
+)
 
 
 @agent(prompt="Write the next level.", transport="mock", mock_outputs={"Workflow": NEXT_LEVEL})

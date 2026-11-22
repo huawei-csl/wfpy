@@ -7,7 +7,9 @@ This script writes that workflow by rule, so the examples run with no model:
     python scripted_author.py "<the folder's listing>" <workflow.py>
 
 It is here for CI and for a first run. What it writes is a correct answer to
-the author's prompt, and nothing in it is cleverer than that prompt.
+the author's prompt, and nothing in it is cleverer than that prompt. The
+listing reaches it on the command line, which bounds its size: a folder of
+thousands of files does not fit.
 """
 
 import ast
@@ -36,8 +38,16 @@ class Count:
 """
 
 
-def _identifier(name: str) -> str:
-    return re.sub(r"\W", "_", name)
+def _node_names(names: list[str]) -> list[str]:
+    """One Python name per file or folder name, distinct when two differ only in punctuation."""
+    out: list[str] = []
+    for name in names:
+        base = node = re.sub(r"\W", "_", name)
+        n = 1
+        while node in out:
+            node, n = f"{base}_{n}", n + 1
+        out.append(node)
+    return out
 
 
 def workflow_source(listing: dict) -> str:
@@ -68,18 +78,16 @@ def workflow_source(listing: dict) -> str:
     out += [f"    def join({arguments}) -> dict:", "        counts = {}"]
     out += [f"        counts.update({port.lower()})" for port in file_ports]
     for port, sub in zip(sub_ports, subs):
-        prefixed = f'{{"{sub}/" + path: n for path, n in {port.lower()}["Counts"].items()}}'
+        prefixed = f'{{{sub + "/"!r} + path: n for path, n in {port.lower()}["Counts"].items()}}'
         out += [f"        counts.update({prefixed})"]
     out += ['        return {"Total": sum(counts.values()), "Counts": counts}']
 
     out += ["", "", '@workflow(outputs={"Total": int, "Counts": dict})', "def counting() -> None:"]
     out += ["    join = Join()"]
-    for port, name in zip(file_ports, files):
-        node = f"count_{_identifier(Path(name).stem)}"
-        out += [f"    {node} = Count(path={str(folder / name)!r})"]
-        out += [f"    connect({node}.Out, join.{port})"]
-    for port, sub in zip(sub_ports, subs):
-        node = _identifier(sub)
+    for port, name, node in zip(file_ports, files, _node_names([Path(f).stem for f in files])):
+        out += [f"    count_{node} = Count(path={str(folder / name)!r})"]
+        out += [f"    connect(count_{node}.Out, join.{port})"]
+    for port, sub, node in zip(sub_ports, subs, _node_names(subs)):
         out += [f"    listing_{node} = Listing(folder={str(folder / sub)!r})"]
         out += [f"    sub_{node} = delegate()"]
         out += [f"    connect(listing_{node}.Task, sub_{node}.Task)"]

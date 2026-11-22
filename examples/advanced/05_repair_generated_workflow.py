@@ -1,6 +1,6 @@
-"""Advanced 05 — When the generated workflow is wrong: check it, send it back.
+"""Advanced 05: when the generated workflow is wrong, check it and send it back.
 
-In 01–04 a tool node ran the generated workflow. A ``@tool`` raises when its
+In 01 to 04 a tool node ran the generated workflow. A ``@tool`` raises when its
 command exits non-zero, and that ends the whole run: a syntax error, a file
 with no ``@workflow`` in it, or a node that raises in the generated workflow
 all stop the workflow that asked for it. That is right for a command that
@@ -18,7 +18,8 @@ means:
 
 * **Check** runs the file and emits an ``Outcome``. A run that exits 0 without
   a token on the output that was asked for is a failure too: exit 0 is not
-  success.
+  success. So is a run that does not end in time. A ``@tool`` node has no
+  time limit, and a generated workflow may never finish.
 * **Decide** has three actions on one port, ordered by a ``Priority``: accept a
   good outcome, ask again while the budget lasts, give up when it is spent.
   The budget is what makes the loop end.
@@ -39,7 +40,7 @@ Run it::
     wfpy run examples/advanced/05_repair_generated_workflow.py
     python examples/advanced/05_repair_generated_workflow.py
 
-Expected output — one failed candidate, one revision, then the answer::
+Expected output (one failed candidate, one revision, then the answer)::
 
     {'Answer': [{'ok': True, 'answer': 42, 'revisions': 1}]}
 
@@ -65,8 +66,13 @@ MODEL = os.environ.get("WFPY_EXAMPLE_MODEL", "sonnet")
 
 PRIMER = f"""You write wfpy workflows. This is all of wfpy you need:
 
-{(HERE / "primer.md").read_text()}
+{(HERE / "primer.md").read_text(encoding="utf-8")}
 """
+
+REPLY_ONLY = (
+    "Do not run it, and do not create or change any file: your reply is the only thing "
+    "that is used."
+)
 
 FIXED = """\
 from wfpy import Port, action, connect, task, workflow
@@ -110,7 +116,7 @@ class Outcome:
     prompt=PRIMER
     + "Write ONE Python file holding a wfpy workflow with one output, `Answer` (an int): "
     "the product of 6 and 7. Give the file's full content as the value of the `Workflow` "
-    "output port. Do not run it.",
+    "output port. " + REPLY_ONLY,
     transport=TRANSPORT,
     connector=CONNECTOR,
     model=MODEL,
@@ -128,7 +134,7 @@ class Author:
     prompt=PRIMER
     + "`inputs.Failure` holds a wfpy workflow file and what running it gave. Correct the "
     "file. Give the corrected file's full content as the value of the `Workflow` output "
-    "port. Do not run it.",
+    "port. " + REPLY_ONLY,
     transport=TRANSPORT,
     connector=CONNECTOR,
     model=MODEL,
@@ -145,11 +151,15 @@ class Reviser:
 class Check:
     """Runs a candidate and says what happened. It does not raise on a bad one."""
 
+    timeout_s: float  # parameter: how long a candidate may run
+
     class Ports:
         Initial = Port[File](direction="in")  # from the author
         Retry = Port[File](direction="in")  # from the reviser, the feedback edge
         Result = Port[Outcome](direction="out")
 
+    # Two input ports, since a port takes one edge, and so two actions. The
+    # loop works without this Schedule; it says, as data, in which order they fire.
     class Schedule:
         initial = "fresh"
         transitions = [
@@ -168,12 +178,18 @@ class Check:
     def _run(self, workflow_file) -> Outcome:
         source = Path(str(workflow_file))
         run_dir = source.with_suffix("")  # beside the candidate, in the run's folder
-        child = subprocess.run(
-            [sys.executable, "-m", "wfpy.cli", "run", str(source)]
-            + ["--out-dir", str(run_dir), "--run-id", "child"],
-            capture_output=True,
-            text=True,
-        )
+        try:
+            child = subprocess.run(
+                [sys.executable, "-m", "wfpy.cli", "run", str(source)]
+                + ["--out-dir", str(run_dir), "--run-id", "child"],
+                capture_output=True,
+                text=True,
+                stdin=subprocess.DEVNULL,
+                timeout=self.timeout_s,
+            )
+        except subprocess.TimeoutExpired:
+            error = f"the run did not end within {self.timeout_s:g} seconds"
+            return Outcome(False, str(source), error=error)
         if child.returncode != 0:
             return Outcome(False, str(source), error=child.stderr.strip()[-2000:])
         record = json.loads((run_dir / "child" / "run.wf-run.json").read_text())
@@ -227,7 +243,8 @@ class Decide:
 
 @workflow(outputs={"Answer": dict})
 def repaired() -> None:
-    author, check, decide, reviser = Author(), Check(), Decide(budget=2), Reviser()
+    author, check, reviser = Author(), Check(timeout_s=60), Reviser()
+    decide = Decide(budget=2)
     connect(author.Workflow, check.Initial)
     connect(check.Result, decide.Result)
     connect(decide.Failure, reviser.Failure)
