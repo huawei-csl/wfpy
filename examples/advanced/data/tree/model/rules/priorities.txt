@@ -1,0 +1,1 @@
+A priority orders the actions that may fire together.

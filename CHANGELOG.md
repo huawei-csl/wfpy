@@ -6,6 +6,21 @@ All notable changes to wfpy are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- Advanced examples (`examples/advanced/`): workflows that write workflows.
+  An `@agent` emits a workflow file as a token on a `File` port, and a `@tool`
+  node of the same graph runs it with `wfpy run`. Five examples: the pattern
+  in three nodes, a recursion down to a base case, a generated graph that
+  follows the folder it was written for, the pattern as a sub-workflow that a
+  generated workflow may use in turn (so the depth of the runs follows a
+  folder tree), and a repair loop in which a `@task` runs the candidate and a
+  failed one goes back to an agent. They run offline by default and are
+  executed by `tests/test_examples_advanced.py`; three of them take a real
+  agent through `WFPY_EXAMPLE_TRANSPORT=acp`. Nothing in wfpy changed for
+  them, and the folder's README says what the pattern leaves to the author of
+  the graph: the generated file runs with the user's rights, a recursion has
+  no bound of its own, and the parent run does not see inside the child.
+
 ## [1.3.1] — 2026-11-20
 
 One fix, to what a run writes about the edges of nested workflows (the run

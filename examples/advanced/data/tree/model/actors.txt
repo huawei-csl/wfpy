@@ -1,0 +1,1 @@
+An actor fires when its tokens are ready.

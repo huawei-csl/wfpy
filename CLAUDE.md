@@ -118,5 +118,9 @@ Public API is re-exported from `src/wfpy/__init__.py`.
   (`src/wfpy/skills/*/SKILL.md`) say wfpy does, one small workflow a sentence.
   A failure there means a skill is wrong now: change the skill's text and the
   test in the commit that changes the behaviour.
-- There are no `examples/` in this repo yet; nothing in `tests/` may depend on
-  example files, or a missing example will abort collection for the whole suite.
+- `tests/test_examples.py` runs every tutorial example (`examples/NN_*.py`)
+  and `tests/test_examples_advanced.py` every one in `examples/advanced/`
+  (workflows that write and run workflows, each child a `wfpy run`
+  subprocess). Both hold a table of what each example gives: a new example
+  needs an entry, and its docstring a `Run it::` block. Examples stay offline
+  by default: no credentials, no network, no optional extra.

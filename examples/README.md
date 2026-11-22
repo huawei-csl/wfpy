@@ -47,6 +47,15 @@ The patterns you reach for when wiring LLMs together. Each runs offline via
 | 11 | [`11_routing.py`](11_routing.py) | Dispatch each request to the right specialist (guard routing) |
 | 12 | [`12_repair_loop.py`](12_repair_loop.py) | Generate → check → revise until good (feedback loop) |
 
+## Advanced: workflows that write workflows
+
+[`advanced/`](advanced/README.md) holds five more, in which an agent emits a
+workflow file as a token and a node of the same graph runs it: a graph that
+follows its data, recursion, and a repair loop for a generated workflow that
+fails. They run offline by default, are executed by
+`tests/test_examples_advanced.py`, and three of them take a real agent through
+an environment variable.
+
 ## Reading order
 
 01 → 02 establish tasks, ports, and wiring. 03 introduces multiple actions (and
