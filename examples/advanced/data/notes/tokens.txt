@@ -1,0 +1,1 @@
+A token is a value that waits on an edge.
