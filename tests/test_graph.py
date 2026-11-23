@@ -245,6 +245,60 @@ class TestExportDefinitionAnnotations:
         assert args.get("fireableWithoutInput") == "2"
         assert args.get("truncationStrategy") == '"summarize"'
 
+    def test_acp_agent_params_are_serialized(self):
+        # The ACP connector, its session mode and where permission requests go:
+        # the properties panel shows them as the decorator writes them.
+        @agent(prompt="do x", transport="acp", connector="claude", mode="plan",
+               ask_user=True, ask_permissions=True, use_prompt=False)
+        class AcpAgent:
+            class Ports:
+                In = Port[str](direction="in")
+                Out = Port[str](direction="out")
+
+        @workflow(inputs={"Input": str}, outputs={"Output": str})
+        def wf():
+            a = AcpAgent()
+            connect("Input", a.In)
+            connect(a.Out, "Output")
+
+        graph = WorkflowGraph("wf")
+        with graph:
+            wf()
+        node = next(n for n in export_graph_json(graph)["graph"]["nodes"] if n.get("kind") == "agent")
+        annotation = next(a for a in node["meta"]["definitionAnnotations"] if a.get("name") == "agent")
+        args = {str(i["name"]): str(i["value"]) for i in annotation["arguments"]}
+        assert args.get("connector") == '"claude"'
+        assert args.get("mode") == '"plan"'
+        assert args.get("askUser") == "true"
+        assert args.get("askPermissions") == "true"
+        # A prompt the agent is told not to use is off.
+        assert args.get("usePrompt") == "false"
+        # No level given is no level, not the text "None".
+        assert AcpAgent._wfpy_meta.agent_spec.variant == ""
+        assert "reasoningEffort" not in args
+
+    def test_reasoning_effort_written_as_none_is_no_level(self):
+        # An IDE wrote `reasoningEffort="None"` back while wfpy exported str(None).
+        @agent(prompt="do x", reasoningEffort="None")
+        class Written:
+            class Ports:
+                In = Port[str](direction="in")
+
+        @agent(prompt="do x", askPermissions=True)
+        class Camel:
+            class Ports:
+                In = Port[str](direction="in")
+
+        @agent(prompt="do x", variant="none")
+        class Lowest:
+            class Ports:
+                In = Port[str](direction="in")
+
+        assert Written._wfpy_meta.agent_spec.variant == ""
+        assert Camel._wfpy_meta.agent_spec.ask_permissions is True
+        # "none" is a level some models take, not the text str(None) gave.
+        assert Lowest._wfpy_meta.agent_spec.variant == "none"
+
     def test_output_validators_are_serialized_and_round_trip(self):
         import ast
 

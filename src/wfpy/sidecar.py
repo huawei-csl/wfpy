@@ -162,6 +162,8 @@ FEATURES = {
     "typeParameters": True,
     # createNode writes `expressions: {name: source}` as given.
     "createNodeExpressions": True,
+    # mergeDefinitionAnnotationArgs takes `argRemovals: [name]`, the args to take out.
+    "mergeArgRemovals": True,
 }
 
 SIDECAR_CONTRACTS = {
