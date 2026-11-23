@@ -613,7 +613,12 @@ def _build_agent_meta(meta: dict[str, Any], rec: Any) -> None:
                 "value": _wf_string_list_expr(rec.meta.agent_spec.mcp_servers),
             }
         )
-    # Emit inline MCP server configs as JSON for rich GUI display
+    # Emit inline MCP server configs as JSON for rich GUI display. A server's
+    # env is named, not given: its values are often secrets, and an IDE that
+    # writes the server back leaves env to the file
+    # (`merge_definition_annotation_args` keeps it). `envKeys` is there for
+    # every server, so an IDE can tell a wfpy that keeps it. args and url are
+    # given as they are: a secret belongs in env.
     if rec.meta.agent_spec.mcp_server_configs:
         import json as _json
 
@@ -625,7 +630,8 @@ def _build_agent_meta(meta: dict[str, Any], rec: Any) -> None:
                     "transport": _cfg.transport,
                     "url": _cfg.url,
                     "command": _cfg.command,
-                    "args": _cfg.args,
+                    "args": [str(_a) for _a in (_cfg.args or [])],
+                    "envKeys": sorted(str(_k) for _k in (_cfg.env or {})),
                 }
             )
         agent_args.append(

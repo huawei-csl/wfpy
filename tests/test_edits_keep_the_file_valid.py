@@ -431,7 +431,7 @@ def test_merge_refuses_a_name_the_export_shows_and_agent_does_not_take(
 
 def test_merge_takes_a_name_in_either_spelling_the_decorator_takes(tmp_path: Path) -> None:
     source = "from wfpy import agent\n" + HELPER
-    for name in ("use_skill", "useSkill", "mcpServerConfigs", "reasoningEffort"):
+    for name in ("use_skill", "useSkill", "lspServers", "reasoningEffort"):
         answer, text = _merge_into(tmp_path, source, argUpdates={name: "None"})
         assert answer["status"] == "ok", answer
         assert _added(text, source) == [f'@agent(prompt="x", {name}=None)']

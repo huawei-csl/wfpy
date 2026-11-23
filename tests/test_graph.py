@@ -195,6 +195,56 @@ class TestExportDefinitionAnnotations:
         assert args.get("useSkillHooks") == "false"
         assert args.get("stateful") == "true"
 
+    def test_inline_mcp_servers_are_exported_with_their_env_named(self):
+        # An IDE draws each configured server: its fields, and its env by name
+        # only (often secrets; the file keeps it on a write-back). envKeys is
+        # there for every server; an arg that is not a string is exported as text.
+        import json
+        from pathlib import Path
+
+        @agent(
+            prompt="do x",
+            mcpServers=[
+                "github",
+                {"name": "docs", "transport": "stdio", "command": "npx", "args": ["-y", Path("docs-mcp")],
+                 "env": {"DOCS_TOKEN": "t0k", "DOCS_ROOT": Path("/srv/docs")}},
+                {"name": "web", "url": "http://localhost:8080/mcp"},
+            ],
+        )
+        class McpAgent:
+            class Ports:
+                In = Port[str](direction="in")
+                Out = Port[str](direction="out")
+
+            def action(self, x: str) -> str:
+                return x
+
+        @workflow(inputs={"Input": str}, outputs={"Output": str})
+        def wf():
+            a = McpAgent()
+            connect("Input", a.In)
+            connect(a.Out, "Output")
+
+        graph = WorkflowGraph("wf")
+        with graph:
+            wf()
+
+        agent_nodes = [n for n in export_graph_json(graph)["graph"]["nodes"] if n.get("kind") == "agent"]
+        args = {
+            str(item.get("name")): str(item.get("value"))
+            for a in agent_nodes[0].get("meta", {}).get("definitionAnnotations", [])
+            if a.get("name") == "agent"
+            for item in a.get("arguments", [])
+        }
+        assert args.get("mcpServers") == '["github", "docs", "web"]'
+        assert json.loads(args["mcpServerConfigs"]) == [
+            {"name": "docs", "transport": "stdio", "url": "", "command": "npx", "args": ["-y", "docs-mcp"],
+             "envKeys": ["DOCS_ROOT", "DOCS_TOKEN"]},
+            {"name": "web", "transport": "streamable-http", "url": "http://localhost:8080/mcp", "command": "",
+             "args": [], "envKeys": []},
+        ]
+        assert "t0k" not in args["mcpServerConfigs"]
+
     def test_agent_backend_and_context_params_are_serialized(self):
         # transport / cliToolsMode / reasoningEffort / fireableWithoutInput /
         # truncationStrategy are surfaced to the IDE so the properties panel can edit them.

@@ -59,6 +59,196 @@ def _decorator_arg_key(annotation_name: str, name: str) -> str:
     return _DECORATOR_ARG_ALIASES.get((_annotation_leaf(annotation_name), snake), snake)
 
 
+def _literal_text(node: cst.BaseExpression | None) -> str | None:
+    """The text of a string literal (implicitly concatenated too); None for
+    anything else, an f-string or a name included."""
+    if isinstance(node, (cst.SimpleString, cst.ConcatenatedString)):
+        value = node.evaluated_value
+        return value if isinstance(value, str) else None
+    return None
+
+
+def _dict_entry(node: cst.Dict, key: str) -> cst.DictElement | None:
+    """The entry of a dict display whose key is the string *key*."""
+    for element in node.elements:
+        if isinstance(element, cst.DictElement) and _literal_text(element.key) == key:
+            return element
+    return None
+
+
+def _configured_mcp_servers(value: cst.BaseExpression) -> list[tuple[str, cst.Dict]] | None:
+    """The servers a list of ``@agent``'s MCP servers configures, each with its
+    name, as written; None when the file computes the list or an item of it
+    (only a string, a registry server's name, and a dict with a literal
+    ``"name"`` are read). ``None`` is no server."""
+    if isinstance(value, cst.Name) and value.value == "None":
+        return []
+    if not isinstance(value, (cst.List, cst.Tuple)):
+        return None
+    configured: list[tuple[str, cst.Dict]] = []
+    for element in value.elements:
+        if not isinstance(element, cst.Element):
+            return None
+        if _literal_text(element.value) is not None:
+            continue
+        if not isinstance(element.value, cst.Dict):
+            return None
+        entry = _dict_entry(element.value, "name")
+        name = _literal_text(entry.value) if entry is not None else None
+        if name is None:
+            return None
+        configured.append((name, element.value))
+    return configured
+
+
+def _without_entry(node: cst.Dict, key: str) -> cst.Dict:
+    """The dict display *node* without its entry *key*; the comma before the
+    closing brace stays as it was."""
+    entries = list(node.elements)
+    kept = [e for e in entries
+            if not (isinstance(e, cst.DictElement) and _literal_text(e.key) == key)]
+    if kept and kept[-1] is not entries[-1]:
+        kept[-1] = kept[-1].with_changes(comma=entries[-1].comma)
+    return node.with_changes(elements=kept)
+
+
+def _with_entries(source: cst.Dict, given: cst.Dict) -> cst.Dict:
+    """The file's dict *source*, laid out as it is, with the entries *given*:
+    one *source* has takes the given value in its place, one it lacks goes at
+    its end, laid out as the entries before it."""
+    keys = {_literal_text(e.key) for e in source.elements if isinstance(e, cst.DictElement)}
+    values: dict[str, cst.BaseExpression] = {}
+    added: list[cst.DictElement] = []
+    for entry in given.elements:
+        key = _literal_text(entry.key) if isinstance(entry, cst.DictElement) else None
+        if not isinstance(entry, cst.DictElement) or key is None:
+            continue
+        if key in keys:
+            values[key] = entry.value
+        else:
+            added.append(entry)
+    entries: list[cst.BaseDictElement] = []
+    for element in source.elements:
+        key = _literal_text(element.key) if isinstance(element, cst.DictElement) else None
+        if isinstance(element, cst.DictElement) and key is not None and key in values:
+            entries.append(element.with_changes(value=values[key]))
+        else:
+            entries.append(element)
+    for entry in added:
+        if not entries:
+            entries.append(entry.with_changes(comma=cst.MaybeSentinel.DEFAULT))
+            continue
+        # The new last entry takes the old last's comma (a trailing one, and the
+        # break before the brace); the old last, the comma between entries.
+        between: cst.Comma | cst.MaybeSentinel = cst.Comma(
+            whitespace_after=cst.SimpleWhitespace(" "))
+        if len(entries) > 1 and isinstance(entries[-2].comma, cst.Comma):
+            between = entries[-2].comma
+        trailing = entries[-1].comma
+        entries[-1] = entries[-1].with_changes(comma=between)
+        entries.append(entry.with_changes(comma=trailing))
+    return source.with_changes(elements=entries)
+
+
+def _keep_configured_mcp_servers(
+    update: cst.BaseExpression, existing_args: Sequence[cst.Arg]
+) -> tuple[cst.BaseExpression, bool]:
+    """``@agent``'s ``mcpServers`` as an IDE writes it, with what the file
+    has kept; and whether the file's ``mcpServerConfigs`` goes.
+
+    The update is the agent's whole list of servers, each one once. The IDE
+    sees the servers configured in the file (dicts, in ``mcpServers`` or
+    ``mcpServerConfigs``) as the graph export gives them: their values, not
+    the expressions that compute them, and the names of their env, not its
+    values. So it writes a server it did not edit as its name, and an edited
+    one with the fields it changed. A server is known by its name:
+
+    - a name the file configures is that server's dict as the file writes it;
+    - a dict for a server the file configures is the file's dict, laid out
+      as it is, with the values the update gives; every other entry (its
+      ``env``, a ``url`` the file computes) is kept;
+    - a dict for a name the file does not configure is a new server, written
+      as given (a server renamed in the IDE is one: the file's goes);
+    - an ``envKeys`` the export gave is not written, and a dict with no
+      literal name is refused.
+
+    A literal ``mcpServerConfigs`` goes: the servers the update names are in
+    ``mcpServers`` now, and one it leaves out is left out. One the file
+    computes stays as written, and a name in ``mcpServers`` is its server
+    when the workflow runs; a dict the file does not configure may be one of
+    its servers, edited, with the rest left out: refused while it computes
+    them. A ``mcpServers`` the file computes, or an item of it (``SERVERS``,
+    ``[*BASE]``, ``[DOCS]``, ``{"name": DOCS_NAME}``), has no dict to keep:
+    refused, not overwritten. So is a file that gives an argument under both
+    its spellings, or configures one server twice: the workflow reads one of
+    them.
+    """
+    configured: dict[str, cst.Dict] = {}
+    drop_configs = False
+    computed_configs: str | None = None
+    spellings: dict[str, str] = {}
+    for arg in existing_args:
+        keyword = arg.keyword.value if arg.keyword is not None else None
+        key = _decorator_arg_key("agent", keyword) if keyword is not None else None
+        if keyword is None or key is None or key not in ("mcp_servers", "mcp_server_configs"):
+            continue
+        if key in spellings:
+            raise RewriteError(
+                message=f"@agent: the file gives both {spellings[key]} and {keyword}; keep one")
+        spellings[key] = keyword
+        found = _configured_mcp_servers(arg.value)
+        if found is None and key == "mcp_servers":
+            raise RewriteError(
+                message=(f"@agent: the file computes {keyword}, or a server in it; "
+                         "edit its MCP servers there"))
+        if found is None:
+            computed_configs = keyword
+            continue
+        for name, server in found:
+            if name in configured:
+                # The run takes one of them, a merge would keep the other.
+                raise RewriteError(
+                    message=f"@agent: the file configures the MCP server {name!r} twice; keep one")
+            configured[name] = server
+        if key == "mcp_server_configs":
+            drop_configs = True
+    if not isinstance(update, (cst.List, cst.Tuple)):
+        return update, drop_configs
+
+    kept: list[cst.BaseElement] = []
+    named: set[str] = set()
+    for element in update.elements:
+        if not isinstance(element, cst.Element):
+            kept.append(element)
+            continue
+        value: cst.BaseExpression = element.value
+        given: cst.Dict | None = None
+        server_name: str | None
+        if isinstance(value, cst.Dict):
+            given = _without_entry(value, "envKeys")
+            entry = _dict_entry(given, "name")
+            server_name = _literal_text(entry.value) if entry is not None else None
+            if server_name is None:
+                raise RewriteError(
+                    message="@agent: an MCP server in mcpServers needs a name, as a string")
+        else:
+            server_name = _literal_text(value)
+        if server_name is not None:
+            if server_name in named:
+                raise RewriteError(message=f"@agent: mcpServers gives {server_name!r} twice")
+            named.add(server_name)
+        source = configured.get(server_name) if server_name is not None else None
+        if given is not None and source is None and computed_configs is not None:
+            raise RewriteError(
+                message=f"@agent: the file computes {computed_configs}; edit its MCP servers there")
+        if source is not None:
+            value = _with_entries(source, given) if given is not None else source
+        elif given is not None:
+            value = given
+        kept.append(element.with_changes(value=value))
+    return update.with_changes(elements=kept), drop_configs
+
+
 def _lay_out_call_args(
     call: cst.Call, original: list[cst.Arg], merged: list[tuple[cst.Arg, int | None]]
 ) -> tuple[list[cst.Arg], cst.BaseParenthesizableWhitespace]:
@@ -3724,6 +3914,13 @@ class RewriteEngine:
                 message=f"@{annotationName}: argRemovals is a list of argument names, not {argRemovals!r}"
             )
         removal_keys = {_decorator_arg_key(annotationName, k) for k in (argRemovals or [])} - set(updates_by_key)
+        if leaf == "agent" and "mcp_server_configs" in updates_by_key:
+            # The export's mcpServerConfigs is a copy for display (env named, not
+            # given): the servers are written in mcpServers, where the file's are kept.
+            raise RewriteError(
+                message=("@agent: mcpServerConfigs is not written back; "
+                         "write the servers in mcpServers")
+            )
 
         class _MergeArgs(_DefinitionTransformer):
             def __init__(self) -> None:
@@ -3755,17 +3952,26 @@ class RewriteEngine:
 
                     # Merge into existing Call args
                     existing_args = list(call.args)
+                    updates = updates_by_key
+                    removals = removal_keys
+                    if leaf == "agent" and "mcp_servers" in updates_by_key:
+                        written, value = updates_by_key["mcp_servers"]
+                        kept_value, drop_configs = _keep_configured_mcp_servers(
+                            value, existing_args)
+                        updates = {**updates_by_key, "mcp_servers": (written, kept_value)}
+                        if drop_configs:
+                            removals = removal_keys | {"mcp_server_configs"}
                     seen_keys: set[str] = set()
                     merged: list[tuple[cst.Arg, int | None]] = []
                     for index, arg in enumerate(existing_args):
                         key = _decorator_arg_key(annotationName, arg.keyword.value) if arg.keyword else None
-                        if key is not None and key in removal_keys:
+                        if key is not None and key in removals:
                             continue
-                        if key is not None and key in updates_by_key:
+                        if key is not None and key in updates:
                             if key in seen_keys:
                                 continue  # a second spelling of the arg just replaced
                             seen_keys.add(key)
-                            given, value = updates_by_key[key]
+                            given, value = updates[key]
                             if taken is not None and arg.keyword is not None and arg.keyword.value not in taken:
                                 # The file spells it as the decorator does not: it is
                                 # written in the decorator's spelling, with its value.
@@ -3775,7 +3981,7 @@ class RewriteEngine:
                             merged.append((arg, index))
 
                     # Append new args not in original
-                    for key, (k, v) in updates_by_key.items():
+                    for key, (k, v) in updates.items():
                         if key not in seen_keys:
                             merged.append((cst.Arg(
                                 keyword=cst.Name(spelled.get(k, k)),
