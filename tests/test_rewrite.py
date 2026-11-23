@@ -579,6 +579,61 @@ class A:
     assert "useSkill" not in updated and "timeoutMs" not in updated
 
 
+def test_merge_leaves_an_arg_it_does_not_change_as_written(tmp_path: Path) -> None:
+    """Two spellings of an arg the save does not touch both stay: dropping
+    one would change which value the decorator reads."""
+    updated = _merged(tmp_path, '''
+from wfpy import agent
+
+
+@agent(prompt="x", use_skill=True, useSkill=False)
+class A:
+    pass
+''', "A", {"model": '"m"'})
+    assert '@agent(prompt="x", use_skill=True, useSkill=False, model="m")' in updated
+
+
+def test_merge_refuses_one_arg_given_twice(tmp_path: Path) -> None:
+    engine = _engine_from_source(tmp_path, '''
+from wfpy import agent
+
+
+@agent(prompt="x")
+class A:
+    pass
+''')
+    with pytest.raises(RewriteError, match="same argument"):
+        engine.merge_definition_annotation_args(
+            entityType="A", annotationName="agent", argUpdates={"useSkill": "false", "use_skill": "true"})
+
+
+def test_merge_leaves_a_bare_decorator_alone_when_nothing_is_added(tmp_path: Path) -> None:
+    source = '''
+from wfpy import agent
+
+
+@agent
+class A:
+    pass
+'''
+    assert "@agent\nclass A:" in _merged(tmp_path, source, "A", {}, ["mode"])
+
+
+def test_merge_writes_ask_permissions_as_the_decorator_takes_it(tmp_path: Path) -> None:
+    updated = _merged(tmp_path, '''
+from wfpy import agent
+
+
+@agent(prompt="x", transport="acp")
+class A:
+    pass
+''', "A", {"askPermissions": "true"})
+    assert '@agent(prompt="x", transport="acp", askPermissions=True)' in updated
+    namespace: dict[str, object] = {}
+    exec(compile(updated, "a.py", "exec"), namespace)
+    assert namespace["A"]._wfpy_meta.agent_spec.ask_permissions is True  # type: ignore[attr-defined]
+
+
 def test_merge_leaves_one_spelling_of_an_arg_written_twice(tmp_path: Path) -> None:
     updated = _merged(tmp_path, '''
 from wfpy import agent
@@ -670,6 +725,51 @@ class B:
     prompt="x",  # what it does
 )
 class B:''' in removed
+
+
+def test_merge_keeps_the_comment_of_an_arg_that_becomes_the_last_on_the_closing_line(tmp_path: Path) -> None:
+    updated = _merged(tmp_path, '''
+from wfpy import agent
+
+
+@agent(prompt="x",  # c
+       model="m")
+class A:
+    pass
+''', "A", {}, ["model"])
+    assert '@agent(prompt="x"  # c\n)\nclass A:' in updated
+
+
+def test_merge_moves_the_comment_lines_above_an_arg_with_it(tmp_path: Path) -> None:
+    source = '''
+from wfpy import agent
+
+
+@agent(
+    prompt="x",
+    # the model
+    model="m",
+    # trailing note
+)
+class A:
+    pass
+'''
+    assert '''@agent(
+    prompt="x",
+    # trailing note
+)''' in _merged(tmp_path, source, "A", {}, ["model"])
+    assert '''@agent(
+    # the model
+    model="m",
+    # trailing note
+)''' in _merged(tmp_path, source, "A", {}, ["prompt"])
+    assert '''@agent(
+    prompt="x",
+    # the model
+    model="m",
+    provider="p",
+    # trailing note
+)''' in _merged(tmp_path, source, "A", {"provider": '"p"'})
 
 
 def test_merge_appends_to_a_lone_arg_on_its_own_line(tmp_path: Path) -> None:

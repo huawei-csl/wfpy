@@ -277,6 +277,21 @@ class TestExportDefinitionAnnotations:
         assert AcpAgent._wfpy_meta.agent_spec.variant == ""
         assert "reasoningEffort" not in args
 
+    def test_reasoning_effort_written_as_none_is_no_level(self):
+        # An IDE wrote `reasoningEffort="None"` back while wfpy exported str(None).
+        @agent(prompt="do x", reasoningEffort="None")
+        class Written:
+            class Ports:
+                In = Port[str](direction="in")
+
+        @agent(prompt="do x", askPermissions=True)
+        class Camel:
+            class Ports:
+                In = Port[str](direction="in")
+
+        assert Written._wfpy_meta.agent_spec.variant == ""
+        assert Camel._wfpy_meta.agent_spec.ask_permissions is True
+
     def test_output_validators_are_serialized_and_round_trip(self):
         import ast
 
