@@ -1034,6 +1034,7 @@ def agent(
     useSkill: bool | None = None,
     useSkillHooks: bool | None = None,
     askUser: bool | None = None,
+    askPermissions: bool | None = None,
     timeoutMs: int | None = None,
     fireableWithoutInput: int | None = None,
     contextBudget: int | None = None,
@@ -1152,6 +1153,7 @@ def agent(
             truncationStrategy=truncationStrategy,
             cliToolsMode=cliToolsMode,
             askUser=askUser,
+            askPermissions=askPermissions,
         )
 
         # How many times the agent may fire with nothing on its inputs; None
@@ -1192,8 +1194,14 @@ def agent(
 
         parsed_validators = _parse_output_validators(output_validators, outputValidators)
 
-        # Normalize variant/reasoningEffort
-        effective_variant = str(variant if reasoningEffort is None else reasoningEffort).strip()
+        # Normalize variant/reasoningEffort: neither given is no level, and so is
+        # the text "None" (that spelling only: "none" is a level some models
+        # take), which an IDE wrote back into files while wfpy exported
+        # `str(None)` as the level.
+        given_variant = variant if reasoningEffort is None else reasoningEffort
+        effective_variant = "" if given_variant is None else str(given_variant).strip()
+        if effective_variant == "None":
+            effective_variant = ""
 
         meta.agent_spec = AgentSpec(
             prompt=prompt,

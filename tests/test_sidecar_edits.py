@@ -2210,3 +2210,26 @@ def test_a_field_of_an_f_string_differs_by_its_blanks(tmp_path: Path, given: str
     answer = _send(src, "updateNodeParameter", workflow="flow", entity="single", parameterName="path", newValue=given)
     assert answer["status"] == "ok", answer
     assert f"single = Source(path={given})" in src.read_text(encoding="utf-8")
+
+
+def test_merge_definition_annotation_args_takes_removals(tmp_path: Path) -> None:
+    assert FEATURES["mergeArgRemovals"] is True
+    path = tmp_path / "agents.py"
+    path.write_text(
+        "from wfpy import Port, agent\n\n\n"
+        '@agent(prompt="x", mode="plan", useSkill=True)\n'
+        "class A:\n"
+        "    class Ports:\n"
+        '        In = Port[str](direction="in")\n',
+        encoding="utf-8",
+    )
+    answer = _send(
+        path,
+        "mergeDefinitionAnnotationArgs",
+        entityType="A",
+        annotationName="agent",
+        argUpdates={"prompt": '"y"'},
+        argRemovals=["mode"],
+    )
+    assert answer["status"] == "ok", answer
+    assert '@agent(prompt="y", useSkill=True)\n' in path.read_text(encoding="utf-8")

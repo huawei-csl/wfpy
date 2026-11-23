@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import keyword
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -41,6 +42,179 @@ def _dotted_name(node: cst.BaseExpression) -> str:
     if isinstance(node, cst.Attribute):
         return f"{_dotted_name(node.value)}.{node.attr.value}"
     return ""
+
+
+_DECORATOR_ARG_ALIASES = {
+    # `@agent(variant=...)` and `reasoningEffort=...` are one setting.
+    ("agent", "reasoning_effort"): "variant",
+}
+
+
+def _decorator_arg_key(annotation_name: str, name: str) -> str:
+    """The arg a decorator keyword names, whatever its spelling: wfpy's
+    decorators take each parameter in snake_case and in camelCase
+    (``use_skill``, ``useSkill``), so both are one key."""
+    snake = re.sub(r"(?<=[a-z0-9])([A-Z])", r"_\1", name).lower()
+    return _DECORATOR_ARG_ALIASES.get((annotation_name, snake), snake)
+
+
+def _lay_out_call_args(
+    call: cst.Call, original: list[cst.Arg], merged: list[tuple[cst.Arg, int | None]]
+) -> tuple[list[cst.Arg], cst.BaseParenthesizableWhitespace]:
+    """The call's args after a merge, each with the index it had in *original*
+    (None for one appended), laid out as *original* was, and the whitespace
+    after the opening parenthesis.
+
+    Two args that stay next to each other keep what is between them. Else the
+    break before an arg is the call's own separator (or, for the last, its
+    original ending: a trailing comma, the newline before the closing
+    parenthesis), carrying the comment that ended the previous arg's line and
+    the comment lines written above the next arg, or above the closing
+    parenthesis. A removed arg's comments go with it.
+
+    The break of a line is read where the call writes it: after the comma
+    (``a,⏎b``), or before it in a call whose commas open the lines
+    (``a⏎, b``). An arg that follows a removed one that opened a line takes
+    its place on that line, and a break that has to be made (for a comment to
+    stay on its arg) indents the next arg as the call indents its args."""
+    if not original:
+        return [a.with_changes(comma=cst.MaybeSentinel.DEFAULT) for a, _ in merged], call.whitespace_before_args
+    last_index = len(original) - 1
+    last = original[last_index]
+
+    sample = next((a.comma for a in original[:-1] if isinstance(a.comma, cst.Comma)), None)
+    # Commas that open the lines: the break, and a comment that ends the
+    # line, are before the comma and not after it.
+    leading = sample is not None and any(
+        isinstance(a.comma, cst.Comma) and isinstance(a.comma.whitespace_before, cst.ParenthesizedWhitespace)
+        for a in original
+    )
+
+    def broken(comma: cst.Comma) -> cst.BaseParenthesizableWhitespace:
+        return comma.whitespace_before if leading else comma.whitespace_after
+
+    def with_break(comma: cst.Comma, ws: cst.BaseParenthesizableWhitespace) -> cst.Comma:
+        return comma.with_changes(whitespace_before=ws) if leading else comma.with_changes(whitespace_after=ws)
+
+    def ending(i: int) -> cst.BaseParenthesizableWhitespace:
+        arg = original[i]
+        return broken(arg.comma) if isinstance(arg.comma, cst.Comma) else arg.whitespace_after_arg
+
+    def comment(i: int | None) -> cst.TrailingWhitespace | None:
+        ws = ending(i) if i is not None else None
+        return ws.first_line if isinstance(ws, cst.ParenthesizedWhitespace) else None
+
+    def above(i: int | None) -> list[cst.EmptyLine]:
+        """The comment lines written above original arg *i* (None: a new arg)."""
+        if i is None:
+            return []
+        ws = call.whitespace_before_args if i == 0 else ending(i - 1)
+        return list(ws.empty_lines) if isinstance(ws, cst.ParenthesizedWhitespace) else []
+
+    closing_lines = above(last_index + 1) if isinstance(ending(last_index), cst.ParenthesizedWhitespace) else []
+
+    # A break after which the call opens a line with an arg, for one that has to be made.
+    arg_break = next(
+        (ws for ws in (call.whitespace_before_args, *(ending(i) for i in range(last_index)))
+         if isinstance(ws, cst.ParenthesizedWhitespace)),
+        cst.ParenthesizedWhitespace(indent=True, last_line=cst.SimpleWhitespace("    ")),
+    )
+
+    separator: cst.Comma
+    if sample is not None:
+        separator = sample
+    elif isinstance(call.whitespace_before_args, cst.ParenthesizedWhitespace):
+        # One arg on a line of its own: the next ones go on lines of their own, as indented.
+        separator = cst.Comma(whitespace_after=cst.ParenthesizedWhitespace(
+            indent=call.whitespace_before_args.indent, last_line=call.whitespace_before_args.last_line))
+    elif isinstance(last.comma, cst.Comma) and isinstance(last.comma.whitespace_after, cst.ParenthesizedWhitespace):
+        separator = cst.Comma(whitespace_after=cst.ParenthesizedWhitespace(
+            indent=True, last_line=cst.SimpleWhitespace("    ")))
+    else:
+        separator = cst.Comma(whitespace_after=cst.SimpleWhitespace(" "))
+
+    laid: list[cst.Arg] = []
+    for j, (arg, index) in enumerate(merged):
+        if j == len(merged) - 1:
+            if index == last_index:
+                laid.append(arg)
+                continue
+            if isinstance(last.comma, cst.Comma):
+                laid.append(arg.with_changes(
+                    comma=with_break(last.comma, _line_break(broken(last.comma), comment(index), closing_lines)),
+                    whitespace_after_arg=last.whitespace_after_arg))
+            else:
+                laid.append(arg.with_changes(
+                    comma=cst.MaybeSentinel.DEFAULT,
+                    whitespace_after_arg=_line_break(last.whitespace_after_arg, comment(index), closing_lines)))
+            continue
+        following = merged[j + 1][1]
+        if index is not None and following == index + 1 and isinstance(arg.comma, cst.Comma):
+            laid.append(arg)
+            continue
+        # Args removed between two kept ones: the next keeps the break it was
+        # written after; an appended arg takes the call's separator.
+        written = original[following - 1].comma if following is not None and index is not None else None
+        template = written if isinstance(written, cst.Comma) else separator
+        after = broken(template)
+        if (
+            not isinstance(after, cst.ParenthesizedWhitespace)
+            and index is not None
+            and index != last_index
+            and isinstance(ending(index), cst.ParenthesizedWhitespace)
+        ):
+            # The arg removed after this one opened a line: the next takes its place there.
+            after = ending(index)
+        laid.append(arg.with_changes(
+            comma=with_break(template, _line_break(after, comment(index), above(following), arg_break)),
+            whitespace_after_arg=cst.SimpleWhitespace("")))
+
+    before = call.whitespace_before_args
+    if not merged:
+        # `@agent()`, or, with comments to keep (on the opening line, above
+        # the closing parenthesis), those on lines of their own.
+        opening = before.first_line if isinstance(before, cst.ParenthesizedWhitespace) else None
+        if (opening is None or opening.comment is None) and not closing_lines:
+            before = cst.SimpleWhitespace("")
+        else:
+            close = ending(last_index)
+            before = cst.ParenthesizedWhitespace(
+                first_line=opening if opening is not None else cst.TrailingWhitespace(),
+                empty_lines=closing_lines,
+                indent=close.indent if isinstance(close, cst.ParenthesizedWhitespace) else True,
+                last_line=close.last_line if isinstance(close, cst.ParenthesizedWhitespace) else cst.SimpleWhitespace(""))
+    elif merged[0][1] != 0:
+        lines = above(merged[0][1])
+        if isinstance(before, cst.ParenthesizedWhitespace):
+            before = before.with_changes(empty_lines=lines)
+        elif lines:
+            before = cst.ParenthesizedWhitespace(
+                empty_lines=lines, indent=True,
+                last_line=separator.whitespace_after.last_line
+                if isinstance(separator.whitespace_after, cst.ParenthesizedWhitespace) else cst.SimpleWhitespace("    "))
+    return laid, before
+
+
+def _line_break(
+    template: cst.BaseParenthesizableWhitespace,
+    comment: cst.TrailingWhitespace | None,
+    lines: list[cst.EmptyLine],
+    start: cst.ParenthesizedWhitespace | None = None,
+) -> cst.BaseParenthesizableWhitespace:
+    """*template*'s break and indent, ending its line with *comment* (none
+    when None) and followed by the comment *lines*. A template with no line
+    break gets one when there is a comment to keep: *start*'s, which indents
+    the arg that follows, or, with none, one that leaves the next text (the
+    closing parenthesis) at the decorator's indentation."""
+    first_line = comment if comment is not None else cst.TrailingWhitespace()
+    if isinstance(template, cst.ParenthesizedWhitespace):
+        return template.with_changes(first_line=first_line, empty_lines=lines)
+    if (comment is None or comment.comment is None) and not lines:
+        return template
+    if start is not None:
+        return start.with_changes(first_line=first_line, empty_lines=lines)
+    return cst.ParenthesizedWhitespace(first_line=first_line, empty_lines=lines, indent=True,
+                                       last_line=cst.SimpleWhitespace(""))
 
 
 def _parse_user_expression(text: Any, what: str) -> cst.BaseExpression:
@@ -3291,6 +3465,7 @@ class RewriteEngine:
         entityType: str,
         annotationName: str,
         argUpdates: dict[str, str],
+        argRemovals: list[str] | None = None,
     ) -> None:
         """Merge *argUpdates* into an existing decorator, preserving unlisted args.
 
@@ -3298,6 +3473,17 @@ class RewriteEngine:
         Args already present in the decorator are replaced; new args are appended.
         Args **not** in *argUpdates* are left untouched, so complex parameters the
         UI does not manage (e.g. ``outputValidators``) survive editing.
+        ``argRemovals`` names args to take out of the decorator: a list of
+        names. A name that is also in *argUpdates* is updated, not removed.
+
+        A name is matched to the decorator's args whatever its spelling:
+        ``useSkill`` is ``use_skill``, and on ``@agent`` ``reasoningEffort`` is
+        ``variant``, as the decorator reads them. A replaced arg keeps the
+        file's first spelling and place, and another spelling of it later in
+        the call is removed; an arg neither updated nor removed is left as
+        written, every spelling of it. Appended args take the call's own
+        layout: one per line, indented as the others, when the call is written
+        that way; a comment stays with the arg it is written on or above.
         """
 
         def _normalize_python_literal_name(value: cst.BaseExpression) -> cst.BaseExpression:
@@ -3317,6 +3503,22 @@ class RewriteEngine:
             parsed = _normalize_python_literal_name(parsed)
             parsed_updates[name] = parsed
 
+        # The same arg under any of its spellings: an update or removal names it once.
+        updates_by_key: dict[str, tuple[str, cst.BaseExpression]] = {}
+        for k, v in parsed_updates.items():
+            key = _decorator_arg_key(annotationName, k)
+            if key in updates_by_key:
+                raise RewriteError(
+                    message=f"@{annotationName}: '{updates_by_key[key][0]}' and '{k}' are the same argument; give one value"
+                )
+            updates_by_key[key] = (k, v)
+        if isinstance(argRemovals, str) or not all(isinstance(k, str) for k in argRemovals or []):
+            # A bare string would be read letter by letter, and take out `m` and `o` for "mode".
+            raise RewriteError(
+                message=f"@{annotationName}: argRemovals is a list of argument names, not {argRemovals!r}"
+            )
+        removal_keys = {_decorator_arg_key(annotationName, k) for k in (argRemovals or [])} - set(updates_by_key)
+
         class _MergeArgs(cst.CSTTransformer):
             def __init__(self) -> None:
                 self.updated = False
@@ -3335,6 +3537,10 @@ class RewriteEngine:
                         continue
 
                     call = dec.decorator
+                    if not isinstance(call, cst.Call) and not parsed_updates:
+                        # A bare decorator has nothing to remove: no edit.
+                        self.updated = True
+                        break
                     if not isinstance(call, cst.Call):
                         # bare @agent with no parens → create a Call with the updates
                         new_args = [
@@ -3364,39 +3570,35 @@ class RewriteEngine:
                     # Merge into existing Call args
                     existing_args = list(call.args)
                     seen_keys: set[str] = set()
-                    merged: list[cst.Arg] = []
-                    for arg in existing_args:
-                        key = arg.keyword.value if arg.keyword else None
-                        if key and key in parsed_updates:
+                    merged: list[tuple[cst.Arg, int | None]] = []
+                    for index, arg in enumerate(existing_args):
+                        key = _decorator_arg_key(annotationName, arg.keyword.value) if arg.keyword else None
+                        if key is not None and key in removal_keys:
+                            continue
+                        if key is not None and key in updates_by_key:
+                            if key in seen_keys:
+                                continue  # a second spelling of the arg just replaced
                             seen_keys.add(key)
-                            merged.append(arg.with_changes(value=parsed_updates[key]))
+                            merged.append((arg.with_changes(value=updates_by_key[key][1]), index))
                         else:
-                            merged.append(arg)
+                            merged.append((arg, index))
 
                     # Append new args not in original
-                    for k, v in parsed_updates.items():
-                        if k not in seen_keys:
-                            merged.append(cst.Arg(
+                    for key, (k, v) in updates_by_key.items():
+                        if key not in seen_keys:
+                            merged.append((cst.Arg(
                                 keyword=cst.Name(k),
                                 value=v,
                                 equal=cst.AssignEqual(
                                     whitespace_before=cst.SimpleWhitespace(""),
                                     whitespace_after=cst.SimpleWhitespace(""),
                                 ),
-                            ))
+                            ), None))
 
-                    # Fix trailing commas — ensure all but last have comma
-                    final_args: list[cst.Arg] = []
-                    for i, a in enumerate(merged):
-                        if i < len(merged) - 1:
-                            if isinstance(a.comma, cst.MaybeSentinel):
-                                a = a.with_changes(comma=cst.Comma(whitespace_after=cst.ParenthesizedWhitespace(
-                                    indent=True,
-                                    last_line=cst.SimpleWhitespace("    "),
-                                )))
-                        final_args.append(a)
-
-                    new_call = call.with_changes(args=final_args)
+                    # Every arg removed leaves `@name()`: a bare `@agent` would be
+                    # given the class as its first argument.
+                    final_args, before_args = _lay_out_call_args(call, existing_args, merged)
+                    new_call = call.with_changes(args=final_args, whitespace_before_args=before_args)
                     decorators[idx] = dec.with_changes(decorator=new_call)
                     self.updated = True
                     break

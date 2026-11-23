@@ -6,7 +6,45 @@ All notable changes to wfpy are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- The reasoning level over ACP: an agent's `reasoningEffort` (or
+  `variant`) is set on the session where the agent offers a config option
+  of category `thought_level` (OpenCode 2's `effort`: minimal, low, medium,
+  high, xhigh, max), matched by value then name. The level is looked up in
+  the options the agent sends back after the model is set, since a model can
+  bring its own levels. An agent that offers none logs it and runs at its
+  own level, as before.
+
 ### Fixed
+- An `@agent` given no reasoning level had the text `"None"` as its level
+  (`str(None)`): `opencode-cli` was started with `--variant None`, and the
+  graph export showed `reasoningEffort="None"`, which an IDE wrote back into
+  the file. No level is now no level, and so is a level written `"None"`
+  (that spelling: `"none"` is a level some models take).
+- The graph export carries `connector`, `mode` and `askPermissions` when the
+  decorator sets them, so an IDE shows an ACP agent's settings as written;
+  `usePrompt` is false for a prompt the agent is told not to use
+  (`use_prompt=False`). `@agent` takes `askPermissions`, the camelCase
+  spelling the export uses, beside `ask_permissions`.
+- Merging arguments into a decorator (`mergeDefinitionAnnotationArgs`, an
+  IDE's Save):
+  - matches an argument whatever its spelling: `useSkill` replaces
+    `use_skill` and keeps the file's spelling and place, a second spelling
+    of the argument replaced is removed, and on `@agent` `reasoningEffort`
+    is `variant`; an argument neither updated nor removed stays as written,
+    and one argument given twice under two spellings is refused;
+  - takes `argRemovals`, the arguments to take out: a list of names, and
+    anything else is refused (a bare string would be read letter by
+    letter). A name given to update and to remove is updated;
+  - lays appended arguments out as the call is written: one per line and
+    indented as the others, the closing parenthesis where it was, and each
+    comment, on an argument's line or on the lines above it, staying with
+    that argument (or going with it when it is removed), in a call whose
+    commas open the lines as in one whose commas end them. The argument
+    after a removed one that opened a line takes its place there. A call
+    left with no argument is `@agent()` (its comments kept on lines of
+    their own), not a bare `@agent`; a bare `@agent` with nothing to add is
+    left alone. The sidecar declares `features.mergeArgRemovals`.
 - OpenCode 2 over ACP: an agent's `mode` is applied again. OpenCode 2
   offers the mode only as a session config option (`build`, `plan`), not
   in the session's `modes`, so a `mode="plan"` agent ran in `build` with a
@@ -23,15 +61,6 @@ All notable changes to wfpy are documented here. The format follows
   model, `provider/model#variant`. An agent that names a level but no model,
   or a model that names another level, gets a warning and
   `opencodeVariantDropped` in its debug record.
-
-### Added
-- The reasoning level over ACP: an agent's `reasoningEffort` (or
-  `variant`) is set on the session where the agent offers a config option
-  of category `thought_level` (OpenCode 2's `effort`: minimal, low, medium,
-  high, xhigh, max), matched by value then name. The level is looked up in
-  the options the agent sends back after the model is set, since a model can
-  bring its own levels. An agent that offers none logs it and runs at its
-  own level, as before.
 
 ## [1.3.2] — 2026-11-23
 
