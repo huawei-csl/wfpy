@@ -10,9 +10,10 @@ it failed on a ``str``.
 
 from __future__ import annotations
 
+import typing
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Any, Optional, TypedDict, Union
+from typing import Annotated, Any, NewType, Optional, TypedDict, Union
 
 import pytest
 
@@ -54,6 +55,15 @@ def _class_of_module(module: str) -> type:
     return type("Reading", (), {"__module__": module, "value": 7})
 
 
+def _alias(name: str, value: Any) -> Any:
+    """``type name = value``, which only Python 3.12 and later can spell."""
+
+    alias_type = getattr(typing, "TypeAliasType", None)
+    if alias_type is None:
+        return pytest.param(None, marks=pytest.mark.skip(reason="`type X = ...` is 3.12+"))
+    return alias_type(name, value)
+
+
 RESOURCES = [
     File,
     Resource,
@@ -71,6 +81,10 @@ RESOURCES = [
     Union[File, Resource],
     Annotated[File, "the report"],
     Optional[Annotated[Resource, "the report"]],
+    NewType("Doc", File),
+    Optional[NewType("Doc", File)],
+    _alias("Doc", File),
+    _alias("MaybeDoc", Optional[File]),
 ]
 
 NOT_RESOURCES = [
@@ -86,10 +100,19 @@ NOT_RESOURCES = [
     "ProfileRun",
     "profile",
     "resources.Reading",
-    "list[File]",
     Optional[ProfileRun],
     Optional["ProfileRun"],
     Annotated[ProfileRun, "the run"],
+    NewType("MlirFile", str),
+    _alias("ProfileRuns", list[ProfileRun]),
+    # a class of one's own is not wfpy's for bearing its name
+    type("File", (), {}),
+    type("Resource", (), {}),
+    # a string is one name of wfpy's, and it is not parsed
+    "django.core.files.File",
+    "list[File]",
+    "File | None",
+    "Optional[File]",
     # a container of resources is not one resource
     list[File],
     dict[str, File],
@@ -239,6 +262,29 @@ def test_an_optional_file_port_is_still_a_file(tmp_path: Path, port_type: Any) -
 
     (doc,) = run(flow, out_dir=tmp_path, verbose=False)["Doc"]
     assert Path(doc).read_text() == "# hello\n"
+
+
+@pytest.mark.parametrize(
+    ("port_type", "reply"),
+    [(list[File], ["a.txt", "b.txt"]), (File | str, "not a path"), (FileSpec, {"job": "j1"})],
+    ids=str,
+)
+def test_an_agent_reply_on_a_port_that_is_not_one_file_is_handed_on(
+    tmp_path: Path, port_type: Any, reply: Any
+) -> None:
+    """It was written to a file, and the path was handed on."""
+
+    @agent(prompt="Answer.", transport="mock", mock_outputs={"Out": reply})
+    class Answer:
+        class Ports:
+            Out = Port[port_type](direction="out")
+
+    @workflow(outputs={"Out": port_type})
+    def flow() -> None:
+        answer = Answer()
+        connect(answer.Out, "Out")
+
+    assert run(flow, out_dir=tmp_path, verbose=False) == {"Out": [reply]}
 
 
 def test_a_list_of_files_is_a_list(tmp_path: Path) -> None:

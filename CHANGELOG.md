@@ -32,11 +32,20 @@ All notable changes to wfpy are documented here. The format follows
   the object, and the dict an agent replied on such a port was written to a
   `.txt` file. An edge between two tasks was not affected. The test now reads
   the type: `File`, `Resource`, a subclass or an instance (`File(ext=".md")`),
-  either name written as a string, and one of these inside `Optional[...]`,
-  `... | None` or `Annotated[...]`. Two answers change for types that do name
-  `File`: a container (`list[File]`) and a union with another type
-  (`File | str`) were taken for one file, and are now values that are handed
-  on as they are.
+  and what stands for one of them: either name written as a string,
+  `Optional[...]`, `... | None`, `Annotated[...]`, a `NewType` and a `type`
+  alias.
+
+  Whatever was a file port through its spelling alone is no longer one. This
+  includes three forms that do name `File`: a container (`list[File]`), a
+  union with another type (`File | str`), and a string that is an expression
+  (`"File | None"`, which is not parsed). It also includes a name of one's
+  own, such as `NewType("MlirFile", str)`: declare the port as `File` to keep
+  it a file port. On a port that is no longer a file port a value is handed
+  on as it is: the reply of an agent is not written to a file, and a path
+  that a task returns is not copied into the work folder. A workflow output
+  that is the path of an existing file is still copied beside the run record,
+  as for a port of any type.
 
 ## [1.3.1] — 2026-11-20
 
