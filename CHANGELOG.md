@@ -113,12 +113,19 @@ All notable changes to wfpy are documented here. The format follows
   for an IDE to show, and the merge wrote any name it was given: sent back,
   each left a file that failed as it was imported (`agent() got an
   unexpected keyword argument`). The names a decorator takes are read from
-  its signature, in either spelling it takes. A decorator of the name that
-  the file defines, or imports from elsewhere, is not asked, nor would one
-  that takes `**kwargs` be. A name in `argRemovals` is not asked either:
-  taking out an argument the decorator refuses repairs the file. The export
-  is unchanged, and still does not say which of its entries are for display
-  only.
+  its signature. A name that is another spelling of an argument the
+  decorator takes is that argument: the export names `@tool`'s
+  `inherit_stdio` `inheritStdio`, and a new argument given so was written
+  as given, which `tool()` refuses. It is now written `inherit_stdio`; an
+  argument in the file keeps its spelling, unless the decorator refuses
+  that one. The decorator is asked as the file writes it: `@agent` where
+  the file imports it from wfpy or binds it not at all, `@wfpy.agent`
+  where `wfpy` is the module (`import wfpy`, `import wfpy as wf`). One
+  that the file defines, or takes from elsewhere (`@mylib.agent`), is not
+  asked, nor would one that takes `**kwargs` be. A name in `argRemovals`
+  is not asked either: taking out an argument the decorator refuses
+  repairs the file. The export is unchanged, and still does not say which
+  of its entries are for display only.
 
 ## [1.3.2] — 2026-11-23
 

@@ -429,16 +429,136 @@ def test_merge_refuses_a_name_the_export_shows_and_agent_does_not_take(
     assert text == FLOW
 
 
-def test_merge_takes_a_name_in_either_spelling_and_in_no_other(tmp_path: Path) -> None:
+def test_merge_takes_a_name_in_either_spelling_the_decorator_takes(tmp_path: Path) -> None:
     source = "from wfpy import agent\n" + HELPER
     for name in ("use_skill", "useSkill", "mcpServerConfigs", "reasoningEffort"):
         answer, text = _merge_into(tmp_path, source, argUpdates={name: "None"})
         assert answer["status"] == "ok", answer
         assert _added(text, source) == [f'@agent(prompt="x", {name}=None)']
-    # Neither spelling: `agent()` takes `variant` and `reasoningEffort`.
-    answer, text = _merge_into(tmp_path, source, argUpdates={"reasoning_effort": '"high"'})
+    # No spelling of an argument `agent()` takes.
+    answer, text = _merge_into(tmp_path, source, argUpdates={"effort": '"high"'})
     assert answer["diagnostic"].get("code") == "unknown_argument", answer
     assert text == source
+
+
+def _imports(text: str) -> bool:
+    """Whether the decorators of `text` take what they are given."""
+    exec(compile(text, "edited.py", "exec"), {"__name__": "edited"})
+    return True
+
+
+TOOL = """from wfpy import tool
+
+
+@tool(cmd="echo", inherit_stdio=False)
+class Helper:
+    pass
+"""
+
+
+def test_merge_takes_an_argument_in_a_spelling_the_decorator_does_not(tmp_path: Path) -> None:
+    """The export names `@tool`'s `inherit_stdio` `inheritStdio`. Sent back,
+    it is the argument the file has, in the file's spelling. Refusing the
+    name would refuse a Save that worked."""
+    answer, text = _merge_into(tmp_path, TOOL, "tool", argUpdates={"inheritStdio": "True"})
+    assert answer["status"] == "ok", answer
+    assert _added(text, TOOL) == ['@tool(cmd="echo", inherit_stdio=True)']
+    assert _imports(text)
+
+
+def test_merge_writes_a_new_argument_in_the_spelling_the_decorator_takes(tmp_path: Path) -> None:
+    """`inheritStdio=True` was appended as given, and `tool()` refuses it."""
+    source = TOOL.replace(", inherit_stdio=False", "")
+    answer, text = _merge_into(tmp_path, source, "tool", argUpdates={"inheritStdio": "True"})
+    assert answer["status"] == "ok", answer
+    assert _added(text, source) == ['@tool(cmd="echo", inherit_stdio=True)']
+    assert _imports(text)
+
+    # `reasoning_effort` is `variant`, as `@agent` reads it.
+    source = "from wfpy import agent\n" + HELPER
+    answer, text = _merge_into(tmp_path, source, argUpdates={"reasoning_effort": '"high"'})
+    assert answer["status"] == "ok", answer
+    assert _added(text, source) == ['@agent(prompt="x", variant="high")']
+
+    for given, taken in (("actionName", "action_name"), ("view_type", "viewType")):
+        source = 'from wfpy import viewer\n\n\n@viewer(command="x")\nclass Helper:\n    pass\n'
+        answer, text = _merge_into(tmp_path, source, "viewer", argUpdates={given: '"v"'})
+        assert answer["status"] == "ok", answer
+        assert _added(text, source) == [f'@viewer(command="x", {taken}="v")']
+        assert _imports(text)
+
+
+def test_merge_respells_an_argument_the_file_spells_as_the_decorator_does_not(tmp_path: Path) -> None:
+    """A file with `inheritStdio=` fails as it is imported. Given a value,
+    the argument is written in the decorator's spelling; left alone, it
+    stays as written."""
+    source = TOOL.replace("inherit_stdio", "inheritStdio")
+    for given in ("inheritStdio", "inherit_stdio"):
+        answer, text = _merge_into(tmp_path, source, "tool", argUpdates={given: "True"})
+        assert answer["status"] == "ok", answer
+        assert _added(text, source) == ['@tool(cmd="echo", inherit_stdio=True)']
+        assert _imports(text)
+    answer, text = _merge_into(tmp_path, source, "tool", argUpdates={"shell": "True"})
+    assert answer["status"] == "ok", answer
+    assert _added(text, source) == ['@tool(cmd="echo", inheritStdio=False, shell=True)']
+
+
+def test_merge_asks_a_decorator_written_with_wfpys_module(tmp_path: Path) -> None:
+    """`@wfpy.agent` is wfpy's where `wfpy` is the module: under either name
+    of the annotation, and under the name the file imports the module as."""
+    helper = HELPER.replace("@agent", "@wfpy.agent")
+    source = "import wfpy\n" + helper
+    for name in ("agent", "wfpy.agent"):
+        answer, text = _merge_into(tmp_path, source, name, argUpdates={"useMcp": "True"})
+        assert answer["diagnostic"] == {"code": "unknown_argument", "annotation": name, "argument": "useMcp"}
+        assert answer["message"] == f"@{name}: wfpy's agent() takes no argument 'useMcp'"
+        assert text == source
+        answer, text = _merge_into(tmp_path, source, name, argUpdates={"model": '"m"'})
+        assert answer["status"] == "ok", answer
+        assert _added(text, source) == ['@wfpy.agent(prompt="x", model="m")']
+
+    source = "import wfpy as wf\n" + HELPER.replace("@agent", "@wf.agent")
+    answer, text = _merge_into(tmp_path, source, argUpdates={"useMcp": "True"})
+    assert answer["diagnostic"].get("code") == "unknown_argument", answer
+    assert text == source
+
+    # `import wfpy.core` binds `wfpy` as `import wfpy` does.
+    source = "import wfpy.core\n" + helper
+    answer, text = _merge_into(tmp_path, source, argUpdates={"useMcp": "True"})
+    assert answer["diagnostic"].get("code") == "unknown_argument", answer
+
+
+def test_merge_does_not_ask_a_decorator_of_another_module(tmp_path: Path) -> None:
+    """The merge finds a decorator by its last name, so `@mylib.agent` is
+    found as `agent`: it is not wfpy's, and takes what it takes."""
+    (tmp_path / "mylib.py").write_text(
+        "def agent(**settings):\n    return lambda cls: cls\n", encoding="utf-8"
+    )
+    others = [
+        ("import mylib\n", "@mylib.agent"),
+        ("import mylib as wfpy\n", "@wfpy.agent"),
+        ("import wfpy\nimport mylib\n\nwfpy = mylib\n", "@wfpy.agent"),
+        ("import mylib\n\nwfpy = mylib\n", "@wfpy.agent"),
+        ("", "@wfpy.agent"),  # `wfpy` is bound by nothing: not for the merge to say
+        ("import wfpy\n", "@wfpy.core.agent"),
+    ]
+    for head, written in others:
+        source = head + HELPER.replace("@agent", written)
+        answer, text = _merge_into(tmp_path, source, argUpdates={"useMcp": "True"})
+        assert answer["status"] == "ok", (head, written, answer)
+        assert _added(text, source) == [f'{written}(prompt="x", useMcp=True)']
+
+
+def test_merge_names_the_definition_it_does_not_find_before_the_argument(tmp_path: Path) -> None:
+    """Whether the name is taken depends on the decorator, so the decorator
+    is looked for first."""
+    source = "from wfpy import agent\n" + HELPER
+    answer = _edited(
+        tmp_path, "mergeDefinitionAnnotationArgs", source,
+        entityType="Missing", annotationName="agent", argUpdates={"useMcp": "True"},
+    )[0]
+    assert answer["status"] == "error", answer
+    assert "Definition not found for annotation merge: Missing" in answer["message"]
 
 
 def test_merge_asks_only_a_decorator_that_is_wfpys(tmp_path: Path) -> None:
@@ -523,7 +643,7 @@ def test_merge_takes_out_an_argument_the_decorator_refuses(tmp_path: Path) -> No
     ("decorator", "name"),
     [
         ('tool(cmd="x")', "timeout_ms"),  # `timeout`
-        ("viewer", "view_type"),  # `viewType`
+        ("viewer", "title"),
         ('context(read=["a"])', "scope"),
         ("task", "prompt"),  # takes the class, and nothing else
     ],

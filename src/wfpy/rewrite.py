@@ -452,6 +452,26 @@ class _DefinitionTransformer(cst.CSTTransformer):
         return updated_node
 
 
+class _FindDecorator(_DefinitionTransformer):
+    """The decorator of one name on the definition of one name, found as
+    the merge and the removal find it. Nothing is changed."""
+
+    def __init__(self, entity: str, leaf: str) -> None:
+        super().__init__()
+        self.entity = entity
+        self.leaf = leaf
+        self.found: cst.Decorator | None = None
+
+    def leave_definition(
+        self, original_node: _Definition, updated_node: _Definition
+    ) -> _Definition:
+        if self.found is None and original_node.name.value == self.entity:
+            self.found = next(
+                (dec for dec in original_node.decorators if _decorator_name(dec) == self.leaf), None
+            )
+        return updated_node
+
+
 def _is_connect_call(node: cst.CSTNode) -> bool:
     if not isinstance(node, cst.Call):
         return False
@@ -600,6 +620,28 @@ def _imports_from_wfpy(stmt: cst.CSTNode, name: str) -> bool:
                     and bound.value == name
                 ):
                     return True
+    return False
+
+
+def _imports_wfpy_as(stmt: cst.CSTNode, name: str) -> bool:
+    """Whether `stmt` is an `import wfpy` that binds the module to `name`:
+    `import wfpy` (and `import wfpy.core`, which binds `wfpy` too) for
+    `wfpy`, `import wfpy as wf` for `wf`."""
+    if not isinstance(stmt, cst.SimpleStatementLine):
+        return False
+    for small in stmt.body:
+        if not isinstance(small, cst.Import):
+            continue
+        for alias in small.names:
+            if alias.asname is None:
+                if _dotted_name(alias.name).split(".")[0] == "wfpy" == name:
+                    return True
+            elif (
+                _dotted_name(alias.name) == "wfpy"
+                and isinstance(alias.asname.name, cst.Name)
+                and alias.asname.name.value == name
+            ):
+                return True
     return False
 
 
@@ -3601,6 +3643,16 @@ class RewriteEngine:
         form the file uses. A method is not found: *entityType* names no
         class, and two classes may each have a method of that name.
 
+        A name in *argUpdates* is one a keyword argument can have
+        (``invalid_argument_name`` otherwise). Where the decorator is one of
+        wfpy's as the file writes it, the name is also one the decorator
+        takes, in any spelling (``unknown_argument`` otherwise): the export's
+        ``inheritStdio`` is ``@tool``'s ``inherit_stdio``. A new arg given in
+        a spelling the decorator does not take is written in the one it
+        takes, and so is an arg that the file spells that way, when it is
+        given a value. A name in *argRemovals* is not checked: taking out an
+        arg the decorator refuses repairs the file.
+
         A name is matched to the decorator's args whatever its spelling:
         ``useSkill`` is ``use_skill``, and on ``@agent`` ``reasoningEffort`` is
         ``variant``, as the decorator reads them. A replaced arg keeps the
@@ -3621,8 +3673,16 @@ class RewriteEngine:
                     return cst.Name("None")
             return value
 
+        # The decorator as the file writes it says whether it is wfpy's, and
+        # so which names it takes. One that is not found is answered below.
+        leaf = _annotation_leaf(annotationName)
+        finder = _FindDecorator(entityType, leaf)
+        self.module.visit(finder)
+        taken = self._wfpy_decorator_keywords(finder.found.decorator) if finder.found is not None else None
+        # A name given in a spelling the decorator does not take, to the one it takes.
+        spelled: dict[str, str] = {}
+
         # Parse each update value as a CST expression
-        taken = self._wfpy_decorator_keywords(annotationName)
         parsed_updates: dict[str, cst.BaseExpression] = {}
         for name, expr_str in argUpdates.items():
             if not str(name).isidentifier() or keyword.iskeyword(str(name)):
@@ -3633,12 +3693,18 @@ class RewriteEngine:
                     diagnostic={"code": "invalid_argument_name", "annotation": annotationName, "argument": str(name)},
                 )
             if taken is not None and str(name) not in taken:
-                # The file would fail as it is imported (TypeError). A name
-                # to remove is not checked: taking it out is the repair.
-                raise RewriteError(
-                    message=f"@{annotationName}: wfpy's {annotationName}() takes no argument {str(name)!r}",
-                    diagnostic={"code": "unknown_argument", "annotation": annotationName, "argument": str(name)},
-                )
+                # The same argument in the spelling the decorator takes: the
+                # export names `@tool`'s `inherit_stdio` `inheritStdio`.
+                key = _decorator_arg_key(annotationName, str(name))
+                other = next((p for p in taken if _decorator_arg_key(annotationName, p) == key), None)
+                if other is None:
+                    # The file would fail as it is imported (TypeError). A name
+                    # to remove is not checked: taking it out is the repair.
+                    raise RewriteError(
+                        message=f"@{annotationName}: wfpy's {leaf}() takes no argument {str(name)!r}",
+                        diagnostic={"code": "unknown_argument", "annotation": annotationName, "argument": str(name)},
+                    )
+                spelled[str(name)] = other
             parsed = _parse_user_expression(expr_str, f"the value of {name} on @{annotationName}")
             parsed = _normalize_python_literal_name(parsed)
             parsed_updates[name] = parsed
@@ -3699,7 +3765,12 @@ class RewriteEngine:
                             if key in seen_keys:
                                 continue  # a second spelling of the arg just replaced
                             seen_keys.add(key)
-                            merged.append((arg.with_changes(value=updates_by_key[key][1]), index))
+                            given, value = updates_by_key[key]
+                            if taken is not None and arg.keyword is not None and arg.keyword.value not in taken:
+                                # The file spells it as the decorator does not: it is
+                                # written in the decorator's spelling, with its value.
+                                arg = arg.with_changes(keyword=cst.Name(spelled.get(given, given)))
+                            merged.append((arg.with_changes(value=value), index))
                         else:
                             merged.append((arg, index))
 
@@ -3707,7 +3778,7 @@ class RewriteEngine:
                     for key, (k, v) in updates_by_key.items():
                         if key not in seen_keys:
                             merged.append((cst.Arg(
-                                keyword=cst.Name(k),
+                                keyword=cst.Name(spelled.get(k, k)),
                                 value=v,
                                 equal=cst.AssignEqual(
                                     whitespace_before=cst.SimpleWhitespace(""),
@@ -3747,27 +3818,44 @@ class RewriteEngine:
         if name in getattr(wfpy, "__all__", ()) and not self._binds(name):
             self._set_module(self._ensure_import(self.module, "wfpy", [name]))
 
-    def _wfpy_decorator_keywords(self, name: str) -> frozenset[str] | None:
-        """The names `@name(...)` takes by keyword, read from its signature,
-        when `name` is one of wfpy's decorators and is wfpy's at the top
-        level of this file: imported from wfpy, or bound by nothing (an edit
-        then imports it from wfpy, see `_ensure_wfpy_decorator_import`).
-        None where any name may be given: a `name` this file defines or
-        takes from elsewhere, which may take what wfpy's does not, and a
-        decorator that takes `**kwargs`."""
+    def _wfpy_decorator_keywords(self, decorator: cst.BaseExpression) -> tuple[str, ...] | None:
+        """The names `decorator` takes by keyword, in the order of its
+        signature, when it is one of wfpy's as this file writes it:
+
+        - `@agent`, where the top level imports `agent` from wfpy, or binds
+          it not at all (an edit then imports it from wfpy, see
+          `_ensure_wfpy_decorator_import`);
+        - `@wfpy.agent` or `@wf.agent`, where the top level binds that first
+          name by `import wfpy` (`import wfpy as wf`) and by nothing else.
+
+        None where any name may be given: a decorator this file defines or
+        takes from elsewhere, which may take what wfpy's does not, and one
+        that takes `**kwargs`."""
         import inspect
 
         import wfpy
 
+        target = decorator.func if isinstance(decorator, cst.Call) else decorator
+        if isinstance(target, cst.Name):
+            name, module_name = target.value, None
+        elif isinstance(target, cst.Attribute) and isinstance(target.value, cst.Name):
+            name, module_name = target.attr.value, target.value.value
+        else:
+            return None
         if name not in getattr(wfpy, "__all__", ()):
             return None
-        for stmt in self.module.body:
-            bound = _block_bindings([stmt]).get(name)
-            if bound is not None and not (bound[0] == "import" and _imports_from_wfpy(bound[1], name)):
+        bound_name = name if module_name is None else module_name
+        bindings = [
+            bound for stmt in self.module.body if (bound := _block_bindings([stmt]).get(bound_name)) is not None
+        ]
+        if module_name is None:
+            if not all(kind == "import" and _imports_from_wfpy(stmt, name) for kind, stmt in bindings):
                 return None
+        elif not bindings or not all(kind == "import" and _imports_wfpy_as(stmt, module_name) for kind, stmt in bindings):
+            return None
         for star in self._star_imports():
             from_wfpy = not star.relative and star.module is not None and _dotted_name(star.module) == "wfpy"
-            if not from_wfpy and self._star_binds(star, name):
+            if not from_wfpy and self._star_binds(star, bound_name):
                 return None
         try:
             parameters = list(inspect.signature(getattr(wfpy, name)).parameters.values())
@@ -3775,7 +3863,7 @@ class RewriteEngine:
             return None
         if any(parameter.kind is parameter.VAR_KEYWORD for parameter in parameters):
             return None
-        return frozenset(
+        return tuple(
             parameter.name
             for parameter in parameters
             if parameter.kind in (parameter.POSITIONAL_OR_KEYWORD, parameter.KEYWORD_ONLY)
