@@ -77,9 +77,10 @@ All notable changes to wfpy are documented here. The format follows
   given as `agent` or as `wfpy.agent`, on the class or the function that
   `entityType` names. What is written keeps the form the file uses, and a
   file that writes `@wfpy.agent` is not given a `from wfpy import agent`.
-  `removeDefinitionAnnotation` finds a decorator the same way.
-  `updateDefinitionAnnotation` is not changed: it matches a decorator
-  written as a bare name on a class.
+  `removeDefinitionAnnotation` finds a decorator the same way. A method is
+  not found by either: `entityType` names no class, and two classes may
+  each have a method of that name. `updateDefinitionAnnotation` is not
+  changed: it matches a decorator written as a bare name on a class.
 - An empty decorator call written over lines (`@agent(` and `)` on two
   lines) gets its first arguments one per line (#84). The first argument
   was written at the decorator's column, with the closing parenthesis right

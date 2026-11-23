@@ -390,16 +390,30 @@ _Definition = cst.ClassDef | cst.FunctionDef
 
 class _DefinitionTransformer(cst.CSTTransformer):
     """A transformer of what a decorator is written on: the classes and the
-    functions of a module alike, each given to `leave_definition`."""
+    functions of a module alike, each given to `leave_definition`.
+
+    A function inside a class is not given. An edit names a definition and
+    no class, and two classes may each have a method of that name: the first
+    one met would be edited for the other."""
+
+    # How many classes the node being visited is inside of.
+    _class_depth = 0
+
+    def visit_ClassDef(self, node: cst.ClassDef) -> bool:
+        self._class_depth += 1
+        return True
 
     def leave_ClassDef(
         self, original_node: cst.ClassDef, updated_node: cst.ClassDef
     ) -> cst.BaseStatement:
+        self._class_depth -= 1
         return self.leave_definition(original_node, updated_node)
 
     def leave_FunctionDef(
         self, original_node: cst.FunctionDef, updated_node: cst.FunctionDef
     ) -> cst.BaseStatement:
+        if self._class_depth:
+            return updated_node
         return self.leave_definition(original_node, updated_node)
 
     def leave_definition(
@@ -3530,7 +3544,8 @@ class RewriteEngine:
         The decorator is the one of that name on the class or the function
         named *entityType*, written ``@agent`` or ``@wfpy.agent``;
         *annotationName* is given either way, and what is written keeps the
-        form the file uses.
+        form the file uses. A method is not found: *entityType* names no
+        class, and two classes may each have a method of that name.
 
         A name is matched to the decorator's args whatever its spelling:
         ``useSkill`` is ``use_skill``, and on ``@agent`` ``reasoningEffort`` is

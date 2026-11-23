@@ -8,7 +8,7 @@ from pathlib import Path
 import libcst as cst
 import pytest
 
-from wfpy.rewrite import RewriteEngine
+from wfpy.rewrite import RewriteEngine, RewriteError
 
 
 def _merged(tmp_path: Path, source: str, entity: str, updates: dict[str, str],
@@ -251,6 +251,61 @@ def test_removing_an_annotation_finds_one_written_with_its_module(
 def test_removing_an_annotation_finds_one_on_a_function(tmp_path: Path) -> None:
     updated = _removed(tmp_path, ON_A_FUNCTION, "flow", "config")
     assert updated == ON_A_FUNCTION.replace('@config(path=["/opt/tools/bin"])\n', "")
+
+
+METHODS = '''
+from wfpy import action, task, workflow
+
+
+@task
+class First:
+    @action(consumes={"In": 1})
+    def make(self, x):
+        return x
+
+
+@task
+class Second:
+    @action(consumes={"In": 2})
+    def make(self, x):
+        return x
+
+
+@workflow
+def make():
+    pass
+'''
+
+
+def test_a_method_is_not_found_by_its_name(tmp_path: Path) -> None:
+    """`entityType` names no class: the `make` of `First` was edited, and
+    removed from, for the `make` of any class."""
+    with pytest.raises(RewriteError, match="Definition not found for annotation merge: make"):
+        _merged(tmp_path, METHODS, "make", {"produces": '{"Out": 1}'}, annotation="action")
+    with pytest.raises(RewriteError, match="Annotation not found for removal"):
+        _removed(tmp_path, METHODS, "make", "action")
+    assert (tmp_path / "wf.py").read_text(encoding="utf-8") == METHODS
+
+
+def test_a_function_is_found_beside_the_methods_of_its_name(tmp_path: Path) -> None:
+    updated = _merged(tmp_path, METHODS, "make", {"outputs": '{"Out": str}'}, annotation="workflow")
+    assert updated == METHODS.replace("@workflow\n", '@workflow(outputs={"Out": str})\n')
+
+
+def test_a_function_inside_a_function_is_found(tmp_path: Path) -> None:
+    source = '''
+from wfpy import workflow
+
+
+def build():
+    @workflow
+    def inner():
+        pass
+
+    return inner
+'''
+    updated = _merged(tmp_path, source, "inner", {"outputs": '{"Out": str}'}, annotation="workflow")
+    assert updated == source.replace("    @workflow\n", '    @workflow(outputs={"Out": str})\n')
 
 
 # An empty call written over lines (#84)
