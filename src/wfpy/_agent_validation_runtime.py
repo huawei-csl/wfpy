@@ -7,25 +7,57 @@ import os
 import re
 import subprocess
 from pathlib import Path
-from typing import Any
+from types import UnionType
+from typing import Annotated, Any, ForwardRef, Union, get_args, get_origin
 
 from wfpy.core import AgentOutputValidator, AgentSpec, LspServerConfig
-from wfpy.types import File, Resource
+from wfpy.types import Resource
 
 logger = logging.getLogger("wfpy")
 
 
-def _is_resource_type(port_type: Any) -> bool:
-    """Check if a port type descriptor represents a Resource-like value."""
+# `File` and `Resource` written as a name, with or without the module.
+_RESOURCE_TYPE_NAMES = frozenset(
+    f"{module}{name}"
+    for module in ("", "wfpy.", "wfpy.types.")
+    for name in ("file", "resource")
+)
 
-    if port_type is Resource or port_type is File:
-        return True
-    if isinstance(port_type, type) and issubclass(port_type, Resource):
-        return True
+
+def _is_resource_type(port_type: Any) -> bool:
+    """Check if a port type descriptor represents a Resource-like value.
+
+    The answer comes from the type, never from how the type prints: a class
+    named ``ProfileRun``, or one defined in a module named ``resources``, is
+    not a resource for having ``file`` or ``resource`` in its spelling.
+
+    A resource is ``Resource``, ``File`` or a subclass, and an instance of one
+    (``File(ext=".md")``). So is what stands for one of them: either name
+    written as a string (``"File"``, ``"wfpy.File"``), ``Optional[...]``,
+    ``... | None``, ``Annotated[...]``, a ``NewType`` and a ``type`` alias.
+    A container of resources (``list[File]``) is not one resource, and neither
+    is a union with another type (``File | str``).
+
+    A string is read as one name: ``"File | None"`` is not parsed.
+    """
+
     if isinstance(port_type, Resource):
         return True
-    type_str = str(port_type).lower()
-    return "resource" in type_str or "file" in type_str
+    if isinstance(port_type, ForwardRef):  # the "File" of `Optional["File"]`
+        port_type = port_type.__forward_arg__
+    if isinstance(port_type, str):
+        return port_type.strip().lower() in _RESOURCE_TYPE_NAMES
+    origin = get_origin(port_type)
+    if origin is Annotated:
+        return _is_resource_type(get_args(port_type)[0])
+    if origin is Union or origin is UnionType:
+        members = [arg for arg in get_args(port_type) if arg is not type(None)]
+        return all(_is_resource_type(arg) for arg in members)
+    if isinstance(port_type, type):
+        return issubclass(port_type, Resource)
+    # `NewType("Doc", File)` and `type Doc = File` stand for the type they name.
+    named = getattr(port_type, "__supertype__", None) or getattr(port_type, "__value__", None)
+    return named is not None and _is_resource_type(named)
 
 
 def _get_effective_lsp_configs(spec: AgentSpec) -> list[LspServerConfig]:

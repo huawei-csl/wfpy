@@ -21,6 +21,32 @@ All notable changes to wfpy are documented here. The format follows
   the graph: the generated file runs with the user's rights, a recursion has
   no bound of its own, and the parent run does not see inside the child.
 
+### Fixed
+- A port is a `File`/`Resource` port by its type, and no longer by the
+  spelling of its type (#75). The test that every node kind asks before it
+  materializes a token ended with a search for `file` or `resource` in the
+  printed type. Thus a dataclass named `ProfileRun`, `FileSpec` or
+  `ResourceUsage`, and any class defined in a module named `resources` or
+  `profile`, was taken for a file: its token left a nested workflow as the
+  path of a file that was never written, a run returned that path in place of
+  the object, and the dict an agent replied on such a port was written to a
+  `.txt` file. An edge between two tasks was not affected. The test now reads
+  the type: `File`, `Resource`, a subclass or an instance (`File(ext=".md")`),
+  and what stands for one of them: either name written as a string,
+  `Optional[...]`, `... | None`, `Annotated[...]`, a `NewType` and a `type`
+  alias.
+
+  Whatever was a file port through its spelling alone is no longer one. This
+  includes three forms that do name `File`: a container (`list[File]`), a
+  union with another type (`File | str`), and a string that is an expression
+  (`"File | None"`, which is not parsed). It also includes a name of one's
+  own, such as `NewType("MlirFile", str)`: declare the port as `File` to keep
+  it a file port. On a port that is no longer a file port a value is handed
+  on as it is: the reply of an agent is not written to a file, and a path
+  that a task returns is not copied into the work folder. A workflow output
+  that is the path of an existing file is still copied beside the run record,
+  as for a port of any type.
+
 ## [1.3.1] — 2026-11-20
 
 One fix, to what a run writes about the edges of nested workflows (the run
