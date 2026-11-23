@@ -53,9 +53,10 @@ _DECORATOR_ARG_ALIASES = {
 def _decorator_arg_key(annotation_name: str, name: str) -> str:
     """The arg a decorator keyword names, whatever its spelling: wfpy's
     decorators take each parameter in snake_case and in camelCase
-    (``use_skill``, ``useSkill``), so both are one key."""
+    (``use_skill``, ``useSkill``), so both are one key. The decorator is
+    named with its module or without it (``wfpy.agent``, ``agent``)."""
     snake = re.sub(r"(?<=[a-z0-9])([A-Z])", r"_\1", name).lower()
-    return _DECORATOR_ARG_ALIASES.get((annotation_name, snake), snake)
+    return _DECORATOR_ARG_ALIASES.get((_annotation_leaf(annotation_name), snake), snake)
 
 
 def _lay_out_call_args(
@@ -355,6 +356,35 @@ def _decorator_name(dec: cst.Decorator) -> str | None:
     if isinstance(target, cst.Attribute):
         return target.attr.value
     return None
+
+
+def _annotation_leaf(name: str) -> str:
+    """`task` for an annotation named `task` or `wfpy.task`: the name
+    `_decorator_name` reads from a decorator, however the file writes it."""
+    return name.rpartition(".")[2]
+
+
+_Definition = cst.ClassDef | cst.FunctionDef
+
+
+class _DefinitionTransformer(cst.CSTTransformer):
+    """A transformer of what a decorator is written on: the classes and the
+    functions of a module alike, each given to `leave_definition`."""
+
+    def leave_ClassDef(
+        self, original_node: cst.ClassDef, updated_node: cst.ClassDef
+    ) -> cst.BaseStatement:
+        return self.leave_definition(original_node, updated_node)
+
+    def leave_FunctionDef(
+        self, original_node: cst.FunctionDef, updated_node: cst.FunctionDef
+    ) -> cst.BaseStatement:
+        return self.leave_definition(original_node, updated_node)
+
+    def leave_definition(
+        self, original_node: _Definition, updated_node: _Definition
+    ) -> _Definition:
+        return updated_node
 
 
 def _is_connect_call(node: cst.CSTNode) -> bool:
@@ -3476,6 +3506,11 @@ class RewriteEngine:
         ``argRemovals`` names args to take out of the decorator: a list of
         names. A name that is also in *argUpdates* is updated, not removed.
 
+        The decorator is the one of that name on the class or the function
+        named *entityType*, written ``@agent`` or ``@wfpy.agent``;
+        *annotationName* is given either way, and what is written keeps the
+        form the file uses.
+
         A name is matched to the decorator's args whatever its spelling:
         ``useSkill`` is ``use_skill``, and on ``@agent`` ``reasoningEffort`` is
         ``variant``, as the decorator reads them. A replaced arg keeps the
@@ -3519,22 +3554,22 @@ class RewriteEngine:
             )
         removal_keys = {_decorator_arg_key(annotationName, k) for k in (argRemovals or [])} - set(updates_by_key)
 
-        class _MergeArgs(cst.CSTTransformer):
+        class _MergeArgs(_DefinitionTransformer):
             def __init__(self) -> None:
                 self.updated = False
+                # The decorator found, as the file has it.
+                self.written: cst.BaseExpression | None = None
 
-            def leave_ClassDef(self, original_node: cst.ClassDef, updated_node: cst.ClassDef) -> cst.ClassDef:
+            def leave_definition(
+                self, original_node: _Definition, updated_node: _Definition
+            ) -> _Definition:
                 if self.updated or original_node.name.value != entityType:
                     return updated_node
                 decorators = list(updated_node.decorators)
                 for idx, dec in enumerate(decorators):
-                    dec_name = None
-                    if isinstance(dec.decorator, cst.Name):
-                        dec_name = dec.decorator.value
-                    elif isinstance(dec.decorator, cst.Call) and isinstance(dec.decorator.func, cst.Name):
-                        dec_name = dec.decorator.func.value
-                    if dec_name != annotationName:
+                    if _decorator_name(dec) != _annotation_leaf(annotationName):
                         continue
+                    self.written = dec.decorator
 
                     call = dec.decorator
                     if not isinstance(call, cst.Call) and not parsed_updates:
@@ -3590,7 +3625,9 @@ class RewriteEngine:
         if not transformer.updated:
             raise RewriteError(message=f"Definition not found for annotation merge: {entityType}")
         self._set_module(updated)
-        self._ensure_wfpy_decorator_import(cst.Name(annotationName))
+        if transformer.written is not None:
+            # As the file writes it: `@agent` needs the name bound, `@wfpy.agent` does not.
+            self._ensure_wfpy_decorator_import(transformer.written)
 
     def _ensure_wfpy_decorator_import(self, decorator: cst.BaseExpression) -> None:
         """A decorator the edit wrote that is one of wfpy's (`@tool`,
@@ -3611,23 +3648,22 @@ class RewriteEngine:
         entityType: str,
         annotationName: str,
     ) -> None:
-        class _RemoveAnnot(cst.CSTTransformer):
+        class _RemoveAnnot(_DefinitionTransformer):
             def __init__(self) -> None:
                 self.updated = False
 
-            def leave_ClassDef(self, original_node: cst.ClassDef, updated_node: cst.ClassDef) -> cst.ClassDef:
+            def leave_definition(
+                self, original_node: _Definition, updated_node: _Definition
+            ) -> _Definition:
                 if self.updated or original_node.name.value != entityType:
                     return updated_node
                 decorators = list(updated_node.decorators)
                 new_decorators: list[cst.Decorator] = []
                 removed = False
                 for dec in decorators:
-                    name = None
-                    if isinstance(dec.decorator, cst.Name):
-                        name = dec.decorator.value
-                    elif isinstance(dec.decorator, cst.Call) and isinstance(dec.decorator.func, cst.Name):
-                        name = dec.decorator.func.value
-                    if name == annotationName and not removed:
+                    # By its name, as the merge finds it: `@agent` or `@wfpy.agent`.
+                    name = _decorator_name(dec)
+                    if name == _annotation_leaf(annotationName) and not removed:
                         removed = True
                         continue
                     new_decorators.append(dec)

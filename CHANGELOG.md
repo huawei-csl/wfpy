@@ -70,6 +70,16 @@ All notable changes to wfpy are documented here. The format follows
   go into the decorator that is there, laid out as in an empty `@agent()`:
   on one line, where two arguments given to a bare `@agent` were written
   one per line.
+- The merge finds a decorator written with its module, and a decorator on a
+  function (#83). `@wfpy.agent(...)` on a class, and `@workflow(...)` or
+  `@config(...)` on a `def`, answered `Definition not found for annotation
+  merge`. A decorator is now matched by its name, with `annotationName`
+  given as `agent` or as `wfpy.agent`, on the class or the function that
+  `entityType` names. What is written keeps the form the file uses, and a
+  file that writes `@wfpy.agent` is not given a `from wfpy import agent`.
+  `removeDefinitionAnnotation` finds a decorator the same way.
+  `updateDefinitionAnnotation` is not changed: it matches a decorator
+  written as a bare name on a class.
 
 ## [1.3.2] — 2026-11-23
 
