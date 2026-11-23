@@ -506,12 +506,13 @@ def _build_agent_meta(meta: dict[str, Any], rec: Any) -> None:
             "value": "true" if _skill_active else "false",
         }
     )
-    # Always emit usePrompt so the GUI reliably reflects the state.
-    _prompt_has_text = bool(rec.meta.agent_spec.prompt)
+    # Always emit usePrompt so the GUI reliably reflects the state: a prompt
+    # the agent is told not to use (`use_prompt=False`) is off.
+    _prompt_active = bool(rec.meta.agent_spec.prompt) and rec.meta.agent_spec.use_prompt is not False
     agent_args.append(
         {
             "name": "usePrompt",
-            "value": "true" if _prompt_has_text else "false",
+            "value": "true" if _prompt_active else "false",
         }
     )
     # Only emit useSkillHooks when it overrides the default (true)
@@ -538,6 +539,13 @@ def _build_agent_meta(meta: dict[str, Any], rec: Any) -> None:
                 "value": "true",
             }
         )
+    if getattr(rec.meta.agent_spec, "ask_permissions", False):
+        agent_args.append(
+            {
+                "name": "askPermissions",
+                "value": "true",
+            }
+        )
     if rec.meta.agent_spec.truncation_strategy:
         agent_args.append(
             {
@@ -552,6 +560,21 @@ def _build_agent_meta(meta: dict[str, Any], rec: Any) -> None:
             {
                 "name": "transport",
                 "value": _wf_string_literal(rec.meta.agent_spec.transport),
+            }
+        )
+    # The ACP agent and its session mode, when the decorator names them.
+    if getattr(rec.meta.agent_spec, "connector", ""):
+        agent_args.append(
+            {
+                "name": "connector",
+                "value": _wf_string_literal(rec.meta.agent_spec.connector),
+            }
+        )
+    if getattr(rec.meta.agent_spec, "mode", ""):
+        agent_args.append(
+            {
+                "name": "mode",
+                "value": _wf_string_literal(rec.meta.agent_spec.mode),
             }
         )
     if rec.meta.agent_spec.cli_tools_mode and rec.meta.agent_spec.cli_tools_mode != "wfpy-none":

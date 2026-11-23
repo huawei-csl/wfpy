@@ -6,6 +6,27 @@ All notable changes to wfpy are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- An `@agent` given no reasoning level had the text `"None"` as its level
+  (`str(None)`): `opencode-cli` was started with `--variant None`, and the
+  graph export showed `reasoningEffort="None"`, which an IDE wrote back into
+  the file. No level is now no level.
+- The graph export carries `connector`, `mode` and `askPermissions` when the
+  decorator sets them, so an IDE shows an ACP agent's settings as written;
+  `usePrompt` is false for a prompt the agent is told not to use
+  (`use_prompt=False`).
+- Merging arguments into a decorator (`mergeDefinitionAnnotationArgs`, an
+  IDE's Save):
+  - matches an argument whatever its spelling: `useSkill` replaces
+    `use_skill` and keeps the file's spelling and place, a second spelling
+    of the same argument is removed, and on `@agent` `reasoningEffort` is
+    `variant`;
+  - takes `argRemovals`, the arguments to take out;
+  - lays appended arguments out as the call is written: one per line and
+    indented as the others, the closing parenthesis where it was, each
+    comment on its own argument's line. A call left with no argument is
+    `@agent()`, not a bare `@agent`.
+
 ## [1.3.2] — 2026-11-23
 
 One fix, to what decides that a port carries a file (#75), and a folder of

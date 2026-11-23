@@ -1192,8 +1192,9 @@ def agent(
 
         parsed_validators = _parse_output_validators(output_validators, outputValidators)
 
-        # Normalize variant/reasoningEffort
-        effective_variant = str(variant if reasoningEffort is None else reasoningEffort).strip()
+        # Normalize variant/reasoningEffort: neither given is no level, not the text "None".
+        given_variant = variant if reasoningEffort is None else reasoningEffort
+        effective_variant = "" if given_variant is None else str(given_variant).strip()
 
         meta.agent_spec = AgentSpec(
             prompt=prompt,

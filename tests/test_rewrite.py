@@ -554,6 +554,188 @@ class A:
     assert 'model="old"' in updated
 
 
+def _merged(tmp_path: Path, source: str, entity: str, updates: dict[str, str],
+            removals: list[str] | None = None) -> str:
+    engine = _engine_from_source(tmp_path, source)
+    engine.merge_definition_annotation_args(
+        entityType=entity, annotationName="agent", argUpdates=updates, argRemovals=removals
+    )
+    engine.save()
+    return Path(engine.file_path).read_text(encoding="utf-8")
+
+
+def test_merge_replaces_an_arg_written_in_the_other_spelling(tmp_path: Path) -> None:
+    """The panel names args in camelCase; a file written in snake_case keeps
+    its spelling, and gets no second copy of the arg."""
+    updated = _merged(tmp_path, '''
+from wfpy import agent
+
+
+@agent(prompt="x", use_skill=True, timeout_ms=1000)
+class A:
+    pass
+''', "A", {"useSkill": "false", "timeoutMs": "2000"})
+    assert '@agent(prompt="x", use_skill=False, timeout_ms=2000)' in updated
+    assert "useSkill" not in updated and "timeoutMs" not in updated
+
+
+def test_merge_leaves_one_spelling_of_an_arg_written_twice(tmp_path: Path) -> None:
+    updated = _merged(tmp_path, '''
+from wfpy import agent
+
+
+@agent(prompt="x", use_skill=True, model="m", useSkill=True)
+class A:
+    pass
+''', "A", {"useSkill": "false"})
+    assert '@agent(prompt="x", use_skill=False, model="m")' in updated
+
+
+def test_merge_takes_reasoning_effort_for_variant(tmp_path: Path) -> None:
+    updated = _merged(tmp_path, '''
+from wfpy import agent
+
+
+@agent(prompt="x", variant="high")
+class A:
+    pass
+''', "A", {"reasoningEffort": '"max"'})
+    assert '@agent(prompt="x", variant="max")' in updated
+
+
+def test_merge_removes_args_in_either_spelling(tmp_path: Path) -> None:
+    updated = _merged(tmp_path, '''
+from wfpy import agent
+
+
+@agent(prompt="x", mode="plan", timeout_ms=5, connector="claude")
+class A:
+    pass
+''', "A", {}, ["mode", "timeoutMs"])
+    assert '@agent(prompt="x", connector="claude")' in updated
+
+
+def test_merge_appends_to_a_call_written_one_arg_per_line(tmp_path: Path) -> None:
+    """Appended args are indented as the others, and the closing parenthesis
+    stays on its own line, after a trailing comma as before."""
+    updated = _merged(tmp_path, '''
+from wfpy import agent
+
+
+@agent(
+    prompt="x",  # what it does
+    stateful=True,
+)
+class A:
+    pass
+''', "A", {"askUser": "true", "mode": '"plan"'})
+    assert '''@agent(
+    prompt="x",  # what it does
+    stateful=True,
+    askUser=True,
+    mode="plan",
+)
+class A:''' in updated
+
+
+def test_merge_keeps_each_comment_with_its_arg(tmp_path: Path) -> None:
+    """A comment ending the last arg's line stays on it when args are
+    appended after it, and on an arg that becomes the last."""
+    appended = _merged(tmp_path, '''
+from wfpy import agent
+
+
+@agent(
+    prompt="x",
+    stateful=True,  # keeps its history
+)
+class A:
+    pass
+''', "A", {"mode": '"plan"'})
+    assert '''    stateful=True,  # keeps its history
+    mode="plan",
+)''' in appended
+    removed = _merged(tmp_path, '''
+from wfpy import agent
+
+
+@agent(
+    prompt="x",  # what it does
+    mode="plan",  # read only
+)
+class B:
+    pass
+''', "B", {}, ["mode"])
+    assert '''@agent(
+    prompt="x",  # what it does
+)
+class B:''' in removed
+
+
+def test_merge_appends_to_a_lone_arg_on_its_own_line(tmp_path: Path) -> None:
+    updated = _merged(tmp_path, '''
+from wfpy import agent
+
+
+@agent(
+    prompt="x"
+)
+class A:
+    pass
+''', "A", {"model": '"m"'})
+    assert '''@agent(
+    prompt="x",
+    model="m"
+)
+class A:''' in updated
+
+
+def test_merge_appends_to_a_call_on_one_line(tmp_path: Path) -> None:
+    updated = _merged(tmp_path, '''
+from wfpy import agent
+
+
+@agent(prompt="x", model="m")
+class A:
+    pass
+''', "A", {"provider": '"p"'})
+    assert '@agent(prompt="x", model="m", provider="p")' in updated
+
+
+def test_merge_removing_the_last_arg_keeps_the_call_s_ending(tmp_path: Path) -> None:
+    updated = _merged(tmp_path, '''
+from wfpy import agent
+
+
+@agent(
+    prompt="x",
+    model="m",
+    mode="plan",
+)
+class A:
+    pass
+''', "A", {}, ["mode"])
+    assert '''@agent(
+    prompt="x",
+    model="m",
+)
+class A:''' in updated
+
+
+def test_merge_removing_every_arg_leaves_an_empty_call(tmp_path: Path) -> None:
+    updated = _merged(tmp_path, '''
+from wfpy import agent
+
+
+@agent(
+    mode="plan",
+)
+class A:
+    pass
+''', "A", {}, ["mode"])
+    assert "@agent()\nclass A:" in updated
+
+
 class TestCreateStreamblocksType:
     """The sidecar has to write a node the file can actually run.
 
