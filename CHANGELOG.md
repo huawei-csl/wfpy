@@ -80,6 +80,14 @@ All notable changes to wfpy are documented here. The format follows
   `removeDefinitionAnnotation` finds a decorator the same way.
   `updateDefinitionAnnotation` is not changed: it matches a decorator
   written as a bare name on a class.
+- An empty decorator call written over lines (`@agent(` and `)` on two
+  lines) gets its first arguments one per line (#84). The first argument
+  was written at the decorator's column, with the closing parenthesis right
+  after it. Each argument is now on a line of its own, indented as the
+  call's comment lines are (four spaces when it has none), with a comma
+  after the last, and the closing parenthesis stays on its line. A comment
+  on the opening line stays there, and comment lines inside the call stay
+  above the first argument.
 
 ## [1.3.2] — 2026-11-23
 

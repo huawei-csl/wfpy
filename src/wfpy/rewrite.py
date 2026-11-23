@@ -77,9 +77,30 @@ def _lay_out_call_args(
     (``a,⏎b``), or before it in a call whose commas open the lines
     (``a⏎, b``). An arg that follows a removed one that opened a line takes
     its place on that line, and a break that has to be made (for a comment to
-    stay on its arg) indents the next arg as the call indents its args."""
+    stay on its arg) indents the next arg as the call indents its args.
+
+    A call with no arg takes its first ones on its line (``@agent()``). One
+    written over lines stays so: an arg per line, indented as the call's
+    comment lines are (four spaces with none), a comma after the last, and the
+    closing parenthesis on its line, where it was. A comment on the opening
+    line stays there, and the comment lines stay above the first arg."""
     if not original:
-        return [a.with_changes(comma=cst.MaybeSentinel.DEFAULT) for a, _ in merged], call.whitespace_before_args
+        inside = call.whitespace_before_args
+        if not merged or not isinstance(inside, cst.ParenthesizedWhitespace):
+            return [a.with_changes(comma=cst.MaybeSentinel.DEFAULT) for a, _ in merged], inside
+        indent = next(
+            (line.whitespace for line in reversed(inside.empty_lines)
+             if line.comment is not None and line.indent and line.whitespace.value),
+            cst.SimpleWhitespace("    "),
+        )
+        own_line = cst.ParenthesizedWhitespace(indent=True, last_line=indent)
+        closing = cst.ParenthesizedWhitespace(indent=inside.indent, last_line=inside.last_line)
+        return [
+            arg.with_changes(
+                comma=cst.Comma(whitespace_after=closing if j == len(merged) - 1 else own_line),
+                whitespace_after_arg=cst.SimpleWhitespace(""))
+            for j, (arg, _) in enumerate(merged)
+        ], inside.with_changes(indent=True, last_line=indent)
     last_index = len(original) - 1
     last = original[last_index]
 

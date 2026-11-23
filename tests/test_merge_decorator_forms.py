@@ -251,3 +251,111 @@ def test_removing_an_annotation_finds_one_written_with_its_module(
 def test_removing_an_annotation_finds_one_on_a_function(tmp_path: Path) -> None:
     updated = _removed(tmp_path, ON_A_FUNCTION, "flow", "config")
     assert updated == ON_A_FUNCTION.replace('@config(path=["/opt/tools/bin"])\n', "")
+
+
+# An empty call written over lines (#84)
+
+
+def _agent(decorator: str) -> str:
+    return f"\nfrom wfpy import agent\n\n\n{decorator}\nclass A:\n    pass\n"
+
+
+def test_an_empty_call_over_two_lines_gets_its_first_arg_on_its_own_line(tmp_path: Path) -> None:
+    """`@agent(⏎)` became `@agent(⏎model="m")`: the arg at the decorator's
+    column and the closing parenthesis after it."""
+    assert _merged(tmp_path, _agent("@agent(\n)"), "A", {"model": '"m"'}) == _agent('''@agent(
+    model="m",
+)''')
+
+
+def test_an_empty_call_keeps_the_comment_on_its_opening_line(tmp_path: Path) -> None:
+    source = _agent("@agent(  # note\n)")
+    updates = {"model": '"m"', "mode": '"plan"'}
+    assert _merged(tmp_path, source, "A", updates) == _agent('''@agent(  # note
+    model="m",
+    mode="plan",
+)''')
+
+
+def test_an_empty_call_keeps_its_comment_lines_above_the_first_arg(tmp_path: Path) -> None:
+    """The args are indented as the comment lines are: by four spaces, and in
+    the second call by two, in a class indented by four. The blank line and
+    the closing parenthesis of that call stay where they were."""
+    source = _agent("@agent(\n    # nothing yet\n)")
+    assert _merged(tmp_path, source, "A", {"model": '"m"'}) == _agent('''@agent(
+    # nothing yet
+    model="m",
+)''')
+    assert _merged(tmp_path, '''
+from wfpy import agent
+
+
+class Outer:
+    @agent(  # note
+
+      # nothing yet
+      # still nothing
+        )
+    class A:
+        pass
+''', "A", {"model": '"m"', "mode": '"plan"'}) == '''
+from wfpy import agent
+
+
+class Outer:
+    @agent(  # note
+
+      # nothing yet
+      # still nothing
+      model="m",
+      mode="plan",
+        )
+    class A:
+        pass
+'''
+
+
+def test_an_empty_call_with_a_comment_at_its_own_column_indents_its_args(tmp_path: Path) -> None:
+    """A comment line that is not indented gives no indentation to follow:
+    four spaces, as with no comment line."""
+    source = _agent("@agent(\n# nothing yet\n)")
+    assert _merged(tmp_path, source, "A", {"model": '"m"'}) == _agent('''@agent(
+# nothing yet
+    model="m",
+)''')
+
+
+def test_an_empty_call_over_lines_is_a_call_written_one_arg_per_line_after(tmp_path: Path) -> None:
+    """What the first merge writes is merged into as any call written one arg
+    per line: the same merge again changes nothing, and the next arg goes on
+    a line of its own. With nothing to add, the empty call is left as written."""
+    once = _merged(tmp_path, _agent("@agent(\n)"), "A", {"model": '"m"'})
+    assert _merged(tmp_path, once, "A", {"model": '"m"'}) == once
+    assert _merged(tmp_path, once, "A", {"mode": '"plan"'}) == _agent('''@agent(
+    model="m",
+    mode="plan",
+)''')
+    assert _merged(tmp_path, _agent("@agent(\n)"), "A", {}, ["mode"]) == _agent("@agent(\n)")
+
+
+def test_an_empty_call_over_lines_on_a_function_written_with_its_module(tmp_path: Path) -> None:
+    """The three forms together: `@wfpy.workflow(⏎)` on a `def`."""
+    assert _merged(tmp_path, '''
+import wfpy
+
+
+@wfpy.workflow(
+)
+def flow():
+    pass
+''', "flow", {"inputs": '{"In": str}', "outputs": '{"Out": str}'}, annotation="workflow") == '''
+import wfpy
+
+
+@wfpy.workflow(
+    inputs={"In": str},
+    outputs={"Out": str},
+)
+def flow():
+    pass
+'''
