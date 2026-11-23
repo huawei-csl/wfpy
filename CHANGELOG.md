@@ -89,6 +89,43 @@ All notable changes to wfpy are documented here. The format follows
   after the last, and the closing parenthesis stays on its line. A comment
   on the opening line stays there, and comment lines inside the call stay
   above the first argument.
+- An edit that writes a text an IDE gives as a value wrote any Python
+  expression as given, also one that is not one value where it is written
+  (#81). `mcpServers="a", "b"` and `path=*y` left a file that no longer
+  parsed, with the sidecar answering `ok`; `wfpy.loop("a", "b")` and
+  `model="m", *rest` parsed, with an argument nobody asked for. A tuple
+  written without its parentheses is now written with them
+  (`mcpServers=("a", "b")`, and `("a",)` for `"a",`), and a text that is not
+  one value with them either (`*y`) is refused with `invalid_expression`.
+  This holds for a node's parameter (`updateNodeParameter`, the
+  `expressions` of `createNode`), a decorator's argument
+  (`mergeDefinitionAnnotationArgs`) and the decorator itself
+  (`updateDefinitionAnnotation`), the two ends of a `connect`, the condition
+  of an `if_`, what a `loop` iterates over, and the type of a workflow's
+  port (`createPort`). The type of a class's port, inside `Port[...]`, is
+  written as before: a tuple needs no parentheses there. The merge also
+  refuses an argument whose name is a keyword or not an identifier
+  (`class=1`), with `invalid_argument_name`.
+- Merging arguments into a decorator refuses an argument that one of wfpy's
+  own decorators does not take (#85), with `unknown_argument` and a message
+  that names the argument and the decorator. The graph export lists
+  `useLsp`, `useMcp` and `lspServerConfigs` among an `@agent`'s arguments,
+  for an IDE to show, and the merge wrote any name it was given: sent back,
+  each left a file that failed as it was imported (`agent() got an
+  unexpected keyword argument`). The names a decorator takes are read from
+  its signature. A name that is another spelling of an argument the
+  decorator takes is that argument: the export names `@tool`'s
+  `inherit_stdio` `inheritStdio`, and a new argument given so was written
+  as given, which `tool()` refuses. It is now written `inherit_stdio`; an
+  argument in the file keeps its spelling, unless the decorator refuses
+  that one. The decorator is asked as the file writes it: `@agent` where
+  the file imports it from wfpy or binds it not at all, `@wfpy.agent`
+  where `wfpy` is the module (`import wfpy`, `import wfpy as wf`). One
+  that the file defines, or takes from elsewhere (`@mylib.agent`), is not
+  asked, nor would one that takes `**kwargs` be. A name in `argRemovals`
+  is not asked either: taking out an argument the decorator refuses
+  repairs the file. The export is unchanged, and still does not say which
+  of its entries are for display only.
 
 ## [1.3.2] — 2026-11-23
 
