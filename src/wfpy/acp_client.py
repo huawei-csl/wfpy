@@ -308,6 +308,32 @@ def _drop_unrouted_notifications(connection: Any) -> None:
     conn._handler = handle
 
 
+
+def _session_option(options: list[Any], key: str, *, by_id: bool = True) -> Any:
+    """The select config option a session offers for `key`: the one with that
+    id, else the first with that category (ACP's hint for what an option
+    sets; OpenCode's reasoning level is id `effort`, category
+    `thought_level`)."""
+    selects = [o for o in options if getattr(o, "options", None) is not None]
+    return ((next((o for o in selects if str(getattr(o, "id", "")) == key), None) if by_id else None)
+            or next((o for o in selects if str(getattr(o, "category", "") or "") == key), None))
+
+
+def _option_choices(option: Any) -> list[Any]:
+    """A select option's choices, groups flattened."""
+    choices: list[Any] = []
+    for entry in list(getattr(option, "options", None) or []):
+        grouped = getattr(entry, "options", None)
+        choices.extend(grouped if isinstance(grouped, list) else [entry])
+    return choices
+
+
+def _choose(choices: list[Any], wanted: str) -> Any:
+    """The choice whose value, else whose name, is `wanted`, case-insensitive."""
+    key = wanted.strip().lower()
+    return (next((c for c in choices if str(getattr(c, "value", "")).lower() == key), None)
+            or next((c for c in choices if str(getattr(c, "name", "")).lower() == key), None))
+
 class ACPClient:
     """
     Async client for communicating with opencode via ACP protocol.
@@ -431,44 +457,85 @@ class ACPClient:
         logger.info(f"Session loaded: {session_id}")
 
     async def configure_session(self, session_id: str, response: Any,
-                                model: str | None = None, mode: str | None = None) -> dict[str, Any]:
-        """Apply a connector's model and mode to a session the agent offers
-        them on. `response` is the new_session or load_session response,
-        whose `config_options` and `modes` say what the agent offers: a
-        config option with id `model` (Claude Code: default, sonnet,
-        haiku, opus...) is matched by value, then by name, case-insensitive,
-        then by prefix; a mode by id. What the agent does not offer is
-        logged and left."""
+                                model: str | None = None, mode: str | None = None,
+                                effort: str | None = None) -> dict[str, Any]:
+        """Apply a connector's model, mode and reasoning level to a session
+        the agent offers them on. `response` is the new_session or
+        load_session response, whose `config_options` and `modes` say what
+        the agent offers.
+
+        - The model: a config option with id or category `model` (Claude
+          Code: default, sonnet, haiku, opus...), matched by value, then by
+          name, case-insensitive, then by prefix.
+        - The mode: from a config option with id or category `mode` (OpenCode
+          2 offers it only so: build, plan), by value then name, else by id
+          from the session's `modes` (Claude Code); case-insensitive.
+        - The reasoning level (`effort`): a config option with category
+          `thought_level` (OpenCode 2: minimal ... max), by value then name.
+
+        Each option is looked up in the options the agent sent back when the
+        one before it was set: a model can bring its own reasoning levels.
+
+        What the agent does not offer is logged and left."""
         applied: dict[str, Any] = {}
         options = getattr(response, "config_options", None) or getattr(response, "configOptions", None) or []
         modes = getattr(response, "modes", None)
         if model:
-            option = next((o for o in options if str(getattr(o, "id", "")) == "model"), None)
+            option = _session_option(options, "model")
             if option is None:
                 logger.warning(f"The agent offers no model option; model {model!r} not applied")
             else:
-                choices = list(getattr(option, "options", None) or [])
-                wanted = model.strip().lower()
-                chosen = (next((c for c in choices if str(getattr(c, "value", "")).lower() == wanted), None)
-                          or next((c for c in choices if str(getattr(c, "name", "")).lower() == wanted), None)
-                          or next((c for c in choices if str(getattr(c, "value", "")).lower().startswith(wanted)), None))
+                choices = _option_choices(option)
+                chosen = (_choose(choices, model)
+                          or next((c for c in choices if str(getattr(c, "value", "")).lower()
+                                   .startswith(model.strip().lower())), None))
                 if chosen is None:
                     logger.warning(f"The agent's model option has no {model!r}; it offers "
                                    f"{[getattr(c, 'value', None) for c in choices]}")
                 else:
-                    await self.connection.set_config_option(config_id="model", session_id=session_id,
-                                                            value=str(getattr(chosen, "value")))
-                    applied["model"] = str(getattr(chosen, "value"))
+                    applied["model"], options = await self._set_option(session_id, option, chosen, options)
                     logger.info(f"Session model set to {applied['model']}")
         if mode:
             available = [str(getattr(m, "id", "")) for m in (getattr(modes, "available_modes", None) or [])]
-            if mode not in available:
-                logger.warning(f"The agent offers no mode {mode!r}; it offers {available}")
+            option = _session_option(options, "mode")
+            chosen = _choose(_option_choices(option), mode) if option is not None else None
+            legacy = next((m for m in available if m.lower() == mode.strip().lower()), None)
+            if chosen is not None:
+                applied["mode"], options = await self._set_option(session_id, option, chosen, options)
+                logger.info(f"Session mode set to {applied['mode']}")
+            elif legacy is not None:
+                await self.connection.set_session_mode(session_id=session_id, mode_id=legacy)
+                applied["mode"] = legacy
+                logger.info(f"Session mode set to {legacy}")
             else:
-                await self.connection.set_session_mode(session_id=session_id, mode_id=mode)
-                applied["mode"] = mode
-                logger.info(f"Session mode set to {mode}")
+                offered = available or [getattr(c, "value", None) for c in _option_choices(option)]
+                logger.warning(f"The agent offers no mode {mode!r}; it offers {offered}")
+        if effort:
+            option = _session_option(options, "thought_level", by_id=False)
+            if option is None:
+                logger.warning(f"The agent offers no reasoning level option; {effort!r} not applied")
+            else:
+                choices = _option_choices(option)
+                chosen = _choose(choices, effort)
+                if chosen is None:
+                    logger.warning(f"The agent's reasoning level option has no {effort!r}; it offers "
+                                   f"{[getattr(c, 'value', None) for c in choices]}")
+                else:
+                    applied["effort"], options = await self._set_option(session_id, option, chosen, options)
+                    logger.info(f"Session reasoning level set to {applied['effort']}")
         return applied
+
+    async def _set_option(self, session_id: str, option: Any, chosen: Any,
+                          options: list[Any]) -> tuple[str, list[Any]]:
+        """Set a config option; return the value and the session's options
+        as the agent now offers them. Choices can follow another option
+        (OpenCode 2's reasoning levels are the model's), so the next option
+        is looked up in the agent's reply where it sends one."""
+        value = str(getattr(chosen, "value"))
+        reply = await self.connection.set_config_option(config_id=str(getattr(option, "id")),
+                                                        session_id=session_id, value=value)
+        updated = getattr(reply, "config_options", None) or getattr(reply, "configOptions", None)
+        return value, (list(updated) if updated else options)
 
     async def send_prompt(self, session_id: str, prompt: str) -> dict[str, Any]:
         """
@@ -744,6 +811,7 @@ async def invoke_opencode_acp(
     model: str | None = None,
     mode: str | None = None,
     mcp_servers: list[dict[str, Any]] | None = None,
+    effort: str | None = None,
 ) -> dict[str, Any]:
     """
     High-level function to invoke opencode via ACP with stuck detection.
@@ -762,6 +830,7 @@ async def invoke_opencode_acp(
         on_permission: Answers the agent's permission requests; None allows each once
         model: A session model to set, if the agent offers a `model` config option
         mode: A session mode to set, if the agent offers it
+        effort: A reasoning level to set, if the agent offers a `thought_level` config option
         mcp_servers: HTTP MCP servers for the session, `{"name", "url"}` each: the
             run's own `ask_user` tool (`_ask_user_mcp`) is one
         
@@ -799,7 +868,7 @@ async def invoke_opencode_acp(
         else:
             session_id = await client.create_session(cwd=cwd, mcp_servers=mcp_servers)
         applied = await client.configure_session(session_id, client.last_session_response,
-                                                 model=model, mode=mode)
+                                                 model=model, mode=mode, effort=effort)
         # Run with stuck detection
         response = await run_with_stuck_detection(
             client=client,

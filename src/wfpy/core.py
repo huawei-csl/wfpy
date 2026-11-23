@@ -434,7 +434,9 @@ class AgentSpec:
     mode: str = ""
     # CLI tool execution mode for non-http transports
     cli_tools_mode: str = "wfpy-none"  # "wfpy-none" | "native"
-    # Reasoning effort for opencode CLI (--variant flag)
+    # Reasoning level. `opencode run` takes it as `--variant`, or in the model
+    # (`provider/model#variant`) from OpenCode 2 on; an ACP session takes it
+    # where the agent offers a `thought_level` config option.
     variant: str = ""  # "max" | "high" | "minimal" | "" (default)
     # transport="mock" only: fixed {port: value} outputs. Ports left unlisted are
     # synthesized from their declared type.

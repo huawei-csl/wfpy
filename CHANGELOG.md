@@ -6,6 +6,17 @@ All notable changes to wfpy are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- The reasoning level over ACP: an agent's `reasoningEffort` (or
+  `variant`) is set on the session where the agent offers a config option
+  of category `thought_level` (OpenCode 2's `effort`: minimal, low, medium,
+  high, xhigh, max), matched by value then name. The level is looked up in
+  the options the agent sends back after the model is set, since a model can
+  bring its own levels. An agent that offers none logs it and runs at its
+  own level, as before. Claude Code's connector offers one too
+  (`claude-agent-acp` 0.108.0: default, low, medium, high, xhigh, max), so a
+  level on a Claude Code agent, which was ignored, is now applied.
+
 ### Fixed
 - An `@agent` given no reasoning level had the text `"None"` as its level
   (`str(None)`): `opencode-cli` was started with `--variant None`, and the
@@ -36,6 +47,22 @@ All notable changes to wfpy are documented here. The format follows
     left with no argument is `@agent()` (its comments kept on lines of
     their own), not a bare `@agent`; a bare `@agent` with nothing to add is
     left alone. The sidecar declares `features.mergeArgRemovals`.
+- OpenCode 2 over ACP: an agent's `mode` is applied again. OpenCode 2
+  offers the mode only as a session config option (`build`, `plan`), not
+  in the session's `modes`, so a `mode="plan"` agent ran in `build` with a
+  warning that no mode was offered. The ACP client now sets a mode through
+  the config option with id or category `mode` where the agent offers one,
+  and through `session/set_mode` otherwise (Claude Code); either way the
+  mode is matched case-insensitively.
+- OpenCode 2 over the CLI (`opencode-cli`): `opencode run` dropped
+  `--variant`, so every agent with a reasoning level failed with
+  "Unrecognized flag: --variant". wfpy reads whether `run --help` offers the
+  flag, with the environment the run gets (the workflow's `@config` env
+  included), once per command and PATH; a help that cannot be read is read
+  again at the next firing. Where the flag is gone, the level goes in the
+  model, `provider/model#variant`. An agent that names a level but no model,
+  or a model that names another level, gets a warning and
+  `opencodeVariantDropped` in its debug record.
 
 ## [1.3.2] — 2026-11-23
 

@@ -98,6 +98,102 @@ class TestModelAndMode:
         assert client.connection.calls == [("mode", "plan")]
 
 
+def select(id, values, category=None):
+    return types.SimpleNamespace(id=id, category=category, current_value=values[0],
+                                 options=[types.SimpleNamespace(value=v, name=v.title()) for v in values])
+
+
+def opencode2_offers():
+    """OpenCode 2's new_session: no `modes`; model, effort and mode as config options."""
+    return types.SimpleNamespace(modes=None, config_options=[
+        select("model", ["opencode/a-free", "opencode/b-free"], "model"),
+        select("effort", ["minimal", "low", "medium", "high", "xhigh", "max", "default"], "thought_level"),
+        select("mode", ["build", "plan"], "mode"),
+    ])
+
+
+class TestOpenCode2SessionOptions:
+    """OpenCode 2 offers the mode and the reasoning level only as config options."""
+
+    def _client(self):
+        client = ACPClient()
+        client.connection = FakeConnection()
+        return client
+
+    def test_the_mode_by_its_config_option(self):
+        client = self._client()
+        assert asyncio.run(client.configure_session("s", opencode2_offers(), mode="Plan")) == {"mode": "plan"}
+        assert client.connection.calls == [("config", "mode", "plan")]
+
+    def test_the_config_option_wins_where_both_offer_the_mode(self):
+        client = self._client()
+        both = offers()
+        both.config_options.append(select("mode", ["default", "plan"], "mode"))
+        assert asyncio.run(client.configure_session("s", both, mode="plan")) == {"mode": "plan"}
+        assert client.connection.calls == [("config", "mode", "plan")]
+
+    def test_a_mode_neither_offers_names_what_is_offered(self, caplog):
+        client = self._client()
+        assert asyncio.run(client.configure_session("s", opencode2_offers(), mode="yolo")) == {}
+        assert client.connection.calls == []
+        assert "no mode 'yolo'; it offers ['build', 'plan']" in caplog.text
+
+    def test_the_reasoning_level_by_its_category(self):
+        client = self._client()
+        assert asyncio.run(client.configure_session("s", opencode2_offers(), effort="HIGH")) == {"effort": "high"}
+        assert client.connection.calls == [("config", "effort", "high")]
+
+    def test_a_level_the_agent_does_not_offer_is_left(self, caplog):
+        client = self._client()
+        assert asyncio.run(client.configure_session("s", opencode2_offers(), effort="ultra")) == {}
+        assert asyncio.run(client.configure_session("s", offers(), effort="high")) == {}
+        assert client.connection.calls == []
+        assert "no 'ultra'" in caplog.text and "no reasoning level option" in caplog.text
+
+    def test_model_mode_and_level_together(self):
+        client = self._client()
+        applied = asyncio.run(client.configure_session("s", opencode2_offers(), model="opencode/b",
+                                                       mode="plan", effort="max"))
+        assert applied == {"model": "opencode/b-free", "mode": "plan", "effort": "max"}
+        assert client.connection.calls == [("config", "model", "opencode/b-free"), ("config", "mode", "plan"),
+                                           ("config", "effort", "max")]
+
+    def test_the_level_is_looked_up_in_the_options_the_model_brings(self):
+        """OpenCode 2's reasoning levels are the model's: after a model switch
+        the level is chosen from the options the agent sent back."""
+        class Replying(FakeConnection):
+            async def set_config_option(self, config_id, session_id, value):
+                await super().set_config_option(config_id, session_id, value)
+                if config_id == "model" and value == "opencode/b-free":
+                    return types.SimpleNamespace(config_options=[
+                        select("model", ["opencode/a-free", "opencode/b-free"], "model"),
+                        select("effort", ["low", "xhigh"], "thought_level"),
+                    ])
+                return None
+
+        client = ACPClient()
+        client.connection = Replying()
+        offered = opencode2_offers()
+        offered.config_options[1] = select("effort", ["low", "high"], "thought_level")   # a-free's levels
+        applied = asyncio.run(client.configure_session("s", offered, model="opencode/b-free", effort="xhigh"))
+        assert applied == {"model": "opencode/b-free", "effort": "xhigh"}
+        assert client.connection.calls[-1] == ("config", "effort", "xhigh")
+
+    def test_a_legacy_mode_is_matched_case_insensitively(self):
+        client = self._client()
+        assert asyncio.run(client.configure_session("s", offers(), mode="Plan")) == {"mode": "plan"}
+        assert client.connection.calls == [("mode", "plan")]
+
+    def test_grouped_choices_are_choices(self):
+        client = self._client()
+        grouped = types.SimpleNamespace(id="model", category="model", options=[
+            types.SimpleNamespace(group="a", name="A", options=[types.SimpleNamespace(value="a/one", name="One")]),
+            types.SimpleNamespace(group="b", name="B", options=[types.SimpleNamespace(value="b/two", name="Two")]),
+        ])
+        response = types.SimpleNamespace(modes=None, config_options=[grouped])
+        assert asyncio.run(client.configure_session("s", response, model="two")) == {"model": "b/two"}
+
+
 class TestTheTransportHandsThemOn:
     def test_connector_model_mode_and_env_reach_the_invocation(self, monkeypatch, connectors):
         import wfpy.acp_client as acp_client
@@ -129,6 +225,24 @@ class TestTheTransportHandsThemOn:
                                       effective_prompt="p", plan_options={},
                                       output_ports={"Out": types.SimpleNamespace(port_type=str, ext="")})
         assert seen["model"] == "haiku" and seen["mode"] == "acceptEdits"
+
+    def test_the_reasoning_level_reaches_the_session(self, monkeypatch, connectors):
+        import wfpy.acp_client as acp_client
+
+        seen = {}
+
+        async def fake_invoke(**kw):
+            seen.update(kw)
+            return {"stop_reason": "end_turn", "text": '{"outputs": {"Out": "ok"}}', "session_id": "s", "applied": {}}
+
+        monkeypatch.setattr(acp_client, "invoke_opencode_acp", fake_invoke)
+        ports = {"Out": types.SimpleNamespace(port_type=str, ext="")}
+        rt._invoke_agent_opencode_acp(spec(variant="high"), "payload", False, effective_prompt="p",
+                                      plan_options={}, output_ports=ports)
+        assert seen["effort"] == "high"
+        rt._invoke_agent_opencode_acp(spec(variant=""), "payload", False, effective_prompt="p",
+                                      plan_options={}, output_ports=ports)
+        assert seen["effort"] is None
 
 
 class TestOpenCodeModel:
