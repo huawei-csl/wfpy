@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import dataclasses
 import errno
+import functools
 import json
+import logging
 import os
 import queue
 import shlex
@@ -78,6 +80,21 @@ def _normalize_cli_tools_mode(spec: AgentSpec, options: dict[str, Any] | None = 
             f"Unsupported cli_tools_mode '{raw}'. Supported values: wfpy-none, native."
         )
     return normalized
+
+
+@functools.lru_cache(maxsize=8)
+def _opencode_run_takes_variant(opencode_argv: tuple[str, ...]) -> bool:
+    """Whether this opencode's `run` takes `--variant` (opencode 1.x) or only
+    `--model provider/model#variant` (opencode 2), read once per command
+    from `run --help`. A help that cannot be read, or says neither, keeps
+    the flag."""
+    try:
+        result = subprocess.run([*opencode_argv, "run", "--help"], capture_output=True,
+                                text=True, timeout=30, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return True
+    text = f"{result.stdout}\n{result.stderr}"
+    return "--variant" in text or "#variant" not in text
 
 
 def _expand_command(raw: str, default_executable: str) -> list[str]:
@@ -635,16 +652,23 @@ def _invoke_agent_opencode_cli(
     cli_tools_mode = _normalize_cli_tools_mode(spec, options)
     timeout_s = spec.timeout_ms / 1000
     model = str(spec.model or "").strip()
-    cmd_base = [
-        *_expand_command(str(options.get("agent_cli_opencode_command", "")).strip(), "opencode"),
-        "run",
-        "--format",
-        "json",
-    ]
+    opencode_argv = _expand_command(str(options.get("agent_cli_opencode_command", "")).strip(), "opencode")
+    cmd_base = [*opencode_argv, "run", "--format", "json"]
+    variant = str(getattr(spec, 'variant', '') or '').strip()
+    variant_dropped = ""
+    variant_flag = bool(variant) and _opencode_run_takes_variant(tuple(opencode_argv))
+    if variant and not variant_flag:
+        # OpenCode 2 dropped `--variant`: the level is part of the model,
+        # `provider/model#variant`, so it needs a model to ride on.
+        if model and "#" not in model:
+            model = f"{model}#{variant}"
+        elif not model:
+            variant_dropped = variant
+            logging.getLogger(__name__).warning(f"Reasoning level {variant!r} not applied: this opencode takes it only as "
+                           "part of the model (provider/model#variant) and the agent names no model")
     if model:
         cmd_base.extend(["--model", model])
-    variant = str(getattr(spec, 'variant', '') or '').strip()
-    if variant:
+    if variant_flag:
         cmd_base.extend(["--variant", variant])
     configured_agent = str(options.get("agent_cli_opencode_agent", "")).strip()
     if configured_agent:
@@ -696,6 +720,8 @@ def _invoke_agent_opencode_cli(
             timeout_s=timeout_s,
             env=env,
         )
+        if variant_dropped:
+            debug_meta["opencodeVariantDropped"] = variant_dropped
     except FileNotFoundError as exc:
         err = RuntimeError("Agent transport 'opencode-cli' requires 'opencode' executable on PATH.")
         return (
@@ -1080,6 +1106,9 @@ def _invoke_agent_opencode_acp(
     opencode_like = connector.http_api if connector is not None else True
     session_model = chosen_model if (explicit_command or not opencode_like) else None
     session_mode = str(getattr(spec, "mode", "") or (connector.mode if connector else "") or "") or None
+    # The reasoning level goes to an agent that offers one as a session
+    # config option (OpenCode 2's `effort`); others log and leave it.
+    session_effort = str(getattr(spec, "variant", "") or "").strip() or None
     
     # Get working directory
     cwd = options.get("work_dir", ".")
@@ -1142,6 +1171,7 @@ def _invoke_agent_opencode_acp(
                 model=session_model,
                 mode=session_mode,
                 mcp_servers=mcp_servers,
+                effort=session_effort,
             )
         )
         if ask_server is not None:

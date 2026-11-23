@@ -25,7 +25,7 @@ class FakeClient:
         self.client = types.SimpleNamespace(response_text="", events=asyncio.Queue())
         self.last_session_response = None
 
-    async def configure_session(self, session_id, response, model=None, mode=None):
+    async def configure_session(self, session_id, response, model=None, mode=None, effort=None):
         self.calls.append(("configure", session_id, model, mode))
         return {}
 
