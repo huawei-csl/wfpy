@@ -13,7 +13,9 @@ All notable changes to wfpy are documented here. The format follows
   high, xhigh, max), matched by value then name. The level is looked up in
   the options the agent sends back after the model is set, since a model can
   bring its own levels. An agent that offers none logs it and runs at its
-  own level, as before.
+  own level, as before. Claude Code's connector offers one too
+  (`claude-agent-acp` 0.108.0: default, low, medium, high, xhigh, max), so a
+  level on a Claude Code agent, which was ignored, is now applied.
 
 ### Fixed
 - An `@agent` given no reasoning level had the text `"None"` as its level

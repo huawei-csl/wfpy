@@ -1125,7 +1125,8 @@ def _invoke_agent_opencode_acp(
     session_model = chosen_model if (explicit_command or not opencode_like) else None
     session_mode = str(getattr(spec, "mode", "") or (connector.mode if connector else "") or "") or None
     # The reasoning level goes to an agent that offers one as a session
-    # config option (OpenCode 2's `effort`); others log and leave it.
+    # config option (the `effort` of OpenCode 2, and of Claude Code's
+    # connector); others log and leave it.
     session_effort = str(getattr(spec, "variant", "") or "").strip() or None
     
     # Get working directory
