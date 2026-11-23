@@ -53,9 +53,10 @@ _DECORATOR_ARG_ALIASES = {
 def _decorator_arg_key(annotation_name: str, name: str) -> str:
     """The arg a decorator keyword names, whatever its spelling: wfpy's
     decorators take each parameter in snake_case and in camelCase
-    (``use_skill``, ``useSkill``), so both are one key."""
+    (``use_skill``, ``useSkill``), so both are one key. The decorator is
+    named with its module or without it (``wfpy.agent``, ``agent``)."""
     snake = re.sub(r"(?<=[a-z0-9])([A-Z])", r"_\1", name).lower()
-    return _DECORATOR_ARG_ALIASES.get((annotation_name, snake), snake)
+    return _DECORATOR_ARG_ALIASES.get((_annotation_leaf(annotation_name), snake), snake)
 
 
 def _lay_out_call_args(
@@ -76,9 +77,30 @@ def _lay_out_call_args(
     (``a,⏎b``), or before it in a call whose commas open the lines
     (``a⏎, b``). An arg that follows a removed one that opened a line takes
     its place on that line, and a break that has to be made (for a comment to
-    stay on its arg) indents the next arg as the call indents its args."""
+    stay on its arg) indents the next arg as the call indents its args.
+
+    A call with no arg takes its first ones on its line (``@agent()``). One
+    written over lines stays so: an arg per line, indented as the call's
+    comment lines are (four spaces with none), a comma after the last, and the
+    closing parenthesis on its line, where it was. A comment on the opening
+    line stays there, and the comment lines stay above the first arg."""
     if not original:
-        return [a.with_changes(comma=cst.MaybeSentinel.DEFAULT) for a, _ in merged], call.whitespace_before_args
+        inside = call.whitespace_before_args
+        if not merged or not isinstance(inside, cst.ParenthesizedWhitespace):
+            return [a.with_changes(comma=cst.MaybeSentinel.DEFAULT) for a, _ in merged], inside
+        indent = next(
+            (line.whitespace for line in reversed(inside.empty_lines)
+             if line.comment is not None and line.indent and line.whitespace.value),
+            cst.SimpleWhitespace("    "),
+        )
+        own_line = cst.ParenthesizedWhitespace(indent=True, last_line=indent)
+        closing = cst.ParenthesizedWhitespace(indent=inside.indent, last_line=inside.last_line)
+        return [
+            arg.with_changes(
+                comma=cst.Comma(whitespace_after=closing if j == len(merged) - 1 else own_line),
+                whitespace_after_arg=cst.SimpleWhitespace(""))
+            for j, (arg, _) in enumerate(merged)
+        ], inside.with_changes(indent=True, last_line=indent)
     last_index = len(original) - 1
     last = original[last_index]
 
@@ -355,6 +377,49 @@ def _decorator_name(dec: cst.Decorator) -> str | None:
     if isinstance(target, cst.Attribute):
         return target.attr.value
     return None
+
+
+def _annotation_leaf(name: str) -> str:
+    """`task` for an annotation named `task` or `wfpy.task`: the name
+    `_decorator_name` reads from a decorator, however the file writes it."""
+    return name.rpartition(".")[2]
+
+
+_Definition = cst.ClassDef | cst.FunctionDef
+
+
+class _DefinitionTransformer(cst.CSTTransformer):
+    """A transformer of what a decorator is written on: the classes and the
+    functions of a module alike, each given to `leave_definition`.
+
+    A function inside a class is not given. An edit names a definition and
+    no class, and two classes may each have a method of that name: the first
+    one met would be edited for the other."""
+
+    # How many classes the node being visited is inside of.
+    _class_depth = 0
+
+    def visit_ClassDef(self, node: cst.ClassDef) -> bool:
+        self._class_depth += 1
+        return True
+
+    def leave_ClassDef(
+        self, original_node: cst.ClassDef, updated_node: cst.ClassDef
+    ) -> cst.BaseStatement:
+        self._class_depth -= 1
+        return self.leave_definition(original_node, updated_node)
+
+    def leave_FunctionDef(
+        self, original_node: cst.FunctionDef, updated_node: cst.FunctionDef
+    ) -> cst.BaseStatement:
+        if self._class_depth:
+            return updated_node
+        return self.leave_definition(original_node, updated_node)
+
+    def leave_definition(
+        self, original_node: _Definition, updated_node: _Definition
+    ) -> _Definition:
+        return updated_node
 
 
 def _is_connect_call(node: cst.CSTNode) -> bool:
@@ -3476,6 +3541,12 @@ class RewriteEngine:
         ``argRemovals`` names args to take out of the decorator: a list of
         names. A name that is also in *argUpdates* is updated, not removed.
 
+        The decorator is the one of that name on the class or the function
+        named *entityType*, written ``@agent`` or ``@wfpy.agent``;
+        *annotationName* is given either way, and what is written keeps the
+        form the file uses. A method is not found: *entityType* names no
+        class, and two classes may each have a method of that name.
+
         A name is matched to the decorator's args whatever its spelling:
         ``useSkill`` is ``use_skill``, and on ``@agent`` ``reasoningEffort`` is
         ``variant``, as the decorator reads them. A replaced arg keeps the
@@ -3519,22 +3590,22 @@ class RewriteEngine:
             )
         removal_keys = {_decorator_arg_key(annotationName, k) for k in (argRemovals or [])} - set(updates_by_key)
 
-        class _MergeArgs(cst.CSTTransformer):
+        class _MergeArgs(_DefinitionTransformer):
             def __init__(self) -> None:
                 self.updated = False
+                # The decorator found, as the file has it.
+                self.written: cst.BaseExpression | None = None
 
-            def leave_ClassDef(self, original_node: cst.ClassDef, updated_node: cst.ClassDef) -> cst.ClassDef:
+            def leave_definition(
+                self, original_node: _Definition, updated_node: _Definition
+            ) -> _Definition:
                 if self.updated or original_node.name.value != entityType:
                     return updated_node
                 decorators = list(updated_node.decorators)
                 for idx, dec in enumerate(decorators):
-                    dec_name = None
-                    if isinstance(dec.decorator, cst.Name):
-                        dec_name = dec.decorator.value
-                    elif isinstance(dec.decorator, cst.Call) and isinstance(dec.decorator.func, cst.Name):
-                        dec_name = dec.decorator.func.value
-                    if dec_name != annotationName:
+                    if _decorator_name(dec) != _annotation_leaf(annotationName):
                         continue
+                    self.written = dec.decorator
 
                     call = dec.decorator
                     if not isinstance(call, cst.Call) and not parsed_updates:
@@ -3542,30 +3613,10 @@ class RewriteEngine:
                         self.updated = True
                         break
                     if not isinstance(call, cst.Call):
-                        # bare @agent with no parens → create a Call with the updates
-                        new_args = [
-                            cst.Arg(
-                                keyword=cst.Name(k),
-                                value=v,
-                                equal=cst.AssignEqual(
-                                    whitespace_before=cst.SimpleWhitespace(""),
-                                    whitespace_after=cst.SimpleWhitespace(""),
-                                ),
-                            )
-                            for k, v in parsed_updates.items()
-                        ]
-                        # Add trailing comma + newline formatting
-                        formatted = []
-                        for i, a in enumerate(new_args):
-                            comma = cst.Comma(whitespace_after=cst.ParenthesizedWhitespace(
-                                indent=True,
-                                last_line=cst.SimpleWhitespace("    "),
-                            )) if i < len(new_args) - 1 else cst.MaybeSentinel.DEFAULT
-                            formatted.append(a.with_changes(comma=comma))
-                        new_call = cst.Call(func=cst.Name(dec_name), args=formatted)
-                        decorators[idx] = cst.Decorator(decorator=new_call)
-                        self.updated = True
-                        break
+                        # A bare `@agent` is given its first args as `@agent()` is.
+                        # The decorator itself stays, with the comment on its line
+                        # and the comment lines above it.
+                        call = cst.Call(func=call)
 
                     # Merge into existing Call args
                     existing_args = list(call.args)
@@ -3610,7 +3661,9 @@ class RewriteEngine:
         if not transformer.updated:
             raise RewriteError(message=f"Definition not found for annotation merge: {entityType}")
         self._set_module(updated)
-        self._ensure_wfpy_decorator_import(cst.Name(annotationName))
+        if transformer.written is not None:
+            # As the file writes it: `@agent` needs the name bound, `@wfpy.agent` does not.
+            self._ensure_wfpy_decorator_import(transformer.written)
 
     def _ensure_wfpy_decorator_import(self, decorator: cst.BaseExpression) -> None:
         """A decorator the edit wrote that is one of wfpy's (`@tool`,
@@ -3631,23 +3684,22 @@ class RewriteEngine:
         entityType: str,
         annotationName: str,
     ) -> None:
-        class _RemoveAnnot(cst.CSTTransformer):
+        class _RemoveAnnot(_DefinitionTransformer):
             def __init__(self) -> None:
                 self.updated = False
 
-            def leave_ClassDef(self, original_node: cst.ClassDef, updated_node: cst.ClassDef) -> cst.ClassDef:
+            def leave_definition(
+                self, original_node: _Definition, updated_node: _Definition
+            ) -> _Definition:
                 if self.updated or original_node.name.value != entityType:
                     return updated_node
                 decorators = list(updated_node.decorators)
                 new_decorators: list[cst.Decorator] = []
                 removed = False
                 for dec in decorators:
-                    name = None
-                    if isinstance(dec.decorator, cst.Name):
-                        name = dec.decorator.value
-                    elif isinstance(dec.decorator, cst.Call) and isinstance(dec.decorator.func, cst.Name):
-                        name = dec.decorator.func.value
-                    if name == annotationName and not removed:
+                    # By its name, as the merge finds it: `@agent` or `@wfpy.agent`.
+                    name = _decorator_name(dec)
+                    if name == _annotation_leaf(annotationName) and not removed:
                         removed = True
                         continue
                     new_decorators.append(dec)
