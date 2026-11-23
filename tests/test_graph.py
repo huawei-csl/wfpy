@@ -289,8 +289,15 @@ class TestExportDefinitionAnnotations:
             class Ports:
                 In = Port[str](direction="in")
 
+        @agent(prompt="do x", variant="none")
+        class Lowest:
+            class Ports:
+                In = Port[str](direction="in")
+
         assert Written._wfpy_meta.agent_spec.variant == ""
         assert Camel._wfpy_meta.agent_spec.ask_permissions is True
+        # "none" is a level some models take, not the text str(None) gave.
+        assert Lowest._wfpy_meta.agent_spec.variant == "none"
 
     def test_output_validators_are_serialized_and_round_trip(self):
         import ast

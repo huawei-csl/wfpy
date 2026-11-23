@@ -10,7 +10,8 @@ All notable changes to wfpy are documented here. The format follows
 - An `@agent` given no reasoning level had the text `"None"` as its level
   (`str(None)`): `opencode-cli` was started with `--variant None`, and the
   graph export showed `reasoningEffort="None"`, which an IDE wrote back into
-  the file. No level is now no level, and so is a level written `"None"`.
+  the file. No level is now no level, and so is a level written `"None"`
+  (that spelling: `"none"` is a level some models take).
 - The graph export carries `connector`, `mode` and `askPermissions` when the
   decorator sets them, so an IDE shows an ACP agent's settings as written;
   `usePrompt` is false for a prompt the agent is told not to use
@@ -28,8 +29,9 @@ All notable changes to wfpy are documented here. The format follows
     indented as the others, the closing parenthesis where it was, and each
     comment, on an argument's line or on the lines above it, staying with
     that argument (or going with it when it is removed). A call left with no
-    argument is `@agent()`, not a bare `@agent`; a bare `@agent` with nothing
-    to add is left alone.
+    argument is `@agent()` (its comments kept on lines of their own), not a
+    bare `@agent`; a bare `@agent` with nothing to add is left alone. The
+    sidecar declares `features.mergeArgRemovals`.
 
 ## [1.3.2] — 2026-11-23
 

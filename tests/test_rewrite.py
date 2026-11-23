@@ -740,6 +740,34 @@ class A:
     assert '@agent(prompt="x"  # c\n)\nclass A:' in updated
 
 
+def test_merge_keeps_the_break_before_the_arg_after_a_removed_one(tmp_path: Path) -> None:
+    updated = _merged(tmp_path, '''
+from wfpy import agent
+
+
+@agent(prompt="x", model="m",
+       mode="plan")
+class A:
+    pass
+''', "A", {}, ["model"])
+    assert '@agent(prompt="x",\n       mode="plan")' in updated
+
+
+def test_merge_keeps_the_comments_when_it_removes_every_arg(tmp_path: Path) -> None:
+    updated = _merged(tmp_path, '''
+from wfpy import agent
+
+
+@agent(  # note
+    mode="plan",
+    # keep me
+)
+class A:
+    pass
+''', "A", {}, ["mode"])
+    assert "@agent(  # note\n    # keep me\n)\nclass A:" in updated
+
+
 def test_merge_moves_the_comment_lines_above_an_arg_with_it(tmp_path: Path) -> None:
     source = '''
 from wfpy import agent

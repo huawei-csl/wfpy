@@ -126,15 +126,30 @@ def _lay_out_call_args(
         following = merged[j + 1][1]
         if index is not None and following == index + 1 and isinstance(arg.comma, cst.Comma):
             laid.append(arg)
-        else:
-            laid.append(arg.with_changes(
-                comma=separator.with_changes(
-                    whitespace_after=_line_break(separator.whitespace_after, comment(index), above(following))),
-                whitespace_after_arg=cst.SimpleWhitespace("")))
+            continue
+        # Args removed between two kept ones: the next keeps the break it was
+        # written after; an appended arg takes the call's separator.
+        written = original[following - 1].comma if following is not None and index is not None else None
+        template = written if isinstance(written, cst.Comma) else separator
+        laid.append(arg.with_changes(
+            comma=template.with_changes(
+                whitespace_after=_line_break(template.whitespace_after, comment(index), above(following))),
+            whitespace_after_arg=cst.SimpleWhitespace("")))
 
     before = call.whitespace_before_args
     if not merged:
-        before = cst.SimpleWhitespace("")
+        # `@agent()`, or, with comments to keep (on the opening line, above
+        # the closing parenthesis), those on lines of their own.
+        opening = before.first_line if isinstance(before, cst.ParenthesizedWhitespace) else None
+        if (opening is None or opening.comment is None) and not closing_lines:
+            before = cst.SimpleWhitespace("")
+        else:
+            close = ending(last_index)
+            before = cst.ParenthesizedWhitespace(
+                first_line=opening if opening is not None else cst.TrailingWhitespace(),
+                empty_lines=closing_lines,
+                indent=close.indent if isinstance(close, cst.ParenthesizedWhitespace) else True,
+                last_line=close.last_line if isinstance(close, cst.ParenthesizedWhitespace) else cst.SimpleWhitespace(""))
     elif merged[0][1] != 0:
         lines = above(merged[0][1])
         if isinstance(before, cst.ParenthesizedWhitespace):

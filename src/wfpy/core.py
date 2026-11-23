@@ -1195,11 +1195,12 @@ def agent(
         parsed_validators = _parse_output_validators(output_validators, outputValidators)
 
         # Normalize variant/reasoningEffort: neither given is no level, and so is
-        # the text "None", which an IDE wrote back into files while wfpy
-        # exported `str(None)` as the level.
+        # the text "None" (that spelling only: "none" is a level some models
+        # take), which an IDE wrote back into files while wfpy exported
+        # `str(None)` as the level.
         given_variant = variant if reasoningEffort is None else reasoningEffort
         effective_variant = "" if given_variant is None else str(given_variant).strip()
-        if effective_variant.lower() == "none":
+        if effective_variant == "None":
             effective_variant = ""
 
         meta.agent_spec = AgentSpec(
