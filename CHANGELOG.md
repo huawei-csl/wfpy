@@ -33,7 +33,9 @@ All notable changes to wfpy are documented here. The format follows
   that the file does not configure is refused while it does (it may be
   one of those, edited). A `mcpServers` the file computes,
   or a server in it, is refused, not overwritten, and so is a write of
-  `mcpServerConfigs`. An MCP server's args are exported as text: one that
+  `mcpServerConfigs`. An agent written `@wfpy.agent(...)` is treated the
+  same, under either name the merge finds it by. An MCP server's args are
+  exported as text: one that
   is not a string (a `Path`) made the whole export fail.
 - An `@agent` given no reasoning level had the text `"None"` as its level
   (`str(None)`): `opencode-cli` was started with `--variant None`, and the

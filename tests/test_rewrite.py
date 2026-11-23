@@ -641,6 +641,48 @@ class McpAgent:
                               argUpdates={"mcpServers": '["github", "docs"]'})
 
 
+def test_merge_keeps_what_an_edited_mcp_server_spreads(tmp_path: Path) -> None:
+    """The file's dict is kept as laid out, so what it spreads stays in its place."""
+    source = '''
+from wfpy import agent
+
+
+@agent(prompt="do it", mcpServers=[{"name": "docs", **COMMON, "url": WEB_URL}])
+class McpAgent:
+    pass
+'''
+    updated = _merge_agent_args(tmp_path, source, argUpdates={
+        "mcpServers": '[{"name": "docs", "url": "http://new/mcp", "command": "uvx"}]'
+    })
+    assert 'mcpServers=[{"name": "docs", **COMMON, "url": "http://new/mcp", "command": "uvx"}]' in updated
+
+
+@pytest.mark.parametrize("annotation", ["agent", "wfpy.agent"])
+def test_merge_keeps_the_mcp_servers_of_an_agent_written_with_its_module(tmp_path: Path, annotation: str) -> None:
+    """The merge finds `@wfpy.agent(...)` under `agent` and under `wfpy.agent`.
+    Under the second name the servers were not looked at: the file's dict was
+    replaced by its name, and `mcpServerConfigs` was written."""
+    source = '''
+import wfpy
+
+
+@wfpy.agent(prompt="do it", mcpServers=["github", {"name": "docs", "url": WEB_URL}])
+class McpAgent:
+    pass
+'''
+
+    def merge(**args: Any) -> str:
+        engine = _engine_from_source(tmp_path, source)
+        engine.merge_definition_annotation_args(entityType="McpAgent", annotationName=annotation, **args)
+        engine.save()
+        return Path(engine.file_path).read_text(encoding="utf-8")
+
+    updated = merge(argUpdates={"mcpServers": '["docs", "github"]'})
+    assert '@wfpy.agent(prompt="do it", mcpServers=[{"name": "docs", "url": WEB_URL}, "github"])' in updated
+    with pytest.raises(RewriteError, match="write the servers in mcpServers"):
+        merge(argUpdates={"mcpServerConfigs": '[{"name": "docs", "url": "http://w/mcp", "envKeys": []}]'})
+
+
 def test_merge_reads_a_server_named_by_concatenated_strings(tmp_path: Path) -> None:
     source = _MCP_AGENT.replace('{"name": "docs",', '{"name": "do" "cs",')
     updated = _merge_agent_args(tmp_path, source, argUpdates={"mcpServers": '["docs"]'})

@@ -126,20 +126,22 @@ def _keep_configured_mcp_servers(
     drop_configs = False
     computed_configs: str | None = None
     for arg in existing_args:
-        key = _decorator_arg_key("agent", arg.keyword.value) if arg.keyword is not None else None
-        if key == "mcp_servers":
+        if arg.keyword is None:
+            continue
+        arg_key = _decorator_arg_key("agent", arg.keyword.value)
+        if arg_key == "mcp_servers":
             found = _configured_mcp_servers(arg.value)
             if found is None:
                 raise RewriteError(
                     message=f"@agent: the file computes {arg.keyword.value}, or a server in it; edit its MCP servers there"
                 )
-            for name, server in found.items():
-                configured.setdefault(name, server)
-        elif key == "mcp_server_configs":
+            for known, server in found.items():
+                configured.setdefault(known, server)
+        elif arg_key == "mcp_server_configs":
             found = _configured_mcp_servers(arg.value)
             if found is not None:
-                for name, server in found.items():
-                    configured.setdefault(name, server)
+                for known, server in found.items():
+                    configured.setdefault(known, server)
                 drop_configs = True
             else:
                 computed_configs = arg.keyword.value
@@ -150,15 +152,15 @@ def _keep_configured_mcp_servers(
     for element in update.elements:
         value = element.value if isinstance(element, cst.Element) else None
         if isinstance(value, cst.Dict) and _dict_entry(value, "envKeys") is not None:
-            entries = [e for e in value.elements if not (isinstance(e, cst.DictElement) and _literal_text(e.key) == "envKeys")]
-            if entries:
-                entries[-1] = entries[-1].with_changes(comma=cst.MaybeSentinel.DEFAULT)
-            value = value.with_changes(elements=entries)
+            rest = [e for e in value.elements if not (isinstance(e, cst.DictElement) and _literal_text(e.key) == "envKeys")]
+            if rest:
+                rest[-1] = rest[-1].with_changes(comma=cst.MaybeSentinel.DEFAULT)
+            value = value.with_changes(elements=rest)
             element = element.with_changes(value=value)
         name = _literal_text(value)
         if name is None and isinstance(value, cst.Dict):
-            entry = _dict_entry(value, "name")
-            name = _literal_text(entry.value) if entry is not None else None
+            named = _dict_entry(value, "name")
+            name = _literal_text(named.value) if named is not None else None
         source = configured.get(name) if name is not None else None
         if source is None and computed_configs is not None and isinstance(value, cst.Dict):
             raise RewriteError(
@@ -172,7 +174,7 @@ def _keep_configured_mcp_servers(
             given: dict[str, cst.DictElement] = {}
             for entry in value.elements:
                 key = _literal_text(entry.key) if isinstance(entry, cst.DictElement) else None
-                if key is not None:
+                if key is not None and isinstance(entry, cst.DictElement):
                     given[key] = entry
             entries: list[cst.BaseDictElement] = []
             for entry in source.elements:
@@ -3855,7 +3857,7 @@ class RewriteEngine:
                 message=f"@{annotationName}: argRemovals is a list of argument names, not {argRemovals!r}"
             )
         removal_keys = {_decorator_arg_key(annotationName, k) for k in (argRemovals or [])} - set(updates_by_key)
-        if annotationName == "agent" and "mcp_server_configs" in updates_by_key:
+        if leaf == "agent" and "mcp_server_configs" in updates_by_key:
             # The export's mcpServerConfigs is a copy for display (env named, not
             # given): the servers are written in mcpServers, where the file's are kept.
             raise RewriteError(
@@ -3894,7 +3896,7 @@ class RewriteEngine:
                     existing_args = list(call.args)
                     updates = updates_by_key
                     removals = removal_keys
-                    if annotationName == "agent" and "mcp_servers" in updates_by_key:
+                    if leaf == "agent" and "mcp_servers" in updates_by_key:
                         written, value = updates_by_key["mcp_servers"]
                         kept_value, drop_configs = _keep_configured_mcp_servers(value, existing_args)
                         updates = {**updates_by_key, "mcp_servers": (written, kept_value)}
