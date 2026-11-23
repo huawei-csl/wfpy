@@ -6,6 +6,13 @@ All notable changes to wfpy are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.3.2] — 2026-11-23
+
+One fix, to what decides that a port carries a file (#75), and a folder of
+advanced examples. The fix changes which ports are file ports: read its
+second paragraph before upgrading a graph whose token types are files by
+their name only.
+
 ### Added
 - Advanced examples (`examples/advanced/`): workflows that write workflows.
   An `@agent` emits a workflow file as a token on a `File` port, and a `@tool`
