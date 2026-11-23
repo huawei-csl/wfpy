@@ -24,14 +24,18 @@ All notable changes to wfpy are documented here. The format follows
     of the argument replaced is removed, and on `@agent` `reasoningEffort`
     is `variant`; an argument neither updated nor removed stays as written,
     and one argument given twice under two spellings is refused;
-  - takes `argRemovals`, the arguments to take out;
+  - takes `argRemovals`, the arguments to take out: a list of names, and
+    anything else is refused (a bare string would be read letter by
+    letter). A name given to update and to remove is updated;
   - lays appended arguments out as the call is written: one per line and
     indented as the others, the closing parenthesis where it was, and each
     comment, on an argument's line or on the lines above it, staying with
-    that argument (or going with it when it is removed). A call left with no
-    argument is `@agent()` (its comments kept on lines of their own), not a
-    bare `@agent`; a bare `@agent` with nothing to add is left alone. The
-    sidecar declares `features.mergeArgRemovals`.
+    that argument (or going with it when it is removed), in a call whose
+    commas open the lines as in one whose commas end them. The argument
+    after a removed one that opened a line takes its place there. A call
+    left with no argument is `@agent()` (its comments kept on lines of
+    their own), not a bare `@agent`; a bare `@agent` with nothing to add is
+    left alone. The sidecar declares `features.mergeArgRemovals`.
 
 ## [1.3.2] — 2026-11-23
 

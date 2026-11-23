@@ -864,6 +864,156 @@ class A:
     assert "@agent()\nclass A:" in updated
 
 
+def test_merge_keeps_the_place_of_a_line_whose_first_arg_is_removed(tmp_path: Path) -> None:
+    """The arg after the removed one stays on its line: it went to the
+    decorator's column when the line above ended with a comment, and up onto
+    that line when it did not."""
+    source = '''
+from wfpy import agent
+
+
+@agent(
+    prompt="x",{comment}
+    model="m", mode="plan",
+)
+class A:
+    pass
+'''
+    for comment in ("  # the task", ""):
+        updated = _merged(tmp_path, source.replace("{comment}", comment), "A", {}, ["model"])
+        assert f'@agent(\n    prompt="x",{comment}\n    mode="plan",\n)\nclass A:' in updated
+
+
+def test_merge_keeps_the_place_of_a_line_whose_first_arg_was_a_second_spelling(tmp_path: Path) -> None:
+    updated = _merged(tmp_path, '''
+from wfpy import agent
+
+
+@agent(
+    use_skill=True,  # which skill
+    useSkill=False, model="m",
+)
+class A:
+    pass
+''', "A", {"useSkill": "false"})
+    assert '@agent(\n    use_skill=False,  # which skill\n    model="m",\n)\nclass A:' in updated
+
+
+def test_merge_indents_an_arg_appended_after_a_comment_as_the_call_does(tmp_path: Path) -> None:
+    """The comment keeps its arg's line, so the appended arg opens a line: at
+    the indentation of the call's args, not at the decorator's column."""
+    updated = _merged(tmp_path, '''
+from wfpy import agent
+
+
+@agent(
+    prompt="x", model="m",
+    mode="plan",  # read only
+)
+class A:
+    pass
+''', "A", {"provider": '"p"'})
+    assert '    mode="plan",  # read only\n    provider="p",\n)\nclass A:' in updated
+
+    hanging = _merged(tmp_path, '''
+from wfpy import agent
+
+
+@agent(prompt="x", model="m",
+       mode="plan",  # read only
+)
+class A:
+    pass
+''', "A", {"provider": '"p"'})
+    assert '       mode="plan",  # read only\n       provider="p",\n)\nclass A:' in hanging
+
+    lone = _merged(tmp_path, '''
+from wfpy import agent
+
+
+@agent(prompt="x"  # the task
+)
+class A:
+    pass
+''', "A", {"model": '"m"'})
+    assert '@agent(prompt="x",  # the task\n    model="m"\n)\nclass A:' in lone
+
+
+LEADING_COMMAS = '''
+from wfpy import agent
+
+
+@agent(
+    prompt="x"  # the task
+    # which model
+    , model="m"  # the model
+    , mode="plan"  # read only
+)
+class A:
+    pass
+'''
+
+
+def test_merge_appends_to_a_call_whose_commas_open_the_lines(tmp_path: Path) -> None:
+    """Each comment is before the comma that follows its arg there: it stays
+    on its arg, and is not written again on the args that are appended."""
+    updated = _merged(tmp_path, LEADING_COMMAS, "A", {"provider": '"p"', "connector": '"claude"'})
+    assert (
+        '@agent(\n'
+        '    prompt="x"  # the task\n'
+        '    # which model\n'
+        '    , model="m"  # the model\n'
+        '    , mode="plan"  # read only\n'
+        '    , provider="p"\n'
+        '    , connector="claude"\n'
+        ')\nclass A:'
+    ) in updated
+
+
+def test_merge_removes_from_a_call_whose_commas_open_the_lines(tmp_path: Path) -> None:
+    """A removed arg takes its own comments, and no other arg's."""
+    middle = _merged(tmp_path, LEADING_COMMAS, "A", {}, ["model"])
+    assert '@agent(\n    prompt="x"  # the task\n    , mode="plan"  # read only\n)\nclass A:' in middle
+
+    last = _merged(tmp_path, LEADING_COMMAS, "A", {}, ["mode"])
+    assert (
+        '@agent(\n    prompt="x"  # the task\n    # which model\n    , model="m"  # the model\n)\nclass A:'
+    ) in last
+
+    first = _merged(tmp_path, LEADING_COMMAS, "A", {}, ["prompt"])
+    assert '@agent(\n    # which model\n    model="m"  # the model\n    , mode="plan"  # read only\n)\nclass A:' in first
+
+
+def test_merge_refuses_removals_that_are_not_a_list_of_names(tmp_path: Path) -> None:
+    """A bare string would be read letter by letter: "mode" took out `m` and `o`."""
+    source = '''
+from wfpy import agent
+
+
+@agent(prompt="x", mode="plan", m=1, o=2)
+class A:
+    pass
+'''
+    for removals in ("mode", ["mode", 3]):
+        engine = _engine_from_source(tmp_path, source)
+        with pytest.raises(RewriteError, match="list of argument names"):
+            engine.merge_definition_annotation_args(
+                entityType="A", annotationName="agent", argUpdates={}, argRemovals=removals)  # type: ignore[arg-type]
+        assert Path(engine.file_path).read_text(encoding="utf-8") == source
+
+
+def test_merge_updates_a_name_given_to_update_and_to_remove(tmp_path: Path) -> None:
+    updated = _merged(tmp_path, '''
+from wfpy import agent
+
+
+@agent(prompt="x", mode="plan")
+class A:
+    pass
+''', "A", {"mode": '"build"'}, ["mode"])
+    assert '@agent(prompt="x", mode="build")\nclass A:' in updated
+
+
 class TestCreateStreamblocksType:
     """The sidecar has to write a node the file can actually run.
 
