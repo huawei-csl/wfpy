@@ -217,19 +217,33 @@ def _line_break(
                                        last_line=cst.SimpleWhitespace(""))
 
 
-def _parse_user_expression(text: Any, what: str) -> cst.BaseExpression:
+def _parse_user_expression(text: Any, what: str, *, subscript: bool = False) -> cst.BaseExpression:
     """`text` parsed as a Python expression, or a refusal naming it.
 
     Everything the IDE hands over as source — a parameter's value, a port's
     type, an annotation's argument — goes through here, so a value that is
     not Python is told as that (`invalid_expression`) rather than surfacing
     as the parser's crash.
+
+    The result is one value where it is written (an argument, the value of
+    a dict's key, a decorator), whatever the text. A tuple written without
+    its parentheses (`"a", "b"`, `"a",`) gets them, for `k="a", "b"` is two
+    arguments; a text that is not one value with them either (`*rest`) is
+    refused as one that is not Python. With `subscript`, the text is what
+    `Port[...]` holds, where a tuple needs no parentheses: it is returned
+    as parsed.
     """
     source = str(text if text is not None else "").strip()
     try:
         if not source:
             raise ValueError("empty")
-        return cst.parse_expression(source)
+        value = cst.parse_expression(source)
+        if not subscript:
+            if isinstance(value, cst.Tuple) and not value.lpar:
+                value = value.with_changes(lpar=[cst.LeftParen()], rpar=[cst.RightParen()])
+            if not _is_one_argument(value):
+                raise ValueError("not one value")
+        return value
     except (cst.ParserSyntaxError, ValueError) as exc:
         detail = str(exc).strip().splitlines()
         raise RewriteError(
@@ -240,6 +254,22 @@ def _parse_user_expression(text: Any, what: str) -> cst.BaseExpression:
                 **({"details": detail[0]} if detail and detail[0] != "empty" else {}),
             },
         ) from None
+
+
+def _is_one_argument(value: cst.BaseExpression) -> bool:
+    """Whether `value`, written as a keyword argument's, reads back as that
+    one argument: not as two (`k="a", "b"`), not with a star, and not as no
+    Python at all (`k=*y`). What a keyword argument's value may be, a
+    positional argument, a dict's value and a decorator may be too."""
+    written = cst.Module([]).code_for_node(cst.Call(func=cst.Name("f"), args=[_keyword_arg("k", value)]))
+    try:
+        call = cst.parse_expression(written)
+    except cst.ParserSyntaxError:
+        return False
+    if not (isinstance(call, cst.Call) and isinstance(call.func, cst.Name) and len(call.args) == 1):
+        return False
+    arg = call.args[0]
+    return arg.keyword is not None and arg.keyword.value == "k" and not arg.star
 
 
 def _free_names(expr: cst.BaseExpression) -> list[str]:
@@ -3499,6 +3529,13 @@ class RewriteEngine:
         # Parse each update value as a CST expression
         parsed_updates: dict[str, cst.BaseExpression] = {}
         for name, expr_str in argUpdates.items():
+            if not str(name).isidentifier() or keyword.iskeyword(str(name)):
+                # `class=1` does not parse, whatever the decorator takes.
+                raise RewriteError(
+                    message=f"@{annotationName}: an argument cannot be named {str(name)!r}"
+                    + (" (a Python keyword)" if keyword.iskeyword(str(name)) else ""),
+                    diagnostic={"code": "invalid_argument_name", "annotation": annotationName, "argument": str(name)},
+                )
             parsed = _parse_user_expression(expr_str, f"the value of {name} on @{annotationName}")
             parsed = _normalize_python_literal_name(parsed)
             parsed_updates[name] = parsed
@@ -4347,7 +4384,7 @@ class RewriteEngine:
         portType: str,
     ) -> None:
         self._ensure_identifier(portName)
-        port_type = _parse_user_expression(portType, f"the type of port '{portName}'")
+        port_type = _parse_user_expression(portType, f"the type of port '{portName}'", subscript=True)
         direction = _PORT_DIRECTIONS.get(str(portDirection), None)
         if direction is None:
             raise RewriteError(message=f"Invalid port direction: {portDirection}", diagnostic={"code": "invalid_direction"})
@@ -4665,7 +4702,7 @@ class RewriteEngine:
         name = str(portName if portName is not None else port_name or "")
         value = str(newValue if newValue is not None else new_value or "")
         direction = str(portDirection if portDirection is not None else port_direction or "")
-        _parse_user_expression(value, f"the type of port '{name}'")
+        _parse_user_expression(value, f"the type of port '{name}'", subscript=True)
         cls = self._require_class(entity)
         if name not in self._class_port_names(cls):
             raise RewriteError(
@@ -5024,7 +5061,7 @@ class _PortTypeTransformer(_PortBaseTransformer):
         if not isinstance(func, cst.Subscript) or _dotted_name(func.value).rsplit(".", 1)[-1] != "Port":
             return None
         new_func = func.with_changes(
-            slice=[cst.SubscriptElement(slice=cst.Index(value=_parse_user_expression(self.new_type, f"the type of port '{self.port_name}'")))]
+            slice=[cst.SubscriptElement(slice=cst.Index(value=_parse_user_expression(self.new_type, f"the type of port '{self.port_name}'", subscript=True)))]
         )
         self.found = True
         return node.with_changes(func=new_func) if isinstance(node, cst.Call) else new_func

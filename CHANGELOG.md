@@ -63,6 +63,23 @@ All notable changes to wfpy are documented here. The format follows
   model, `provider/model#variant`. An agent that names a level but no model,
   or a model that names another level, gets a warning and
   `opencodeVariantDropped` in its debug record.
+- An edit that writes a text an IDE gives as a value wrote any Python
+  expression as given, also one that is not one value where it is written
+  (#81). `mcpServers="a", "b"` and `path=*y` left a file that no longer
+  parsed, with the sidecar answering `ok`; `wfpy.loop("a", "b")` and
+  `model="m", *rest` parsed, with an argument nobody asked for. A tuple
+  written without its parentheses is now written with them
+  (`mcpServers=("a", "b")`, and `("a",)` for `"a",`), and a text that is not
+  one value with them either (`*y`) is refused with `invalid_expression`.
+  This holds for a node's parameter (`updateNodeParameter`, the
+  `expressions` of `createNode`), a decorator's argument
+  (`mergeDefinitionAnnotationArgs`) and the decorator itself
+  (`updateDefinitionAnnotation`), the two ends of a `connect`, the condition
+  of an `if_`, what a `loop` iterates over, and the type of a workflow's
+  port (`createPort`). The type of a class's port, inside `Port[...]`, is
+  written as before: a tuple needs no parentheses there. The merge also
+  refuses an argument whose name is a keyword or not an identifier
+  (`class=1`), with `invalid_argument_name`.
 
 ## [1.3.2] — 2026-11-23
 
