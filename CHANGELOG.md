@@ -80,6 +80,19 @@ All notable changes to wfpy are documented here. The format follows
   written as before: a tuple needs no parentheses there. The merge also
   refuses an argument whose name is a keyword or not an identifier
   (`class=1`), with `invalid_argument_name`.
+- Merging arguments into a decorator refuses an argument that one of wfpy's
+  own decorators does not take (#85), with `unknown_argument` and a message
+  that names the argument and the decorator. The graph export lists
+  `useLsp`, `useMcp` and `lspServerConfigs` among an `@agent`'s arguments,
+  for an IDE to show, and the merge wrote any name it was given: sent back,
+  each left a file that failed as it was imported (`agent() got an
+  unexpected keyword argument`). The names a decorator takes are read from
+  its signature, in either spelling it takes. A decorator of the name that
+  the file defines, or imports from elsewhere, is not asked, nor would one
+  that takes `**kwargs` be. A name in `argRemovals` is not asked either:
+  taking out an argument the decorator refuses repairs the file. The export
+  is unchanged, and still does not say which of its entries are for display
+  only.
 
 ## [1.3.2] — 2026-11-23
 

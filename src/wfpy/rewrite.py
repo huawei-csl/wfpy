@@ -514,6 +514,30 @@ def _block_bindings(body: Sequence[cst.BaseStatement]) -> dict[str, tuple[str, c
     return names
 
 
+def _imports_from_wfpy(stmt: cst.CSTNode, name: str) -> bool:
+    """Whether `stmt` is a `from wfpy import name`, under that name."""
+    if not isinstance(stmt, cst.SimpleStatementLine):
+        return False
+    for small in stmt.body:
+        if (
+            isinstance(small, cst.ImportFrom)
+            and not small.relative
+            and small.module is not None
+            and _dotted_name(small.module) == "wfpy"
+            and not isinstance(small.names, cst.ImportStar)
+        ):
+            for alias in small.names:
+                bound = alias.asname.name if alias.asname else alias.name
+                if (
+                    isinstance(alias.name, cst.Name)
+                    and alias.name.value == name
+                    and isinstance(bound, cst.Name)
+                    and bound.value == name
+                ):
+                    return True
+    return False
+
+
 _EXTERNAL_EXPORTS: dict[str, frozenset[str] | None] = {}
 
 
@@ -3527,6 +3551,7 @@ class RewriteEngine:
             return value
 
         # Parse each update value as a CST expression
+        taken = self._wfpy_decorator_keywords(annotationName)
         parsed_updates: dict[str, cst.BaseExpression] = {}
         for name, expr_str in argUpdates.items():
             if not str(name).isidentifier() or keyword.iskeyword(str(name)):
@@ -3535,6 +3560,13 @@ class RewriteEngine:
                     message=f"@{annotationName}: an argument cannot be named {str(name)!r}"
                     + (" (a Python keyword)" if keyword.iskeyword(str(name)) else ""),
                     diagnostic={"code": "invalid_argument_name", "annotation": annotationName, "argument": str(name)},
+                )
+            if taken is not None and str(name) not in taken:
+                # The file would fail as it is imported (TypeError). A name
+                # to remove is not checked: taking it out is the repair.
+                raise RewriteError(
+                    message=f"@{annotationName}: wfpy's {annotationName}() takes no argument {str(name)!r}",
+                    diagnostic={"code": "unknown_argument", "annotation": annotationName, "argument": str(name)},
                 )
             parsed = _parse_user_expression(expr_str, f"the value of {name} on @{annotationName}")
             parsed = _normalize_python_literal_name(parsed)
@@ -3661,6 +3693,40 @@ class RewriteEngine:
         name = target.value
         if name in getattr(wfpy, "__all__", ()) and not self._binds(name):
             self._set_module(self._ensure_import(self.module, "wfpy", [name]))
+
+    def _wfpy_decorator_keywords(self, name: str) -> frozenset[str] | None:
+        """The names `@name(...)` takes by keyword, read from its signature,
+        when `name` is one of wfpy's decorators and is wfpy's at the top
+        level of this file: imported from wfpy, or bound by nothing (an edit
+        then imports it from wfpy, see `_ensure_wfpy_decorator_import`).
+        None where any name may be given: a `name` this file defines or
+        takes from elsewhere, which may take what wfpy's does not, and a
+        decorator that takes `**kwargs`."""
+        import inspect
+
+        import wfpy
+
+        if name not in getattr(wfpy, "__all__", ()):
+            return None
+        for stmt in self.module.body:
+            bound = _block_bindings([stmt]).get(name)
+            if bound is not None and not (bound[0] == "import" and _imports_from_wfpy(bound[1], name)):
+                return None
+        for star in self._star_imports():
+            from_wfpy = not star.relative and star.module is not None and _dotted_name(star.module) == "wfpy"
+            if not from_wfpy and self._star_binds(star, name):
+                return None
+        try:
+            parameters = list(inspect.signature(getattr(wfpy, name)).parameters.values())
+        except (TypeError, ValueError):
+            return None
+        if any(parameter.kind is parameter.VAR_KEYWORD for parameter in parameters):
+            return None
+        return frozenset(
+            parameter.name
+            for parameter in parameters
+            if parameter.kind in (parameter.POSITIONAL_OR_KEYWORD, parameter.KEYWORD_ONLY)
+        )
 
     def remove_definition_annotation(
         self,

@@ -4,8 +4,10 @@ The text an IDE gives as a value is written where one value stands: an
 argument, the value of a dict's key, a decorator. A text that is a Python
 expression but not one value there (`"a", "b"` is a tuple, and as an
 argument it is two) was written as given, and the file no longer parsed, or
-the call had an argument nobody asked for. Each test sends the request the
-IDE sends and reads the file the sidecar wrote.
+the call had an argument nobody asked for. The merge of a decorator's
+arguments wrote any name as well, one that wfpy's decorator refuses
+included: that file parsed, and failed as it was imported. Each test sends
+the request the IDE sends and reads the file the sidecar wrote.
 """
 
 from __future__ import annotations
@@ -385,3 +387,156 @@ def test_a_port_type_is_one_value_in_a_dict_and_a_tuple_in_a_subscript(tmp_path:
     )
     assert answer["status"] == "ok", answer
     assert _added(text) == ['        In = Port[str, int](direction="in")']
+
+
+# ── an argument the decorator does not take ────────────────────────────
+
+HELPER = """
+@agent(prompt="x")
+class Helper:
+    pass
+"""
+
+
+def _merge_into(
+    tmp_path: Path, source: str, name: str = "agent", **args: object
+) -> tuple[dict, str]:
+    return _edited(
+        tmp_path,
+        "mergeDefinitionAnnotationArgs",
+        source,
+        entityType="Helper",
+        annotationName=name,
+        **args,
+    )
+
+
+@pytest.mark.parametrize("name", ["useLsp", "useMcp", "lspServerConfigs"])
+def test_merge_refuses_a_name_the_export_shows_and_agent_does_not_take(
+    tmp_path: Path, name: str
+) -> None:
+    """The graph export lists these among an agent's arguments, for an IDE
+    to show. Written back, the file fails as it is imported: `agent() got an
+    unexpected keyword argument`."""
+    answer, text = _merge(tmp_path, {name: "True"})
+    assert answer["status"] == "error", answer
+    assert answer["diagnostic"] == {
+        "code": "unknown_argument",
+        "annotation": "agent",
+        "argument": name,
+    }
+    assert answer["message"] == f"@agent: wfpy's agent() takes no argument {name!r}"
+    assert text == FLOW
+
+
+def test_merge_takes_a_name_in_either_spelling_and_in_no_other(tmp_path: Path) -> None:
+    source = "from wfpy import agent\n" + HELPER
+    for name in ("use_skill", "useSkill", "mcpServerConfigs", "reasoningEffort"):
+        answer, text = _merge_into(tmp_path, source, argUpdates={name: "None"})
+        assert answer["status"] == "ok", answer
+        assert _added(text, source) == [f'@agent(prompt="x", {name}=None)']
+    # Neither spelling: `agent()` takes `variant` and `reasoningEffort`.
+    answer, text = _merge_into(tmp_path, source, argUpdates={"reasoning_effort": '"high"'})
+    assert answer["diagnostic"].get("code") == "unknown_argument", answer
+    assert text == source
+
+
+def test_merge_asks_only_a_decorator_that_is_wfpys(tmp_path: Path) -> None:
+    """`agent` is wfpy's where the file imports it from wfpy, or binds it not
+    at all (the edit then imports it). One the file defines, or takes from
+    elsewhere, may take what wfpy's does not."""
+    (tmp_path / "mylib.py").write_text(
+        "def agent(**settings):\n    return lambda cls: cls\n", encoding="utf-8"
+    )
+    wfpys = [
+        "from wfpy import agent\n",
+        "from wfpy import Port, agent as agent\n",
+        "from wfpy import *\n",
+        "",
+        "try:\n    from wfpy import agent\nexcept ImportError:\n    agent = None\n",
+    ]
+    for head in wfpys:
+        answer, text = _merge_into(tmp_path, head + HELPER, argUpdates={"useMcp": "True"})
+        assert answer["diagnostic"].get("code") == "unknown_argument", (head, answer)
+        assert text == head + HELPER
+    its_own = [
+        "def agent(**settings):\n    return lambda cls: cls\n",
+        "from mylib import agent\n",
+        "from mylib import *\n",
+        "from wfpy import *\nfrom mylib import *\n",
+        "from wfpy import agent\n\nagent = print\n",
+        "from wfpy import tool as agent\n",
+    ]
+    for head in its_own:
+        answer, text = _merge_into(tmp_path, head + HELPER, argUpdates={"useMcp": "True"})
+        assert answer["status"] == "ok", (head, answer)
+        assert _added(text, head + HELPER) == ['@agent(prompt="x", useMcp=True)']
+
+
+def test_merge_reads_the_signature_the_decorator_has(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Not a list kept beside it: a parameter `agent()` gets is taken from
+    then on, and a decorator that takes `**kwargs` takes any name."""
+    import wfpy
+
+    source = "from wfpy import agent\n" + HELPER
+    answer, text = _merge_into(tmp_path, source, argUpdates={"budget": "3"})
+    assert answer["diagnostic"].get("code") == "unknown_argument", answer
+    assert text == source
+
+    def with_budget(cls: type | None = None, *, prompt: str = "", budget: int = 0) -> object:
+        return cls
+
+    monkeypatch.setattr(wfpy, "agent", with_budget)
+    answer, text = _merge_into(tmp_path, source, argUpdates={"budget": "3"})
+    assert answer["status"] == "ok", answer
+    assert _added(text, source) == ['@agent(prompt="x", budget=3)']
+    answer, text = _merge_into(tmp_path, source, argUpdates={"model": '"m"'})
+    assert answer["diagnostic"].get("code") == "unknown_argument", answer
+
+    def with_any(cls: type | None = None, **settings: object) -> object:
+        return cls
+
+    monkeypatch.setattr(wfpy, "agent", with_any)
+    answer, text = _merge_into(tmp_path, source, argUpdates={"anything": "3"})
+    assert answer["status"] == "ok", answer
+    assert _added(text, source) == ['@agent(prompt="x", anything=3)']
+
+
+def test_merge_takes_out_an_argument_the_decorator_refuses(tmp_path: Path) -> None:
+    """A file that has one fails already. Giving it a new value keeps it
+    failing; taking it out is the repair, so a name to remove is not checked."""
+    source = "from wfpy import agent\n" + HELPER.replace('prompt="x"', 'prompt="x", useMcp=True')
+    answer, text = _merge_into(tmp_path, source, argUpdates={"useMcp": "False"})
+    assert answer["diagnostic"].get("code") == "unknown_argument", answer
+    assert text == source
+
+    answer, text = _merge_into(
+        tmp_path, source, argUpdates={"model": '"m"'}, argRemovals=["useMcp"]
+    )
+    assert answer["status"] == "ok", answer
+    assert _added(text, source) == ['@agent(prompt="x", model="m")']
+
+
+@pytest.mark.parametrize(
+    ("decorator", "name"),
+    [
+        ('tool(cmd="x")', "timeout_ms"),  # `timeout`
+        ("viewer", "view_type"),  # `viewType`
+        ('context(read=["a"])', "scope"),
+        ("task", "prompt"),  # takes the class, and nothing else
+    ],
+)
+def test_merge_asks_each_of_wfpys_decorators(tmp_path: Path, decorator: str, name: str) -> None:
+    called = decorator.partition("(")[0]
+    source = f"from wfpy import {called}\n\n\n@{decorator}\nclass Helper:\n    pass\n"
+    answer, text = _merge_into(tmp_path, source, called, argUpdates={name: "1"})
+    assert answer["status"] == "error", answer
+    assert answer["diagnostic"] == {
+        "code": "unknown_argument",
+        "annotation": called,
+        "argument": name,
+    }
+    assert answer["message"] == f"@{called}: wfpy's {called}() takes no argument {name!r}"
+    assert text == source
