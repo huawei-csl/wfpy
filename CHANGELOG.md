@@ -80,6 +80,69 @@ All notable changes to wfpy are documented here. The format follows
   model, `provider/model#variant`. An agent that names a level but no model,
   or a model that names another level, gets a warning and
   `opencodeVariantDropped` in its debug record.
+- A decorator written without parentheses keeps its comments when a merge
+  (`mergeDefinitionAnnotationArgs`) gives it its first argument (#82). The
+  merge wrote a new decorator in place of `@agent  # note`, and the comment
+  on its line and the comment lines above it were lost. The arguments now
+  go into the decorator that is there, laid out as in an empty `@agent()`:
+  on one line, where two arguments given to a bare `@agent` were written
+  one per line.
+- The merge finds a decorator written with its module, and a decorator on a
+  function (#83). `@wfpy.agent(...)` on a class, and `@workflow(...)` or
+  `@config(...)` on a `def`, answered `Definition not found for annotation
+  merge`. A decorator is now matched by its name, with `annotationName`
+  given as `agent` or as `wfpy.agent`, on the class or the function that
+  `entityType` names. What is written keeps the form the file uses, and a
+  file that writes `@wfpy.agent` is not given a `from wfpy import agent`.
+  `removeDefinitionAnnotation` finds a decorator the same way. A method is
+  not found by either: `entityType` names no class, and two classes may
+  each have a method of that name. `updateDefinitionAnnotation` is not
+  changed: it matches a decorator written as a bare name on a class.
+- An empty decorator call written over lines (`@agent(` and `)` on two
+  lines) gets its first arguments one per line (#84). The first argument
+  was written at the decorator's column, with the closing parenthesis right
+  after it. Each argument is now on a line of its own, indented as the
+  call's comment lines are (four spaces when it has none), with a comma
+  after the last, and the closing parenthesis stays on its line. A comment
+  on the opening line stays there, and comment lines inside the call stay
+  above the first argument.
+- An edit that writes a text an IDE gives as a value wrote any Python
+  expression as given, also one that is not one value where it is written
+  (#81). `mcpServers="a", "b"` and `path=*y` left a file that no longer
+  parsed, with the sidecar answering `ok`; `wfpy.loop("a", "b")` and
+  `model="m", *rest` parsed, with an argument nobody asked for. A tuple
+  written without its parentheses is now written with them
+  (`mcpServers=("a", "b")`, and `("a",)` for `"a",`), and a text that is not
+  one value with them either (`*y`) is refused with `invalid_expression`.
+  This holds for a node's parameter (`updateNodeParameter`, the
+  `expressions` of `createNode`), a decorator's argument
+  (`mergeDefinitionAnnotationArgs`) and the decorator itself
+  (`updateDefinitionAnnotation`), the two ends of a `connect`, the condition
+  of an `if_`, what a `loop` iterates over, and the type of a workflow's
+  port (`createPort`). The type of a class's port, inside `Port[...]`, is
+  written as before: a tuple needs no parentheses there. The merge also
+  refuses an argument whose name is a keyword or not an identifier
+  (`class=1`), with `invalid_argument_name`.
+- Merging arguments into a decorator refuses an argument that one of wfpy's
+  own decorators does not take (#85), with `unknown_argument` and a message
+  that names the argument and the decorator. The graph export lists
+  `useLsp`, `useMcp` and `lspServerConfigs` among an `@agent`'s arguments,
+  for an IDE to show, and the merge wrote any name it was given: sent back,
+  each left a file that failed as it was imported (`agent() got an
+  unexpected keyword argument`). The names a decorator takes are read from
+  its signature. A name that is another spelling of an argument the
+  decorator takes is that argument: the export names `@tool`'s
+  `inherit_stdio` `inheritStdio`, and a new argument given so was written
+  as given, which `tool()` refuses. It is now written `inherit_stdio`; an
+  argument in the file keeps its spelling, unless the decorator refuses
+  that one. The decorator is asked as the file writes it: `@agent` where
+  the file imports it from wfpy or binds it not at all, `@wfpy.agent`
+  where `wfpy` is the module (`import wfpy`, `import wfpy as wf`). One
+  that the file defines, or takes from elsewhere (`@mylib.agent`), is not
+  asked, nor would one that takes `**kwargs` be. A name in `argRemovals`
+  is not asked either: taking out an argument the decorator refuses
+  repairs the file. The export is unchanged, and still does not say which
+  of its entries are for display only.
 
 ## [1.3.2] — 2026-11-23
 

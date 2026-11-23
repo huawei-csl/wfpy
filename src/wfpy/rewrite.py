@@ -53,9 +53,10 @@ _DECORATOR_ARG_ALIASES = {
 def _decorator_arg_key(annotation_name: str, name: str) -> str:
     """The arg a decorator keyword names, whatever its spelling: wfpy's
     decorators take each parameter in snake_case and in camelCase
-    (``use_skill``, ``useSkill``), so both are one key."""
+    (``use_skill``, ``useSkill``), so both are one key. The decorator is
+    named with its module or without it (``wfpy.agent``, ``agent``)."""
     snake = re.sub(r"(?<=[a-z0-9])([A-Z])", r"_\1", name).lower()
-    return _DECORATOR_ARG_ALIASES.get((annotation_name, snake), snake)
+    return _DECORATOR_ARG_ALIASES.get((_annotation_leaf(annotation_name), snake), snake)
 
 
 def _literal_text(node: cst.BaseExpression | None) -> str | None:
@@ -207,9 +208,30 @@ def _lay_out_call_args(
     (``a,⏎b``), or before it in a call whose commas open the lines
     (``a⏎, b``). An arg that follows a removed one that opened a line takes
     its place on that line, and a break that has to be made (for a comment to
-    stay on its arg) indents the next arg as the call indents its args."""
+    stay on its arg) indents the next arg as the call indents its args.
+
+    A call with no arg takes its first ones on its line (``@agent()``). One
+    written over lines stays so: an arg per line, indented as the call's
+    comment lines are (four spaces with none), a comma after the last, and the
+    closing parenthesis on its line, where it was. A comment on the opening
+    line stays there, and the comment lines stay above the first arg."""
     if not original:
-        return [a.with_changes(comma=cst.MaybeSentinel.DEFAULT) for a, _ in merged], call.whitespace_before_args
+        inside = call.whitespace_before_args
+        if not merged or not isinstance(inside, cst.ParenthesizedWhitespace):
+            return [a.with_changes(comma=cst.MaybeSentinel.DEFAULT) for a, _ in merged], inside
+        indent = next(
+            (line.whitespace for line in reversed(inside.empty_lines)
+             if line.comment is not None and line.indent and line.whitespace.value),
+            cst.SimpleWhitespace("    "),
+        )
+        own_line = cst.ParenthesizedWhitespace(indent=True, last_line=indent)
+        closing = cst.ParenthesizedWhitespace(indent=inside.indent, last_line=inside.last_line)
+        return [
+            arg.with_changes(
+                comma=cst.Comma(whitespace_after=closing if j == len(merged) - 1 else own_line),
+                whitespace_after_arg=cst.SimpleWhitespace(""))
+            for j, (arg, _) in enumerate(merged)
+        ], inside.with_changes(indent=True, last_line=indent)
     last_index = len(original) - 1
     last = original[last_index]
 
@@ -348,19 +370,33 @@ def _line_break(
                                        last_line=cst.SimpleWhitespace(""))
 
 
-def _parse_user_expression(text: Any, what: str) -> cst.BaseExpression:
+def _parse_user_expression(text: Any, what: str, *, subscript: bool = False) -> cst.BaseExpression:
     """`text` parsed as a Python expression, or a refusal naming it.
 
     Everything the IDE hands over as source — a parameter's value, a port's
     type, an annotation's argument — goes through here, so a value that is
     not Python is told as that (`invalid_expression`) rather than surfacing
     as the parser's crash.
+
+    The result is one value where it is written (an argument, the value of
+    a dict's key, a decorator), whatever the text. A tuple written without
+    its parentheses (`"a", "b"`, `"a",`) gets them, for `k="a", "b"` is two
+    arguments; a text that is not one value with them either (`*rest`) is
+    refused as one that is not Python. With `subscript`, the text is what
+    `Port[...]` holds, where a tuple needs no parentheses: it is returned
+    as parsed.
     """
     source = str(text if text is not None else "").strip()
     try:
         if not source:
             raise ValueError("empty")
-        return cst.parse_expression(source)
+        value = cst.parse_expression(source)
+        if not subscript:
+            if isinstance(value, cst.Tuple) and not value.lpar:
+                value = value.with_changes(lpar=[cst.LeftParen()], rpar=[cst.RightParen()])
+            if not _is_one_argument(value):
+                raise ValueError("not one value")
+        return value
     except (cst.ParserSyntaxError, ValueError) as exc:
         detail = str(exc).strip().splitlines()
         raise RewriteError(
@@ -371,6 +407,22 @@ def _parse_user_expression(text: Any, what: str) -> cst.BaseExpression:
                 **({"details": detail[0]} if detail and detail[0] != "empty" else {}),
             },
         ) from None
+
+
+def _is_one_argument(value: cst.BaseExpression) -> bool:
+    """Whether `value`, written as a keyword argument's, reads back as that
+    one argument: not as two (`k="a", "b"`), not with a star, and not as no
+    Python at all (`k=*y`). What a keyword argument's value may be, a
+    positional argument, a dict's value and a decorator may be too."""
+    written = cst.Module([]).code_for_node(cst.Call(func=cst.Name("f"), args=[_keyword_arg("k", value)]))
+    try:
+        call = cst.parse_expression(written)
+    except cst.ParserSyntaxError:
+        return False
+    if not (isinstance(call, cst.Call) and isinstance(call.func, cst.Name) and len(call.args) == 1):
+        return False
+    arg = call.args[0]
+    return arg.keyword is not None and arg.keyword.value == "k" and not arg.star
 
 
 def _free_names(expr: cst.BaseExpression) -> list[str]:
@@ -486,6 +538,69 @@ def _decorator_name(dec: cst.Decorator) -> str | None:
     if isinstance(target, cst.Attribute):
         return target.attr.value
     return None
+
+
+def _annotation_leaf(name: str) -> str:
+    """`task` for an annotation named `task` or `wfpy.task`: the name
+    `_decorator_name` reads from a decorator, however the file writes it."""
+    return name.rpartition(".")[2]
+
+
+_Definition = cst.ClassDef | cst.FunctionDef
+
+
+class _DefinitionTransformer(cst.CSTTransformer):
+    """A transformer of what a decorator is written on: the classes and the
+    functions of a module alike, each given to `leave_definition`.
+
+    A function inside a class is not given. An edit names a definition and
+    no class, and two classes may each have a method of that name: the first
+    one met would be edited for the other."""
+
+    # How many classes the node being visited is inside of.
+    _class_depth = 0
+
+    def visit_ClassDef(self, node: cst.ClassDef) -> bool:
+        self._class_depth += 1
+        return True
+
+    def leave_ClassDef(
+        self, original_node: cst.ClassDef, updated_node: cst.ClassDef
+    ) -> cst.BaseStatement:
+        self._class_depth -= 1
+        return self.leave_definition(original_node, updated_node)
+
+    def leave_FunctionDef(
+        self, original_node: cst.FunctionDef, updated_node: cst.FunctionDef
+    ) -> cst.BaseStatement:
+        if self._class_depth:
+            return updated_node
+        return self.leave_definition(original_node, updated_node)
+
+    def leave_definition(
+        self, original_node: _Definition, updated_node: _Definition
+    ) -> _Definition:
+        return updated_node
+
+
+class _FindDecorator(_DefinitionTransformer):
+    """The decorator of one name on the definition of one name, found as
+    the merge and the removal find it. Nothing is changed."""
+
+    def __init__(self, entity: str, leaf: str) -> None:
+        super().__init__()
+        self.entity = entity
+        self.leaf = leaf
+        self.found: cst.Decorator | None = None
+
+    def leave_definition(
+        self, original_node: _Definition, updated_node: _Definition
+    ) -> _Definition:
+        if self.found is None and original_node.name.value == self.entity:
+            self.found = next(
+                (dec for dec in original_node.decorators if _decorator_name(dec) == self.leaf), None
+            )
+        return updated_node
 
 
 def _is_connect_call(node: cst.CSTNode) -> bool:
@@ -613,6 +728,52 @@ def _block_bindings(body: Sequence[cst.BaseStatement]) -> dict[str, tuple[str, c
                     for bound in _target_names(small.target):
                         names.setdefault(bound, ("assignment", stmt))
     return names
+
+
+def _imports_from_wfpy(stmt: cst.CSTNode, name: str) -> bool:
+    """Whether `stmt` is a `from wfpy import name`, under that name."""
+    if not isinstance(stmt, cst.SimpleStatementLine):
+        return False
+    for small in stmt.body:
+        if (
+            isinstance(small, cst.ImportFrom)
+            and not small.relative
+            and small.module is not None
+            and _dotted_name(small.module) == "wfpy"
+            and not isinstance(small.names, cst.ImportStar)
+        ):
+            for alias in small.names:
+                bound = alias.asname.name if alias.asname else alias.name
+                if (
+                    isinstance(alias.name, cst.Name)
+                    and alias.name.value == name
+                    and isinstance(bound, cst.Name)
+                    and bound.value == name
+                ):
+                    return True
+    return False
+
+
+def _imports_wfpy_as(stmt: cst.CSTNode, name: str) -> bool:
+    """Whether `stmt` is an `import wfpy` that binds the module to `name`:
+    `import wfpy` (and `import wfpy.core`, which binds `wfpy` too) for
+    `wfpy`, `import wfpy as wf` for `wf`."""
+    if not isinstance(stmt, cst.SimpleStatementLine):
+        return False
+    for small in stmt.body:
+        if not isinstance(small, cst.Import):
+            continue
+        for alias in small.names:
+            if alias.asname is None:
+                if _dotted_name(alias.name).split(".")[0] == "wfpy" == name:
+                    return True
+            elif (
+                _dotted_name(alias.name) == "wfpy"
+                and isinstance(alias.asname.name, cst.Name)
+                and alias.asname.name.value == name
+            ):
+                return True
+    return False
 
 
 _EXTERNAL_EXPORTS: dict[str, frozenset[str] | None] = {}
@@ -3607,6 +3768,22 @@ class RewriteEngine:
         ``argRemovals`` names args to take out of the decorator: a list of
         names. A name that is also in *argUpdates* is updated, not removed.
 
+        The decorator is the one of that name on the class or the function
+        named *entityType*, written ``@agent`` or ``@wfpy.agent``;
+        *annotationName* is given either way, and what is written keeps the
+        form the file uses. A method is not found: *entityType* names no
+        class, and two classes may each have a method of that name.
+
+        A name in *argUpdates* is one a keyword argument can have
+        (``invalid_argument_name`` otherwise). Where the decorator is one of
+        wfpy's as the file writes it, the name is also one the decorator
+        takes, in any spelling (``unknown_argument`` otherwise): the export's
+        ``inheritStdio`` is ``@tool``'s ``inherit_stdio``. A new arg given in
+        a spelling the decorator does not take is written in the one it
+        takes, and so is an arg that the file spells that way, when it is
+        given a value. A name in *argRemovals* is not checked: taking out an
+        arg the decorator refuses repairs the file.
+
         A name is matched to the decorator's args whatever its spelling:
         ``useSkill`` is ``use_skill``, and on ``@agent`` ``reasoningEffort`` is
         ``variant``, as the decorator reads them. A replaced arg keeps the
@@ -3627,9 +3804,38 @@ class RewriteEngine:
                     return cst.Name("None")
             return value
 
+        # The decorator as the file writes it says whether it is wfpy's, and
+        # so which names it takes. One that is not found is answered below.
+        leaf = _annotation_leaf(annotationName)
+        finder = _FindDecorator(entityType, leaf)
+        self.module.visit(finder)
+        taken = self._wfpy_decorator_keywords(finder.found.decorator) if finder.found is not None else None
+        # A name given in a spelling the decorator does not take, to the one it takes.
+        spelled: dict[str, str] = {}
+
         # Parse each update value as a CST expression
         parsed_updates: dict[str, cst.BaseExpression] = {}
         for name, expr_str in argUpdates.items():
+            if not str(name).isidentifier() or keyword.iskeyword(str(name)):
+                # `class=1` does not parse, whatever the decorator takes.
+                raise RewriteError(
+                    message=f"@{annotationName}: an argument cannot be named {str(name)!r}"
+                    + (" (a Python keyword)" if keyword.iskeyword(str(name)) else ""),
+                    diagnostic={"code": "invalid_argument_name", "annotation": annotationName, "argument": str(name)},
+                )
+            if taken is not None and str(name) not in taken:
+                # The same argument in the spelling the decorator takes: the
+                # export names `@tool`'s `inherit_stdio` `inheritStdio`.
+                key = _decorator_arg_key(annotationName, str(name))
+                other = next((p for p in taken if _decorator_arg_key(annotationName, p) == key), None)
+                if other is None:
+                    # The file would fail as it is imported (TypeError). A name
+                    # to remove is not checked: taking it out is the repair.
+                    raise RewriteError(
+                        message=f"@{annotationName}: wfpy's {leaf}() takes no argument {str(name)!r}",
+                        diagnostic={"code": "unknown_argument", "annotation": annotationName, "argument": str(name)},
+                    )
+                spelled[str(name)] = other
             parsed = _parse_user_expression(expr_str, f"the value of {name} on @{annotationName}")
             parsed = _normalize_python_literal_name(parsed)
             parsed_updates[name] = parsed
@@ -3656,22 +3862,22 @@ class RewriteEngine:
                 message="@agent: mcpServerConfigs is not written back; write the servers in mcpServers"
             )
 
-        class _MergeArgs(cst.CSTTransformer):
+        class _MergeArgs(_DefinitionTransformer):
             def __init__(self) -> None:
                 self.updated = False
+                # The decorator found, as the file has it.
+                self.written: cst.BaseExpression | None = None
 
-            def leave_ClassDef(self, original_node: cst.ClassDef, updated_node: cst.ClassDef) -> cst.ClassDef:
+            def leave_definition(
+                self, original_node: _Definition, updated_node: _Definition
+            ) -> _Definition:
                 if self.updated or original_node.name.value != entityType:
                     return updated_node
                 decorators = list(updated_node.decorators)
                 for idx, dec in enumerate(decorators):
-                    dec_name = None
-                    if isinstance(dec.decorator, cst.Name):
-                        dec_name = dec.decorator.value
-                    elif isinstance(dec.decorator, cst.Call) and isinstance(dec.decorator.func, cst.Name):
-                        dec_name = dec.decorator.func.value
-                    if dec_name != annotationName:
+                    if _decorator_name(dec) != _annotation_leaf(annotationName):
                         continue
+                    self.written = dec.decorator
 
                     call = dec.decorator
                     if not isinstance(call, cst.Call) and not parsed_updates:
@@ -3679,30 +3885,10 @@ class RewriteEngine:
                         self.updated = True
                         break
                     if not isinstance(call, cst.Call):
-                        # bare @agent with no parens → create a Call with the updates
-                        new_args = [
-                            cst.Arg(
-                                keyword=cst.Name(k),
-                                value=v,
-                                equal=cst.AssignEqual(
-                                    whitespace_before=cst.SimpleWhitespace(""),
-                                    whitespace_after=cst.SimpleWhitespace(""),
-                                ),
-                            )
-                            for k, v in parsed_updates.items()
-                        ]
-                        # Add trailing comma + newline formatting
-                        formatted = []
-                        for i, a in enumerate(new_args):
-                            comma = cst.Comma(whitespace_after=cst.ParenthesizedWhitespace(
-                                indent=True,
-                                last_line=cst.SimpleWhitespace("    "),
-                            )) if i < len(new_args) - 1 else cst.MaybeSentinel.DEFAULT
-                            formatted.append(a.with_changes(comma=comma))
-                        new_call = cst.Call(func=cst.Name(dec_name), args=formatted)
-                        decorators[idx] = cst.Decorator(decorator=new_call)
-                        self.updated = True
-                        break
+                        # A bare `@agent` is given its first args as `@agent()` is.
+                        # The decorator itself stays, with the comment on its line
+                        # and the comment lines above it.
+                        call = cst.Call(func=call)
 
                     # Merge into existing Call args
                     existing_args = list(call.args)
@@ -3724,7 +3910,12 @@ class RewriteEngine:
                             if key in seen_keys:
                                 continue  # a second spelling of the arg just replaced
                             seen_keys.add(key)
-                            merged.append((arg.with_changes(value=updates[key][1]), index))
+                            given, value = updates[key]
+                            if taken is not None and arg.keyword is not None and arg.keyword.value not in taken:
+                                # The file spells it as the decorator does not: it is
+                                # written in the decorator's spelling, with its value.
+                                arg = arg.with_changes(keyword=cst.Name(spelled.get(given, given)))
+                            merged.append((arg.with_changes(value=value), index))
                         else:
                             merged.append((arg, index))
 
@@ -3732,7 +3923,7 @@ class RewriteEngine:
                     for key, (k, v) in updates.items():
                         if key not in seen_keys:
                             merged.append((cst.Arg(
-                                keyword=cst.Name(k),
+                                keyword=cst.Name(spelled.get(k, k)),
                                 value=v,
                                 equal=cst.AssignEqual(
                                     whitespace_before=cst.SimpleWhitespace(""),
@@ -3755,7 +3946,9 @@ class RewriteEngine:
         if not transformer.updated:
             raise RewriteError(message=f"Definition not found for annotation merge: {entityType}")
         self._set_module(updated)
-        self._ensure_wfpy_decorator_import(cst.Name(annotationName))
+        if transformer.written is not None:
+            # As the file writes it: `@agent` needs the name bound, `@wfpy.agent` does not.
+            self._ensure_wfpy_decorator_import(transformer.written)
 
     def _ensure_wfpy_decorator_import(self, decorator: cst.BaseExpression) -> None:
         """A decorator the edit wrote that is one of wfpy's (`@tool`,
@@ -3770,29 +3963,79 @@ class RewriteEngine:
         if name in getattr(wfpy, "__all__", ()) and not self._binds(name):
             self._set_module(self._ensure_import(self.module, "wfpy", [name]))
 
+    def _wfpy_decorator_keywords(self, decorator: cst.BaseExpression) -> tuple[str, ...] | None:
+        """The names `decorator` takes by keyword, in the order of its
+        signature, when it is one of wfpy's as this file writes it:
+
+        - `@agent`, where the top level imports `agent` from wfpy, or binds
+          it not at all (an edit then imports it from wfpy, see
+          `_ensure_wfpy_decorator_import`);
+        - `@wfpy.agent` or `@wf.agent`, where the top level binds that first
+          name by `import wfpy` (`import wfpy as wf`) and by nothing else.
+
+        None where any name may be given: a decorator this file defines or
+        takes from elsewhere, which may take what wfpy's does not, and one
+        that takes `**kwargs`."""
+        import inspect
+
+        import wfpy
+
+        target = decorator.func if isinstance(decorator, cst.Call) else decorator
+        if isinstance(target, cst.Name):
+            name, module_name = target.value, None
+        elif isinstance(target, cst.Attribute) and isinstance(target.value, cst.Name):
+            name, module_name = target.attr.value, target.value.value
+        else:
+            return None
+        if name not in getattr(wfpy, "__all__", ()):
+            return None
+        bound_name = name if module_name is None else module_name
+        bindings = [
+            bound for stmt in self.module.body if (bound := _block_bindings([stmt]).get(bound_name)) is not None
+        ]
+        if module_name is None:
+            if not all(kind == "import" and _imports_from_wfpy(stmt, name) for kind, stmt in bindings):
+                return None
+        elif not bindings or not all(kind == "import" and _imports_wfpy_as(stmt, module_name) for kind, stmt in bindings):
+            return None
+        for star in self._star_imports():
+            from_wfpy = not star.relative and star.module is not None and _dotted_name(star.module) == "wfpy"
+            if not from_wfpy and self._star_binds(star, bound_name):
+                return None
+        try:
+            parameters = list(inspect.signature(getattr(wfpy, name)).parameters.values())
+        except (TypeError, ValueError):
+            return None
+        if any(parameter.kind is parameter.VAR_KEYWORD for parameter in parameters):
+            return None
+        return tuple(
+            parameter.name
+            for parameter in parameters
+            if parameter.kind in (parameter.POSITIONAL_OR_KEYWORD, parameter.KEYWORD_ONLY)
+        )
+
     def remove_definition_annotation(
         self,
         *,
         entityType: str,
         annotationName: str,
     ) -> None:
-        class _RemoveAnnot(cst.CSTTransformer):
+        class _RemoveAnnot(_DefinitionTransformer):
             def __init__(self) -> None:
                 self.updated = False
 
-            def leave_ClassDef(self, original_node: cst.ClassDef, updated_node: cst.ClassDef) -> cst.ClassDef:
+            def leave_definition(
+                self, original_node: _Definition, updated_node: _Definition
+            ) -> _Definition:
                 if self.updated or original_node.name.value != entityType:
                     return updated_node
                 decorators = list(updated_node.decorators)
                 new_decorators: list[cst.Decorator] = []
                 removed = False
                 for dec in decorators:
-                    name = None
-                    if isinstance(dec.decorator, cst.Name):
-                        name = dec.decorator.value
-                    elif isinstance(dec.decorator, cst.Call) and isinstance(dec.decorator.func, cst.Name):
-                        name = dec.decorator.func.value
-                    if name == annotationName and not removed:
+                    # By its name, as the merge finds it: `@agent` or `@wfpy.agent`.
+                    name = _decorator_name(dec)
+                    if name == _annotation_leaf(annotationName) and not removed:
                         removed = True
                         continue
                     new_decorators.append(dec)
@@ -4492,7 +4735,7 @@ class RewriteEngine:
         portType: str,
     ) -> None:
         self._ensure_identifier(portName)
-        port_type = _parse_user_expression(portType, f"the type of port '{portName}'")
+        port_type = _parse_user_expression(portType, f"the type of port '{portName}'", subscript=True)
         direction = _PORT_DIRECTIONS.get(str(portDirection), None)
         if direction is None:
             raise RewriteError(message=f"Invalid port direction: {portDirection}", diagnostic={"code": "invalid_direction"})
@@ -4810,7 +5053,7 @@ class RewriteEngine:
         name = str(portName if portName is not None else port_name or "")
         value = str(newValue if newValue is not None else new_value or "")
         direction = str(portDirection if portDirection is not None else port_direction or "")
-        _parse_user_expression(value, f"the type of port '{name}'")
+        _parse_user_expression(value, f"the type of port '{name}'", subscript=True)
         cls = self._require_class(entity)
         if name not in self._class_port_names(cls):
             raise RewriteError(
@@ -5169,7 +5412,7 @@ class _PortTypeTransformer(_PortBaseTransformer):
         if not isinstance(func, cst.Subscript) or _dotted_name(func.value).rsplit(".", 1)[-1] != "Port":
             return None
         new_func = func.with_changes(
-            slice=[cst.SubscriptElement(slice=cst.Index(value=_parse_user_expression(self.new_type, f"the type of port '{self.port_name}'")))]
+            slice=[cst.SubscriptElement(slice=cst.Index(value=_parse_user_expression(self.new_type, f"the type of port '{self.port_name}'", subscript=True)))]
         )
         self.found = True
         return node.with_changes(func=new_func) if isinstance(node, cst.Call) else new_func
