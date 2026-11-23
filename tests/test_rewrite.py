@@ -561,12 +561,13 @@ def test_merge_keeps_the_env_of_a_configured_mcp_server_the_ide_edits(tmp_path: 
 
 
 def test_merge_keeps_what_an_edited_mcp_server_does_not_give(tmp_path: Path) -> None:
-    """An edited server comes with the fields the IDE changed: every other entry of
-    the file's dict is kept as written; one it gives, emptied included, replaces it."""
+    """An edited server comes with the fields the IDE changed: the file's dict is
+    kept as laid out, each entry the IDE gives (emptied included) has its value, one
+    the file does not have is added at the end."""
     updated = _merge_agent_args(tmp_path, _MCP_AGENT, argUpdates={
         "mcpServers": '["github", "docs", {"name": "web", "command": "web-mcp"}]'
     })
-    assert '{"name": "web", "command": "web-mcp", "url": WEB_URL}' in updated
+    assert '{"name": "web", "url": WEB_URL, "command": "web-mcp"}' in updated
     cleared = _merge_agent_args(tmp_path, _MCP_AGENT, argUpdates={
         "mcpServers": '[{"name": "web", "url": ""}]'
     })
@@ -618,6 +619,9 @@ class McpAgent:
 '''
     updated = _merge_agent_args(tmp_path, source, argUpdates={"mcpServers": '["github", "docs", "fs"]'})
     assert 'mcpServers=["github", "docs", "fs"], mcp_server_configs=CFGS' in updated
+    # A dict may be one of its servers, edited: its other entries are not in the file to keep.
+    with pytest.raises(RewriteError, match="computes mcp_server_configs"):
+        _merge_agent_args(tmp_path, source, argUpdates={"mcpServers": '["github", {"name": "docs", "command": "uvx"}]'})
 
 
 def test_merge_refuses_mcp_servers_the_file_computes(tmp_path: Path) -> None:
@@ -648,7 +652,7 @@ def test_merge_writes_no_env_keys_the_export_gave(tmp_path: Path) -> None:
         "mcpServers": '[{"name": "docs", "command": "uvx", "envKeys": ["DOCS_TOKEN"]}]'
     })
     assert "envKeys" not in updated
-    assert '{"name": "docs", "command": "uvx", "transport": "stdio", "env": {"DOCS_TOKEN": os.environ["DOCS_TOKEN"]}}' in updated
+    assert '{"name": "docs", "transport": "stdio", "command": "uvx", "env": {"DOCS_TOKEN": os.environ["DOCS_TOKEN"]}}' in updated
 
 
 def test_merge_refuses_writing_mcp_server_configs(tmp_path: Path) -> None:

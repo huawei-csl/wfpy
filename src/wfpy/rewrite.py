@@ -112,15 +112,18 @@ def _keep_configured_mcp_servers(
     changed. A name the file configures is that server's dict as the file
     writes it; an edited server keeps each entry of the file's dict it does
     not give (its ``env``, a ``url`` the file computes), and an ``envKeys``
-    the export gave is not written. A literal ``mcpServerConfigs`` goes: the servers the update
-    names are in ``mcpServers`` now, and one it leaves out is left out. One the
-    file computes stays as written, and a name in ``mcpServers`` is its server
-    when the workflow runs. A ``mcpServers`` the file computes, or an item of it
-    (``SERVERS``, ``[*BASE]``, ``[DOCS]``, ``{"name": DOCS_NAME}``), has no dict
-    to keep: refused, not overwritten.
+    the export gave is not written. A literal ``mcpServerConfigs`` goes: the
+    servers the update names are in ``mcpServers`` now, and one it leaves out
+    is left out. One the file computes stays as written, and a name in
+    ``mcpServers`` is its server when the workflow runs; a dict the file does
+    not configure may be one of its servers, edited, with the rest left out:
+    refused while it computes them. A ``mcpServers`` the file computes, or an
+    item of it (``SERVERS``, ``[*BASE]``, ``[DOCS]``, ``{"name": DOCS_NAME}``),
+    has no dict to keep: refused, not overwritten.
     """
     configured: dict[str, cst.Dict] = {}
     drop_configs = False
+    computed_configs: str | None = None
     for arg in existing_args:
         key = _decorator_arg_key("agent", arg.keyword.value) if arg.keyword is not None else None
         if key == "mcp_servers":
@@ -137,6 +140,8 @@ def _keep_configured_mcp_servers(
                 for name, server in found.items():
                     configured.setdefault(name, server)
                 drop_configs = True
+            else:
+                computed_configs = arg.keyword.value
     if not isinstance(update, (cst.List, cst.Tuple)):
         return update, drop_configs
 
@@ -154,19 +159,32 @@ def _keep_configured_mcp_servers(
             entry = _dict_entry(value, "name")
             name = _literal_text(entry.value) if entry is not None else None
         source = configured.get(name) if name is not None else None
+        if source is None and computed_configs is not None and isinstance(value, cst.Dict):
+            raise RewriteError(
+                message=f"@agent: the file computes {computed_configs}; edit its MCP servers there"
+            )
         if source is not None and _literal_text(value) is not None:
             element = element.with_changes(value=source)
         elif source is not None and isinstance(value, cst.Dict):
-            given = {_literal_text(e.key) for e in value.elements if isinstance(e, cst.DictElement)}
-            missing = [e for e in source.elements
-                       if isinstance(e, cst.DictElement) and _literal_text(e.key) not in given]
-            if missing:
-                entries = list(value.elements)
-                for entry in missing:
-                    if entries:
-                        entries[-1] = entries[-1].with_changes(comma=cst.Comma(whitespace_after=cst.SimpleWhitespace(" ")))
-                    entries.append(entry.with_changes(comma=cst.MaybeSentinel.DEFAULT))
-                element = element.with_changes(value=value.with_changes(elements=entries))
+            # The file's dict, as laid out there, with the update's value in each
+            # entry it gives, and an entry the file does not have added at its end.
+            given: dict[str, cst.DictElement] = {}
+            for entry in value.elements:
+                key = _literal_text(entry.key) if isinstance(entry, cst.DictElement) else None
+                if key is not None:
+                    given[key] = entry
+            entries: list[cst.BaseDictElement] = []
+            for entry in source.elements:
+                key = _literal_text(entry.key) if isinstance(entry, cst.DictElement) else None
+                if key is not None and key in given:
+                    entries.append(entry.with_changes(value=given.pop(key).value))
+                else:
+                    entries.append(entry)
+            for entry in given.values():
+                if entries and isinstance(entries[-1].comma, cst.MaybeSentinel):
+                    entries[-1] = entries[-1].with_changes(comma=cst.Comma(whitespace_after=cst.SimpleWhitespace(" ")))
+                entries.append(entry.with_changes(comma=cst.MaybeSentinel.DEFAULT))
+            element = element.with_changes(value=source.with_changes(elements=entries))
         kept.append(element)
     return update.with_changes(elements=kept), drop_configs
 

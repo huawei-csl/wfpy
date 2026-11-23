@@ -25,10 +25,13 @@ All notable changes to wfpy are documented here. The format follows
   args and url are given as they are). On an annotation merge the update
   is the agent's whole list of servers: one written as its name is the
   file's dict for it, as written (what it computes included), and one
-  written as a dict (the fields the IDE changed) keeps every entry of the
-  file's it does not give, `env` among them; an `envKeys` is not written. Servers given as a literal `mcpServerConfigs` move into
+  written as a dict (the fields the IDE changed) is the file's dict with
+  those values in it, laid out as it was, every other entry kept, `env`
+  among them; an `envKeys` is not written. Servers given as a literal `mcpServerConfigs` move into
   `mcpServers` and the argument goes (one the update leaves out is left
-  out); a computed one stays as written. A `mcpServers` the file computes,
+  out); a computed one stays as written, and a server written as a dict
+  that the file does not configure is refused while it does (it may be
+  one of those, edited). A `mcpServers` the file computes,
   or a server in it, is refused, not overwritten, and so is a write of
   `mcpServerConfigs`. An MCP server's args are exported as text: one that
   is not a string (a `Path`) made the whole export fail.
