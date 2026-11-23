@@ -58,6 +58,76 @@ def _decorator_arg_key(annotation_name: str, name: str) -> str:
     return _DECORATOR_ARG_ALIASES.get((annotation_name, snake), snake)
 
 
+def _mcp_server_name(node: cst.BaseExpression | None) -> str | None:
+    """The server an item of ``@agent``'s ``mcpServers`` names: a string's
+    text, a dict's ``"name"``; None for anything else."""
+    if isinstance(node, cst.SimpleString):
+        value = node.evaluated_value
+        return value if isinstance(value, str) else None
+    if isinstance(node, cst.Dict):
+        entry = _dict_entry(node, "name")
+        if entry is not None and isinstance(entry.value, cst.SimpleString):
+            value = entry.value.evaluated_value
+            return value if isinstance(value, str) else None
+    return None
+
+
+def _dict_entry(node: cst.Dict, key: str) -> cst.DictElement | None:
+    """The entry of a dict display whose key is the string *key*."""
+    for element in node.elements:
+        if (isinstance(element, cst.DictElement) and isinstance(element.key, cst.SimpleString)
+                and element.key.evaluated_value == key):
+            return element
+    return None
+
+
+def _keep_configured_mcp_servers(update: cst.BaseExpression, existing_args: Sequence[cst.Arg]) -> cst.BaseExpression:
+    """``@agent``'s ``mcpServers`` as an IDE writes it, with what the file
+    has kept.
+
+    The IDE sees the servers configured in the file (dicts, in ``mcpServers``
+    or ``mcpServerConfigs``) as the graph export gives them: their values,
+    not the expressions that compute them, and the names of their env, not
+    its values. So it writes a server it did not edit as its name, and an
+    edited one without ``env``. A name the file configures is that server's
+    dict as the file writes it; an edited server keeps the file's ``env``.
+    A file that computes the list (``mcpServers=SERVERS``, ``[*BASE]``) has
+    no dict to keep: refused, not overwritten.
+    """
+    configured: dict[str, cst.Dict] = {}
+    for arg in existing_args:
+        if arg.keyword is None or _decorator_arg_key("agent", arg.keyword.value) not in ("mcp_servers", "mcp_server_configs"):
+            continue
+        if not isinstance(arg.value, (cst.List, cst.Tuple)) or any(
+                not isinstance(element, cst.Element) for element in arg.value.elements):
+            raise RewriteError(
+                message=f"@agent: the file computes {arg.keyword.value}; edit its MCP servers there"
+            )
+        for element in arg.value.elements:
+            name = _mcp_server_name(element.value)
+            if name is not None and isinstance(element.value, cst.Dict):
+                configured.setdefault(name, element.value)
+    if not configured or not isinstance(update, (cst.List, cst.Tuple)):
+        return update
+
+    kept: list[cst.BaseElement] = []
+    for element in update.elements:
+        value = element.value if isinstance(element, cst.Element) else None
+        source = configured.get(_mcp_server_name(value) or "") if value is not None else None
+        if source is not None and isinstance(value, cst.SimpleString):
+            element = element.with_changes(value=source)
+        elif source is not None and isinstance(value, cst.Dict) and _dict_entry(value, "env") is None:
+            env = _dict_entry(source, "env")
+            if env is not None:
+                entries = list(value.elements)
+                if entries:
+                    entries[-1] = entries[-1].with_changes(comma=cst.Comma(whitespace_after=cst.SimpleWhitespace(" ")))
+                entries.append(env.with_changes(comma=cst.MaybeSentinel.DEFAULT))
+                element = element.with_changes(value=value.with_changes(elements=entries))
+        kept.append(element)
+    return update.with_changes(elements=kept)
+
+
 def _lay_out_call_args(
     call: cst.Call, original: list[cst.Arg], merged: list[tuple[cst.Arg, int | None]]
 ) -> tuple[list[cst.Arg], cst.BaseParenthesizableWhitespace]:
@@ -3569,22 +3639,27 @@ class RewriteEngine:
 
                     # Merge into existing Call args
                     existing_args = list(call.args)
+                    updates = updates_by_key
+                    if annotationName == "agent" and "mcp_servers" in updates_by_key:
+                        written, value = updates_by_key["mcp_servers"]
+                        updates = {**updates_by_key,
+                                   "mcp_servers": (written, _keep_configured_mcp_servers(value, existing_args))}
                     seen_keys: set[str] = set()
                     merged: list[tuple[cst.Arg, int | None]] = []
                     for index, arg in enumerate(existing_args):
                         key = _decorator_arg_key(annotationName, arg.keyword.value) if arg.keyword else None
                         if key is not None and key in removal_keys:
                             continue
-                        if key is not None and key in updates_by_key:
+                        if key is not None and key in updates:
                             if key in seen_keys:
                                 continue  # a second spelling of the arg just replaced
                             seen_keys.add(key)
-                            merged.append((arg.with_changes(value=updates_by_key[key][1]), index))
+                            merged.append((arg.with_changes(value=updates[key][1]), index))
                         else:
                             merged.append((arg, index))
 
                     # Append new args not in original
-                    for key, (k, v) in updates_by_key.items():
+                    for key, (k, v) in updates.items():
                         if key not in seen_keys:
                             merged.append((cst.Arg(
                                 keyword=cst.Name(k),

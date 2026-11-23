@@ -18,9 +18,17 @@ All notable changes to wfpy are documented here. The format follows
   level on a Claude Code agent, which was ignored, is now applied.
 
 ### Fixed
-- The graph export gives a configured MCP server's `env` with its other
-  fields (`mcpServerConfigs`, an empty dict when it has none). An IDE that
-  edits a server writes it back whole, and lost the env it was not given.
+- An IDE that writes `@agent`'s `mcpServers` back no longer loses what the
+  file configures. The graph export gives the servers configured on an
+  agent (`mcpServerConfigs`) as values, and their env by name only
+  (`envKeys`: env values are often secrets, and never leave the process).
+  On an annotation merge, a server the IDE writes as its name is the
+  file's dict for it, as written (what it computes included), and a server
+  it writes as a dict without `env` keeps the file's `env`; servers given
+  as `mcpServerConfigs` are found there too. A file that computes the list
+  (`mcpServers=SERVERS`) is refused, not overwritten. An MCP server's args
+  are exported as text: one that is not a string (a `Path`) made the whole
+  export fail.
 - An `@agent` given no reasoning level had the text `"None"` as its level
   (`str(None)`): `opencode-cli` was started with `--variant None`, and the
   graph export showed `reasoningEffort="None"`, which an IDE wrote back into

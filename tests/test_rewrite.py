@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import libcst as cst
 import pytest
@@ -507,6 +508,95 @@ class OptimizeAgent:
     assert 'skill="pto-kernel-optimizer"' in updated
     assert 'provider="openrouter"' in updated
     assert "timeoutMs=600000" in updated
+
+
+_MCP_AGENT = '''
+import os
+
+from wfpy import agent
+
+
+@agent(
+    prompt="do it",
+    mcpServers=[
+        "github",
+        {"name": "docs", "transport": "stdio", "command": "npx", "env": {"DOCS_TOKEN": os.environ["DOCS_TOKEN"]}},
+        {"name": "web", "url": WEB_URL},
+    ],
+)
+class McpAgent:
+    pass
+'''
+
+
+def _merge_agent_args(tmp_path: Path, source: str, **merge: Any) -> str:
+    engine = _engine_from_source(tmp_path, source)
+    engine.merge_definition_annotation_args(entityType=next(
+        line.split()[1].rstrip(":") for line in source.splitlines() if line.startswith("class ")
+    ), annotationName="agent", **merge)
+    engine.save()
+    return Path(engine.file_path).read_text(encoding="utf-8")
+
+
+def test_merge_keeps_a_configured_mcp_server_the_ide_names(tmp_path: Path) -> None:
+    """An IDE writes a configured server it did not edit as its name: the file's
+    dict is kept as written, what it computes included; a registry name stays one."""
+    updated = _merge_agent_args(tmp_path, _MCP_AGENT, argUpdates={"mcpServers": '["github", "docs", "web", "fs"]'})
+    assert '"github",' in updated or '["github",' in updated
+    assert '{"name": "docs", "transport": "stdio", "command": "npx", "env": {"DOCS_TOKEN": os.environ["DOCS_TOKEN"]}}' in updated
+    assert '{"name": "web", "url": WEB_URL}' in updated
+    assert '"fs"]' in updated
+    compile(updated, "wf.py", "exec")
+
+
+def test_merge_keeps_the_env_of_a_configured_mcp_server_the_ide_edits(tmp_path: Path) -> None:
+    """An edited server comes without its env, which the IDE is not given: the file's is kept."""
+    updated = _merge_agent_args(tmp_path, _MCP_AGENT, argUpdates={
+        "mcpServers": '["github", {"name": "docs", "transport": "stdio", "command": "uvx"}, "web"]'
+    })
+    assert '{"name": "docs", "transport": "stdio", "command": "uvx", "env": {"DOCS_TOKEN": os.environ["DOCS_TOKEN"]}}' in updated
+    assert '"npx"' not in updated
+    assert "WEB_URL" in updated
+    compile(updated, "wf.py", "exec")
+
+
+def test_merge_leaves_out_a_configured_mcp_server_the_ide_does_not_name(tmp_path: Path) -> None:
+    updated = _merge_agent_args(tmp_path, _MCP_AGENT, argUpdates={"mcpServers": '["github", "web"]'})
+    assert "docs" not in updated
+    assert "WEB_URL" in updated
+
+
+def test_merge_moves_mcp_server_configs_into_mcp_servers(tmp_path: Path) -> None:
+    """Servers the file gives as mcpServerConfigs are kept as written when the IDE
+    names them in mcpServers and takes mcpServerConfigs out."""
+    source = '''
+import os
+
+from wfpy import agent
+
+
+@agent(prompt="do it", mcpServers=["github"], mcp_server_configs=[{"name": "docs", "command": "npx", "env": {"T": os.environ["T"]}}])
+class McpAgent:
+    pass
+'''
+    updated = _merge_agent_args(tmp_path, source, argUpdates={"mcpServers": '["github", "docs"]'}, argRemovals=["mcpServerConfigs"])
+    assert 'mcpServers=["github", {"name": "docs", "command": "npx", "env": {"T": os.environ["T"]}}]' in updated
+    assert "mcp_server_configs" not in updated
+
+
+def test_merge_refuses_mcp_servers_the_file_computes(tmp_path: Path) -> None:
+    source = '''
+from wfpy import agent
+
+
+@agent(prompt="do it", mcpServers=SERVERS)
+class McpAgent:
+    pass
+'''
+    with pytest.raises(RewriteError, match="computes mcpServers"):
+        _merge_agent_args(tmp_path, source, argUpdates={"mcpServers": '["github", "docs"]'})
+    with pytest.raises(RewriteError, match="computes mcpServers"):
+        _merge_agent_args(tmp_path, source.replace("SERVERS", "[*BASE, \"x\"]"), argUpdates={"mcpServers": '["github"]'})
 
 
 def test_merge_definition_annotation_args_adds_new_arg(tmp_path: Path) -> None:
