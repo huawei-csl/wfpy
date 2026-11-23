@@ -467,11 +467,14 @@ class ACPClient:
         - The model: a config option with id or category `model` (Claude
           Code: default, sonnet, haiku, opus...), matched by value, then by
           name, case-insensitive, then by prefix.
-        - The mode: by id from the session's `modes` (Claude Code), or from a
-          config option with id or category `mode` (OpenCode 2 offers it
-          only so: build, plan), by value then name, case-insensitive.
+        - The mode: from a config option with id or category `mode` (OpenCode
+          2 offers it only so: build, plan), by value then name, else by id
+          from the session's `modes` (Claude Code); case-insensitive.
         - The reasoning level (`effort`): a config option with category
           `thought_level` (OpenCode 2: minimal ... max), by value then name.
+
+        Each option is looked up in the options the agent sent back when the
+        one before it was set: a model can bring its own reasoning levels.
 
         What the agent does not offer is logged and left."""
         applied: dict[str, Any] = {}
@@ -490,19 +493,20 @@ class ACPClient:
                     logger.warning(f"The agent's model option has no {model!r}; it offers "
                                    f"{[getattr(c, 'value', None) for c in choices]}")
                 else:
-                    applied["model"] = await self._set_option(session_id, option, chosen)
+                    applied["model"], options = await self._set_option(session_id, option, chosen, options)
                     logger.info(f"Session model set to {applied['model']}")
         if mode:
             available = [str(getattr(m, "id", "")) for m in (getattr(modes, "available_modes", None) or [])]
             option = _session_option(options, "mode")
             chosen = _choose(_option_choices(option), mode) if option is not None else None
+            legacy = next((m for m in available if m.lower() == mode.strip().lower()), None)
             if chosen is not None:
-                applied["mode"] = await self._set_option(session_id, option, chosen)
+                applied["mode"], options = await self._set_option(session_id, option, chosen, options)
                 logger.info(f"Session mode set to {applied['mode']}")
-            elif mode in available:
-                await self.connection.set_session_mode(session_id=session_id, mode_id=mode)
-                applied["mode"] = mode
-                logger.info(f"Session mode set to {mode}")
+            elif legacy is not None:
+                await self.connection.set_session_mode(session_id=session_id, mode_id=legacy)
+                applied["mode"] = legacy
+                logger.info(f"Session mode set to {legacy}")
             else:
                 offered = available or [getattr(c, "value", None) for c in _option_choices(option)]
                 logger.warning(f"The agent offers no mode {mode!r}; it offers {offered}")
@@ -517,15 +521,21 @@ class ACPClient:
                     logger.warning(f"The agent's reasoning level option has no {effort!r}; it offers "
                                    f"{[getattr(c, 'value', None) for c in choices]}")
                 else:
-                    applied["effort"] = await self._set_option(session_id, option, chosen)
+                    applied["effort"], options = await self._set_option(session_id, option, chosen, options)
                     logger.info(f"Session reasoning level set to {applied['effort']}")
         return applied
 
-    async def _set_option(self, session_id: str, option: Any, chosen: Any) -> str:
+    async def _set_option(self, session_id: str, option: Any, chosen: Any,
+                          options: list[Any]) -> tuple[str, list[Any]]:
+        """Set a config option; return the value and the session's options
+        as the agent now offers them. Choices can follow another option
+        (OpenCode 2's reasoning levels are the model's), so the next option
+        is looked up in the agent's reply where it sends one."""
         value = str(getattr(chosen, "value"))
-        await self.connection.set_config_option(config_id=str(getattr(option, "id")),
-                                                session_id=session_id, value=value)
-        return value
+        reply = await self.connection.set_config_option(config_id=str(getattr(option, "id")),
+                                                        session_id=session_id, value=value)
+        updated = getattr(reply, "config_options", None) or getattr(reply, "configOptions", None)
+        return value, (list(updated) if updated else options)
 
     async def send_prompt(self, session_id: str, prompt: str) -> dict[str, Any]:
         """

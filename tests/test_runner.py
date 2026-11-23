@@ -1912,7 +1912,7 @@ class TestAgentTransport:
 
         monkeypatch.setattr("wfpy._agent_cli_runtime._run_opencode_process", _fake_process)
         monkeypatch.setattr("wfpy._agent_cli_runtime._opencode_run_takes_variant",
-                            takes_variant if callable(takes_variant) else lambda argv: takes_variant)
+                            takes_variant if callable(takes_variant) else lambda argv, env: takes_variant)
         spec = AgentSpec(prompt="x", transport="opencode-cli", **spec_kw)
         _response, _firing, err, debug = _invoke_agent_opencode_cli(
             spec, payload_text='{"inputs": {}}', verbose=False, effective_prompt="do task", plan_options={})
@@ -1929,9 +1929,35 @@ class TestAgentTransport:
         assert cmd[cmd.index("--model") + 1] == "openai/gpt-5#high"
         assert "--variant" not in cmd
 
-    def test_opencode_2_keeps_a_level_the_model_already_names(self, monkeypatch):
-        cmd, _debug = self._opencode_cli_cmd(monkeypatch, False, model="openai/gpt-5#max", variant="high")
+    def test_opencode_2_keeps_a_level_the_model_already_names_and_says_so(self, monkeypatch, caplog):
+        cmd, debug = self._opencode_cli_cmd(monkeypatch, False, model="openai/gpt-5#max", variant="high")
         assert cmd[cmd.index("--model") + 1] == "openai/gpt-5#max"
+        assert debug.get("opencodeVariantDropped") == "high" and "names its own" in caplog.text
+        _cmd, debug = self._opencode_cli_cmd(monkeypatch, False, model="openai/gpt-5#high", variant="high")
+        assert "opencodeVariantDropped" not in debug
+
+    def test_a_dropped_level_is_recorded_on_every_path(self, monkeypatch):
+        import errno
+
+        from wfpy.core import AgentSpec
+
+        def _too_long(cmd, *, timeout_s, env, emit_prefix="[wfpy][opencode]"):
+            raise OSError(errno.E2BIG, "Argument list too long")
+
+        def _attached(cmd_base, full_prompt, *, timeout_s, env, prompt_stage_dir=None):
+            return ('{"outputs": {"out": "ok"}}', {}, 0, "", [*cmd_base, "--file", "p.txt"])
+
+        def _missing(cmd, *, timeout_s, env, emit_prefix="[wfpy][opencode]"):
+            raise FileNotFoundError("opencode")
+
+        monkeypatch.setattr("wfpy._agent_cli_runtime._opencode_run_takes_variant", lambda argv, env: False)
+        monkeypatch.setattr("wfpy._agent_cli_runtime._run_opencode_with_attached_prompt", _attached)
+        spec = AgentSpec(prompt="x", transport="opencode-cli", variant="high")
+        for process in (_too_long, _missing):
+            monkeypatch.setattr("wfpy._agent_cli_runtime._run_opencode_process", process)
+            _response, _firing, _err, debug = _invoke_agent_opencode_cli(
+                spec, payload_text='{"inputs": {}}', verbose=False, effective_prompt="do task", plan_options={})
+            assert debug.get("opencodeVariantDropped") == "high", process.__name__
 
     def test_opencode_2_drops_a_level_with_no_model_and_says_so(self, monkeypatch, caplog):
         cmd, debug = self._opencode_cli_cmd(monkeypatch, False, variant="high")
@@ -1940,7 +1966,7 @@ class TestAgentTransport:
         assert "names no model" in caplog.text
 
     def test_no_level_asks_nothing_of_opencode(self, monkeypatch):
-        def _never(argv):
+        def _never(argv, env):
             raise AssertionError("help read for an agent with no level")
 
         cmd, _debug = self._opencode_cli_cmd(monkeypatch, _never, model="openai/gpt-5")
@@ -1956,21 +1982,51 @@ class TestAgentTransport:
             "two": "  --model, -m string        Model to use in the format provider/model#variant",
             "other": "usage: run [message]",
         }
+        seen: list[tuple[str, str]] = []
 
         def _fake_run(argv, **kw):
+            seen.append((argv[0], kw["env"].get("PATH", "")))
             if argv[0] == "missing":
                 raise FileNotFoundError(argv[0])
+            if argv[0] == "slow":
+                raise sp.TimeoutExpired(argv, 30)
             return sp.CompletedProcess(argv, 0, stdout=helps[argv[0]], stderr="")
 
         monkeypatch.setattr(rt.subprocess, "run", _fake_run)
-        rt._opencode_run_takes_variant.cache_clear()
-        try:
-            assert rt._opencode_run_takes_variant(("one",)) is True
-            assert rt._opencode_run_takes_variant(("two",)) is False
-            assert rt._opencode_run_takes_variant(("other",)) is True
-            assert rt._opencode_run_takes_variant(("missing",)) is True
-        finally:
-            rt._opencode_run_takes_variant.cache_clear()
+        monkeypatch.setattr(rt, "_VARIANT_FLAG_CACHE", {})
+        env = {"PATH": "/wf/bin"}
+        assert rt._opencode_run_takes_variant(("one",), env) is True
+        assert rt._opencode_run_takes_variant(("two",), env) is False
+        assert rt._opencode_run_takes_variant(("other",), env) is True
+        assert rt._opencode_run_takes_variant(("missing",), env) is True
+        assert seen == [("one", "/wf/bin"), ("two", "/wf/bin"), ("other", "/wf/bin"), ("missing", "/wf/bin")]
+        # A definite answer is kept per command and PATH; a failed read is read again.
+        seen.clear()
+        assert rt._opencode_run_takes_variant(("two",), env) is False
+        assert rt._opencode_run_takes_variant(("slow",), env) is True
+        assert rt._opencode_run_takes_variant(("slow",), env) is True
+        assert rt._opencode_run_takes_variant(("two",), {"PATH": "/other"}) is False
+        assert seen == [("slow", "/wf/bin"), ("slow", "/wf/bin"), ("two", "/other")]
+
+    def test_the_help_is_read_with_the_workflows_environment(self, monkeypatch):
+        from wfpy.core import AgentSpec
+
+        probed: dict[str, Any] = {}
+
+        def _probe(argv, env):
+            probed["env"] = env
+            return False
+
+        def _fake_process(cmd, *, timeout_s, env, emit_prefix="[wfpy][opencode]"):
+            probed["run_env"] = env
+            return ('{"outputs": {"out": "ok"}}', {}, 0, "")
+
+        monkeypatch.setattr("wfpy._agent_cli_runtime._opencode_run_takes_variant", _probe)
+        monkeypatch.setattr("wfpy._agent_cli_runtime._run_opencode_process", _fake_process)
+        spec = AgentSpec(prompt="x", transport="opencode-cli", model="openai/gpt-5", variant="high")
+        _invoke_agent_opencode_cli(spec, payload_text='{"inputs": {}}', verbose=False, effective_prompt="do task",
+                                   plan_options={"_wf_env": {"PATH": "/wf/bin"}})
+        assert probed["env"]["PATH"] == "/wf/bin" and probed["env"] is probed["run_env"]
 
     def test_invoke_agent_opencode_cli_errors_when_json_events_have_no_text(self, monkeypatch):
         from wfpy.core import AgentSpec

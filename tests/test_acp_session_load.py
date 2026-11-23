@@ -27,6 +27,8 @@ class FakeClient:
 
     async def configure_session(self, session_id, response, model=None, mode=None, effort=None):
         self.calls.append(("configure", session_id, model, mode))
+        if effort is not None:
+            self.calls.append(("effort", session_id, effort))
         return {}
 
     async def start(self):
@@ -45,7 +47,7 @@ class FakeClient:
             raise RuntimeError("no such session")
 
 
-def run(monkeypatch, *, can_load, load_fails=False, session_id="old"):
+def run(monkeypatch, *, can_load, load_fails=False, session_id="old", **invoke_kw):
     made: list[FakeClient] = []
 
     def make(**kwargs):
@@ -59,11 +61,17 @@ def run(monkeypatch, *, can_load, load_fails=False, session_id="old"):
 
     monkeypatch.setattr(acp_client, "ACPClient", make)
     monkeypatch.setattr(acp_client, "run_with_stuck_detection", fake_run)
-    response = asyncio.run(invoke_opencode_acp(prompt="hi", cwd="/w", session_id=session_id))
+    response = asyncio.run(invoke_opencode_acp(prompt="hi", cwd="/w", session_id=session_id, **invoke_kw))
     return made[0].calls, response
 
 
 class TestResumingASession:
+    def test_the_reasoning_level_reaches_a_loaded_and_a_new_session(self, monkeypatch):
+        calls, _response = run(monkeypatch, can_load=True, effort="high")
+        assert ("effort", "old", "high") in calls
+        calls, _response = run(monkeypatch, can_load=False, session_id=None, effort="max")
+        assert ("effort", "fresh", "max") in calls
+
     def test_a_known_session_is_loaded_before_the_prompt(self, monkeypatch):
         calls, response = run(monkeypatch, can_load=True)
         assert calls == [("start",), ("load_session", "old", "/w"), ("configure", "old", None, None),

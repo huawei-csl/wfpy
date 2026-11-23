@@ -12,21 +12,26 @@ All notable changes to wfpy are documented here. The format follows
   in the session's `modes`, so a `mode="plan"` agent ran in `build` with a
   warning that no mode was offered. The ACP client now sets a mode through
   the config option with id or category `mode` where the agent offers one,
-  and through `session/set_mode` otherwise (Claude Code).
+  and through `session/set_mode` otherwise (Claude Code); either way the
+  mode is matched case-insensitively.
 - OpenCode 2 over the CLI (`opencode-cli`): `opencode run` dropped
   `--variant`, so every agent with a reasoning level failed with
-  "Unrecognized flag: --variant". wfpy reads once per command whether
-  `run --help` offers the flag; where it does not, the level goes in the
-  model, `provider/model#variant`. An agent that names a level but no model
-  gets a warning and `opencodeVariantDropped` in its debug record, since
-  OpenCode 2 has nowhere else to take it.
+  "Unrecognized flag: --variant". wfpy reads whether `run --help` offers the
+  flag, with the environment the run gets (the workflow's `@config` env
+  included), once per command and PATH; a help that cannot be read is read
+  again at the next firing. Where the flag is gone, the level goes in the
+  model, `provider/model#variant`. An agent that names a level but no model,
+  or a model that names another level, gets a warning and
+  `opencodeVariantDropped` in its debug record.
 
 ### Added
 - The reasoning level over ACP: an agent's `reasoningEffort` (or
   `variant`) is set on the session where the agent offers a config option
   of category `thought_level` (OpenCode 2's `effort`: minimal, low, medium,
-  high, xhigh, max), matched by value then name. An agent that offers none
-  logs it and runs at its own level, as before.
+  high, xhigh, max), matched by value then name. The level is looked up in
+  the options the agent sends back after the model is set, since a model can
+  bring its own levels. An agent that offers none logs it and runs at its
+  own level, as before.
 
 ## [1.3.2] — 2026-11-23
 

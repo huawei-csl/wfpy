@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import dataclasses
 import errno
-import functools
 import json
 import logging
 import os
@@ -82,19 +81,27 @@ def _normalize_cli_tools_mode(spec: AgentSpec, options: dict[str, Any] | None = 
     return normalized
 
 
-@functools.lru_cache(maxsize=8)
-def _opencode_run_takes_variant(opencode_argv: tuple[str, ...]) -> bool:
+_VARIANT_FLAG_CACHE: dict[tuple[tuple[str, ...], str], bool] = {}
+
+
+def _opencode_run_takes_variant(opencode_argv: tuple[str, ...], env: dict[str, str]) -> bool:
     """Whether this opencode's `run` takes `--variant` (opencode 1.x) or only
-    `--model provider/model#variant` (opencode 2), read once per command
-    from `run --help`. A help that cannot be read, or says neither, keeps
-    the flag."""
+    `--model provider/model#variant` (opencode 2), read from `run --help`
+    with the environment the run will have, once per command and PATH. A
+    help that says neither keeps the flag; one that cannot be read (not
+    found, too slow) keeps it too, and is read again next time."""
+    key = (opencode_argv, env.get("PATH", ""))
+    if key in _VARIANT_FLAG_CACHE:
+        return _VARIANT_FLAG_CACHE[key]
     try:
         result = subprocess.run([*opencode_argv, "run", "--help"], capture_output=True,
-                                text=True, timeout=30, check=False)
+                                text=True, timeout=30, check=False, env=env)
     except (OSError, subprocess.SubprocessError):
         return True
     text = f"{result.stdout}\n{result.stderr}"
-    return "--variant" in text or "#variant" not in text
+    takes = "--variant" in text or "#variant" not in text
+    _VARIANT_FLAG_CACHE[key] = takes
+    return takes
 
 
 def _expand_command(raw: str, default_executable: str) -> list[str]:
@@ -654,18 +661,35 @@ def _invoke_agent_opencode_cli(
     model = str(spec.model or "").strip()
     opencode_argv = _expand_command(str(options.get("agent_cli_opencode_command", "")).strip(), "opencode")
     cmd_base = [*opencode_argv, "run", "--format", "json"]
+
+    env = os.environ.copy()
+    if spec.endpoint:
+        env["OPENCODE_BASE_URL"] = spec.endpoint
+    if spec.provider:
+        env["OPENCODE_PROVIDER"] = spec.provider
+
+    # Merge workflow @config env so agent subprocesses inherit CANN_HOME, etc.
+    wf_env = options.get("_wf_env")
+    if isinstance(wf_env, dict):
+        env.update(wf_env)
+
     variant = str(getattr(spec, 'variant', '') or '').strip()
-    variant_dropped = ""
-    variant_flag = bool(variant) and _opencode_run_takes_variant(tuple(opencode_argv))
+    # A level that does not reach opencode, for every debug record below.
+    level_meta: dict[str, Any] = {}
+    variant_flag = bool(variant) and _opencode_run_takes_variant(tuple(opencode_argv), env)
     if variant and not variant_flag:
         # OpenCode 2 dropped `--variant`: the level is part of the model,
         # `provider/model#variant`, so it needs a model to ride on.
         if model and "#" not in model:
             model = f"{model}#{variant}"
         elif not model:
-            variant_dropped = variant
+            level_meta["opencodeVariantDropped"] = variant
             logging.getLogger(__name__).warning(f"Reasoning level {variant!r} not applied: this opencode takes it only as "
-                           "part of the model (provider/model#variant) and the agent names no model")
+                                                "part of the model (provider/model#variant) and the agent names no model")
+        elif model.rsplit("#", 1)[1] != variant:
+            level_meta["opencodeVariantDropped"] = variant
+            logging.getLogger(__name__).warning(f"Reasoning level {variant!r} not applied: the model {model!r} "
+                                                "names its own")
     if model:
         cmd_base.extend(["--model", model])
     if variant_flag:
@@ -696,17 +720,6 @@ def _invoke_agent_opencode_cli(
     cmd = [*cmd_base, full_prompt]
     prompt_stage_dir = _resolve_opencode_prompt_stage_dir(options)
 
-    env = os.environ.copy()
-    if spec.endpoint:
-        env["OPENCODE_BASE_URL"] = spec.endpoint
-    if spec.provider:
-        env["OPENCODE_PROVIDER"] = spec.provider
-
-    # Merge workflow @config env so agent subprocesses inherit CANN_HOME, etc.
-    wf_env = options.get("_wf_env")
-    if isinstance(wf_env, dict):
-        env.update(wf_env)
-
     dispatched_cmd = cmd
     prompt_dispatch = "argv"
     response_text = ""
@@ -720,8 +733,6 @@ def _invoke_agent_opencode_cli(
             timeout_s=timeout_s,
             env=env,
         )
-        if variant_dropped:
-            debug_meta["opencodeVariantDropped"] = variant_dropped
     except FileNotFoundError as exc:
         err = RuntimeError("Agent transport 'opencode-cli' requires 'opencode' executable on PATH.")
         return (
@@ -729,6 +740,7 @@ def _invoke_agent_opencode_cli(
             [{"role": "user", "content": payload_text}],
             err,
             {
+                **level_meta,
                 "transport": "opencode-cli",
                 "command": cmd,
                 "error": str(exc),
@@ -756,6 +768,7 @@ def _invoke_agent_opencode_cli(
                     [{"role": "user", "content": payload_text}],
                     err,
                     {
+                        **level_meta,
                         "transport": "opencode-cli",
                         "command": cmd_base,
                         "error": str(retry_exc),
@@ -772,6 +785,7 @@ def _invoke_agent_opencode_cli(
                     [{"role": "user", "content": payload_text}],
                     err,
                     {
+                        **level_meta,
                         "transport": "opencode-cli",
                         "command": cmd_base,
                         "error": str(retry_exc),
@@ -785,6 +799,7 @@ def _invoke_agent_opencode_cli(
                     [{"role": "user", "content": payload_text}],
                     err,
                     {
+                        **level_meta,
                         "transport": "opencode-cli",
                         "command": cmd_base,
                         "error": str(retry_exc),
@@ -801,6 +816,7 @@ def _invoke_agent_opencode_cli(
                 [{"role": "user", "content": payload_text}],
                 err,
                 {
+                    **level_meta,
                     "transport": "opencode-cli",
                     "command": cmd,
                     "error": str(exc),
@@ -813,12 +829,14 @@ def _invoke_agent_opencode_cli(
             [{"role": "user", "content": payload_text}],
             err,
             {
+                **level_meta,
                 "transport": "opencode-cli",
                 "command": cmd,
                 "error": str(exc),
             },
         )
 
+    debug_meta.update(level_meta)
     debug_meta["transport"] = "opencode-cli"
     debug_meta["cliToolsMode"] = cli_tools_mode
     debug_meta["command"] = dispatched_cmd

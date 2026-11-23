@@ -158,6 +158,32 @@ class TestOpenCode2SessionOptions:
         assert client.connection.calls == [("config", "model", "opencode/b-free"), ("config", "mode", "plan"),
                                            ("config", "effort", "max")]
 
+    def test_the_level_is_looked_up_in_the_options_the_model_brings(self):
+        """OpenCode 2's reasoning levels are the model's: after a model switch
+        the level is chosen from the options the agent sent back."""
+        class Replying(FakeConnection):
+            async def set_config_option(self, config_id, session_id, value):
+                await super().set_config_option(config_id, session_id, value)
+                if config_id == "model" and value == "opencode/b-free":
+                    return types.SimpleNamespace(config_options=[
+                        select("model", ["opencode/a-free", "opencode/b-free"], "model"),
+                        select("effort", ["low", "xhigh"], "thought_level"),
+                    ])
+                return None
+
+        client = ACPClient()
+        client.connection = Replying()
+        offered = opencode2_offers()
+        offered.config_options[1] = select("effort", ["low", "high"], "thought_level")   # a-free's levels
+        applied = asyncio.run(client.configure_session("s", offered, model="opencode/b-free", effort="xhigh"))
+        assert applied == {"model": "opencode/b-free", "effort": "xhigh"}
+        assert client.connection.calls[-1] == ("config", "effort", "xhigh")
+
+    def test_a_legacy_mode_is_matched_case_insensitively(self):
+        client = self._client()
+        assert asyncio.run(client.configure_session("s", offers(), mode="Plan")) == {"mode": "plan"}
+        assert client.connection.calls == [("mode", "plan")]
+
     def test_grouped_choices_are_choices(self):
         client = self._client()
         grouped = types.SimpleNamespace(id="model", category="model", options=[
