@@ -21,6 +21,23 @@ All notable changes to wfpy are documented here. The format follows
   the graph: the generated file runs with the user's rights, a recursion has
   no bound of its own, and the parent run does not see inside the child.
 
+### Fixed
+- A port is a `File`/`Resource` port by its type, and no longer by the
+  spelling of its type (#75). The test that every node kind asks before it
+  materializes a token ended with a search for `file` or `resource` in the
+  printed type. Thus a dataclass named `ProfileRun`, `FileSpec` or
+  `ResourceUsage`, and any class defined in a module named `resources` or
+  `profile`, was taken for a file: its token left a nested workflow as the
+  path of a file that was never written, a run returned that path in place of
+  the object, and the dict an agent replied on such a port was written to a
+  `.txt` file. An edge between two tasks was not affected. The test now reads
+  the type: `File`, `Resource`, a subclass or an instance (`File(ext=".md")`),
+  either name written as a string, and one of these inside `Optional[...]`,
+  `... | None` or `Annotated[...]`. Two answers change for types that do name
+  `File`: a container (`list[File]`) and a union with another type
+  (`File | str`) were taken for one file, and are now values that are handed
+  on as they are.
+
 ## [1.3.1] — 2026-11-20
 
 One fix, to what a run writes about the edges of nested workflows (the run
