@@ -63,6 +63,32 @@ All notable changes to wfpy are documented here. The format follows
   model, `provider/model#variant`. An agent that names a level but no model,
   or a model that names another level, gets a warning and
   `opencodeVariantDropped` in its debug record.
+- A decorator written without parentheses keeps its comments when a merge
+  (`mergeDefinitionAnnotationArgs`) gives it its first argument (#82). The
+  merge wrote a new decorator in place of `@agent  # note`, and the comment
+  on its line and the comment lines above it were lost. The arguments now
+  go into the decorator that is there, laid out as in an empty `@agent()`:
+  on one line, where two arguments given to a bare `@agent` were written
+  one per line.
+- The merge finds a decorator written with its module, and a decorator on a
+  function (#83). `@wfpy.agent(...)` on a class, and `@workflow(...)` or
+  `@config(...)` on a `def`, answered `Definition not found for annotation
+  merge`. A decorator is now matched by its name, with `annotationName`
+  given as `agent` or as `wfpy.agent`, on the class or the function that
+  `entityType` names. What is written keeps the form the file uses, and a
+  file that writes `@wfpy.agent` is not given a `from wfpy import agent`.
+  `removeDefinitionAnnotation` finds a decorator the same way. A method is
+  not found by either: `entityType` names no class, and two classes may
+  each have a method of that name. `updateDefinitionAnnotation` is not
+  changed: it matches a decorator written as a bare name on a class.
+- An empty decorator call written over lines (`@agent(` and `)` on two
+  lines) gets its first arguments one per line (#84). The first argument
+  was written at the decorator's column, with the closing parenthesis right
+  after it. Each argument is now on a line of its own, indented as the
+  call's comment lines are (four spaces when it has none), with a comma
+  after the last, and the closing parenthesis stays on its line. A comment
+  on the opening line stays there, and comment lines inside the call stay
+  above the first argument.
 - An edit that writes a text an IDE gives as a value wrote any Python
   expression as given, also one that is not one value where it is written
   (#81). `mcpServers="a", "b"` and `path=*y` left a file that no longer
