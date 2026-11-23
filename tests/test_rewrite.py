@@ -560,6 +560,19 @@ def test_merge_keeps_the_env_of_a_configured_mcp_server_the_ide_edits(tmp_path: 
     compile(updated, "wf.py", "exec")
 
 
+def test_merge_keeps_what_an_edited_mcp_server_does_not_give(tmp_path: Path) -> None:
+    """An edited server comes with the fields the IDE changed: every other entry of
+    the file's dict is kept as written; one it gives, emptied included, replaces it."""
+    updated = _merge_agent_args(tmp_path, _MCP_AGENT, argUpdates={
+        "mcpServers": '["github", "docs", {"name": "web", "command": "web-mcp"}]'
+    })
+    assert '{"name": "web", "command": "web-mcp", "url": WEB_URL}' in updated
+    cleared = _merge_agent_args(tmp_path, _MCP_AGENT, argUpdates={
+        "mcpServers": '[{"name": "web", "url": ""}]'
+    })
+    assert '[{"name": "web", "url": ""}]' in cleared
+
+
 def test_merge_leaves_out_a_configured_mcp_server_the_ide_does_not_name(tmp_path: Path) -> None:
     updated = _merge_agent_args(tmp_path, _MCP_AGENT, argUpdates={"mcpServers": '["github", "web"]'})
     assert "docs" not in updated
@@ -567,24 +580,48 @@ def test_merge_leaves_out_a_configured_mcp_server_the_ide_does_not_name(tmp_path
 
 
 def test_merge_moves_mcp_server_configs_into_mcp_servers(tmp_path: Path) -> None:
-    """Servers the file gives as mcpServerConfigs are kept as written when the IDE
-    names them in mcpServers and takes mcpServerConfigs out."""
+    """The update is the whole list: servers the file gives as mcpServerConfigs are
+    kept as written in mcpServers when named, left out when not, and the argument
+    goes, whether or not the IDE removes it."""
     source = '''
 import os
 
 from wfpy import agent
 
 
-@agent(prompt="do it", mcpServers=["github"], mcp_server_configs=[{"name": "docs", "command": "npx", "env": {"T": os.environ["T"]}}])
+@agent(prompt="do it", mcpServers=["github"], mcp_server_configs=[
+    {"name": "docs", "command": "npx", "env": {"T": os.environ["T"]}},
+    {"name": "old", "url": "http://old/mcp"},
+])
 class McpAgent:
     pass
 '''
-    updated = _merge_agent_args(tmp_path, source, argUpdates={"mcpServers": '["github", "docs"]'}, argRemovals=["mcpServerConfigs"])
+    updated = _merge_agent_args(tmp_path, source, argUpdates={"mcpServers": '["github", "docs"]'})
     assert 'mcpServers=["github", {"name": "docs", "command": "npx", "env": {"T": os.environ["T"]}}]' in updated
     assert "mcp_server_configs" not in updated
+    assert "old" not in updated
+    with_removal = _merge_agent_args(tmp_path, source, argUpdates={"mcpServers": '["github", "docs"]'},
+                                     argRemovals=["mcpServerConfigs"])
+    assert with_removal == updated
+
+
+def test_merge_leaves_mcp_server_configs_the_file_computes(tmp_path: Path) -> None:
+    """A computed mcpServerConfigs stays as written: a name in mcpServers is its
+    server when the workflow runs, and the registry's names can still be edited."""
+    source = '''
+from wfpy import agent
+
+
+@agent(prompt="do it", mcpServers=["github", "docs"], mcp_server_configs=CFGS)
+class McpAgent:
+    pass
+'''
+    updated = _merge_agent_args(tmp_path, source, argUpdates={"mcpServers": '["github", "docs", "fs"]'})
+    assert 'mcpServers=["github", "docs", "fs"], mcp_server_configs=CFGS' in updated
 
 
 def test_merge_refuses_mcp_servers_the_file_computes(tmp_path: Path) -> None:
+    """A list the file computes, or a server in it, has nothing to keep it by."""
     source = '''
 from wfpy import agent
 
@@ -593,10 +630,34 @@ from wfpy import agent
 class McpAgent:
     pass
 '''
-    with pytest.raises(RewriteError, match="computes mcpServers"):
-        _merge_agent_args(tmp_path, source, argUpdates={"mcpServers": '["github", "docs"]'})
-    with pytest.raises(RewriteError, match="computes mcpServers"):
-        _merge_agent_args(tmp_path, source.replace("SERVERS", "[*BASE, \"x\"]"), argUpdates={"mcpServers": '["github"]'})
+    for computed in ("SERVERS", '[*BASE, "x"]', '["github", DOCS]', '[{"name": DOCS_NAME, "command": "npx"}]',
+                     '[{"name": f"{X}", "command": "npx"}]'):
+        with pytest.raises(RewriteError, match="computes mcpServers"):
+            _merge_agent_args(tmp_path, source.replace("SERVERS", computed),
+                              argUpdates={"mcpServers": '["github", "docs"]'})
+
+
+def test_merge_reads_a_server_named_by_concatenated_strings(tmp_path: Path) -> None:
+    source = _MCP_AGENT.replace('{"name": "docs",', '{"name": "do" "cs",')
+    updated = _merge_agent_args(tmp_path, source, argUpdates={"mcpServers": '["docs"]'})
+    assert '{"name": "do" "cs", "transport": "stdio", "command": "npx", "env": {"DOCS_TOKEN": os.environ["DOCS_TOKEN"]}}' in updated
+
+
+def test_merge_writes_no_env_keys_the_export_gave(tmp_path: Path) -> None:
+    updated = _merge_agent_args(tmp_path, _MCP_AGENT, argUpdates={
+        "mcpServers": '[{"name": "docs", "command": "uvx", "envKeys": ["DOCS_TOKEN"]}]'
+    })
+    assert "envKeys" not in updated
+    assert '{"name": "docs", "command": "uvx", "transport": "stdio", "env": {"DOCS_TOKEN": os.environ["DOCS_TOKEN"]}}' in updated
+
+
+def test_merge_refuses_writing_mcp_server_configs(tmp_path: Path) -> None:
+    """The export's mcpServerConfigs names env and does not give it: written back,
+    it would configure each server twice, without its env."""
+    with pytest.raises(RewriteError, match="write the servers in mcpServers"):
+        _merge_agent_args(tmp_path, _MCP_AGENT, argUpdates={
+            "mcpServerConfigs": '[{"name": "docs", "command": "npx", "envKeys": ["DOCS_TOKEN"]}]'
+        })
 
 
 def test_merge_definition_annotation_args_adds_new_arg(tmp_path: Path) -> None:

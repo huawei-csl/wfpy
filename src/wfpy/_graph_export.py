@@ -617,7 +617,8 @@ def _build_agent_meta(meta: dict[str, Any], rec: Any) -> None:
     # env is named, not given: its values are often secrets, and an IDE that
     # writes the server back leaves env to the file
     # (`merge_definition_annotation_args` keeps it). `envKeys` is there for
-    # every server, so an IDE can tell a wfpy that keeps it.
+    # every server, so an IDE can tell a wfpy that keeps it. args and url are
+    # given as they are: a secret belongs in env.
     if rec.meta.agent_spec.mcp_server_configs:
         import json as _json
 

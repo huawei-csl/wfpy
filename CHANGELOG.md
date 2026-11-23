@@ -21,14 +21,17 @@ All notable changes to wfpy are documented here. The format follows
 - An IDE that writes `@agent`'s `mcpServers` back no longer loses what the
   file configures. The graph export gives the servers configured on an
   agent (`mcpServerConfigs`) as values, and their env by name only
-  (`envKeys`: env values are often secrets, and never leave the process).
-  On an annotation merge, a server the IDE writes as its name is the
-  file's dict for it, as written (what it computes included), and a server
-  it writes as a dict without `env` keeps the file's `env`; servers given
-  as `mcpServerConfigs` are found there too. A file that computes the list
-  (`mcpServers=SERVERS`) is refused, not overwritten. An MCP server's args
-  are exported as text: one that is not a string (a `Path`) made the whole
-  export fail.
+  (`envKeys`: env values are often secrets, and never leave the process;
+  args and url are given as they are). On an annotation merge the update
+  is the agent's whole list of servers: one written as its name is the
+  file's dict for it, as written (what it computes included), and one
+  written as a dict (the fields the IDE changed) keeps every entry of the
+  file's it does not give, `env` among them; an `envKeys` is not written. Servers given as a literal `mcpServerConfigs` move into
+  `mcpServers` and the argument goes (one the update leaves out is left
+  out); a computed one stays as written. A `mcpServers` the file computes,
+  or a server in it, is refused, not overwritten, and so is a write of
+  `mcpServerConfigs`. An MCP server's args are exported as text: one that
+  is not a string (a `Path`) made the whole export fail.
 - An `@agent` given no reasoning level had the text `"None"` as its level
   (`str(None)`): `opencode-cli` was started with `--variant None`, and the
   graph export showed `reasoningEffort="None"`, which an IDE wrote back into
