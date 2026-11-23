@@ -697,6 +697,79 @@ def test_merge_writes_no_env_keys_the_export_gave(tmp_path: Path) -> None:
     assert '{"name": "docs", "transport": "stdio", "command": "uvx", "env": {"DOCS_TOKEN": os.environ["DOCS_TOKEN"]}}' in updated
 
 
+def test_merge_adds_an_entry_laid_out_as_the_file_lays_out_the_server(tmp_path: Path) -> None:
+    source = '''
+from wfpy import agent
+
+
+@agent(prompt="do it", mcpServers=[
+    {
+        "name": "web",
+        "url": WEB_URL,
+    },
+])
+class McpAgent:
+    pass
+'''
+    updated = _merge_agent_args(tmp_path, source, argUpdates={"mcpServers": '[{"name": "web", "command": "c"}]'})
+    assert '''{
+        "name": "web",
+        "url": WEB_URL,
+        "command": "c",
+    }''' in updated
+
+
+def test_merge_takes_a_renamed_mcp_server_as_a_new_one(tmp_path: Path) -> None:
+    """A server is known by its name: one the IDE names anew is written as given,
+    and the file's, no longer named, goes."""
+    updated = _merge_agent_args(tmp_path, _MCP_AGENT, argUpdates={
+        "mcpServers": '["github", "docs", {"name": "web2", "url": "http://web/mcp"}]'
+    })
+    assert '{"name": "web2", "url": "http://web/mcp"}' in updated
+    assert "WEB_URL" not in updated
+
+
+def test_merge_refuses_mcp_servers_it_cannot_tell_apart(tmp_path: Path) -> None:
+    """A server with no name, one named twice, a file that configures one server
+    twice, and one that gives an argument under both its spellings (the
+    workflow reads one) are refused."""
+    for servers, match in (('[{"envKeys": []}]', "needs a name"), ('[{"url": "http://x"}]', "needs a name"),
+                           ('["docs", "docs"]', "gives 'docs' twice"),
+                           ('[{"name": "x", "url": "u"}, "x"]', "gives 'x' twice")):
+        with pytest.raises(RewriteError, match=match):
+            _merge_agent_args(tmp_path, _MCP_AGENT, argUpdates={"mcpServers": servers})
+    twice = _MCP_AGENT.replace('    prompt="do it",', '    prompt="do it", mcpServerConfigs=[{"name": "web", "url": "u"}],')
+    for source in (twice, _MCP_AGENT.replace('"github",', '"github", {"name": "docs", "url": "u"},')):
+        with pytest.raises(RewriteError, match="configures the MCP server '(web|docs)' twice"):
+            _merge_agent_args(tmp_path, source, argUpdates={"mcpServers": '["github"]'})
+    both = _MCP_AGENT.replace('    prompt="do it",', '    prompt="do it", mcp_server_configs=[{"name": "b", "url": "u"}],')
+    with pytest.raises(RewriteError, match="gives both"):
+        _merge_agent_args(tmp_path, both.replace("mcpServers=", "mcpServerConfigs=CFGS, mcpServers="),
+                          argUpdates={"mcpServers": '["github"]'})
+
+
+def test_merge_reads_no_mcp_servers_as_none(tmp_path: Path) -> None:
+    source = _MCP_AGENT.replace('    prompt="do it",', '    prompt="do it", mcpServers=None,', 1)
+    source = source[:source.index("    mcpServers=[")] + source[source.index("    ],\n") + len("    ],\n"):]
+    updated = _merge_agent_args(tmp_path, source, argUpdates={"mcpServers": '["github"]'})
+    assert 'mcpServers=["github"]' in updated
+
+
+def test_merge_writes_no_env_keys_on_a_bare_agent(tmp_path: Path) -> None:
+    source = '''
+from wfpy import agent
+
+
+@agent
+class McpAgent:
+    pass
+'''
+    updated = _merge_agent_args(tmp_path, source, argUpdates={
+        "mcpServers": '[{"name": "n", "url": "u", "envKeys": ["K"]}]'
+    })
+    assert 'mcpServers=[{"name": "n", "url": "u"}]' in updated
+
+
 def test_merge_refuses_writing_mcp_server_configs(tmp_path: Path) -> None:
     """The export's mcpServerConfigs names env and does not give it: written back,
     it would configure each server twice, without its env."""

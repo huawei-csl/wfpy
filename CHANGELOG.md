@@ -23,20 +23,23 @@ All notable changes to wfpy are documented here. The format follows
   agent (`mcpServerConfigs`) as values, and their env by name only
   (`envKeys`: env values are often secrets, and never leave the process;
   args and url are given as they are). On an annotation merge the update
-  is the agent's whole list of servers: one written as its name is the
-  file's dict for it, as written (what it computes included), and one
-  written as a dict (the fields the IDE changed) is the file's dict with
-  those values in it, laid out as it was, every other entry kept, `env`
-  among them; an `envKeys` is not written. Servers given as a literal `mcpServerConfigs` move into
-  `mcpServers` and the argument goes (one the update leaves out is left
-  out); a computed one stays as written, and a server written as a dict
-  that the file does not configure is refused while it does (it may be
-  one of those, edited). A `mcpServers` the file computes,
-  or a server in it, is refused, not overwritten, and so is a write of
-  `mcpServerConfigs`. An agent written `@wfpy.agent(...)` is treated the
-  same, under either name the merge finds it by. An MCP server's args are
-  exported as text: one that
-  is not a string (a `Path`) made the whole export fail.
+  is the agent's whole list of servers, each once, known by name. One
+  written as its name is the file's dict for it, as written (what it
+  computes included). One written as a dict (the fields the IDE changed)
+  is the file's dict with those values in it, laid out as it was, every
+  other entry kept, `env` among them. A dict for a name the file does not
+  configure is a new server (a renamed one is one); an `envKeys` is not
+  written, and a dict with no name is refused. Servers given as a literal
+  `mcpServerConfigs` move into `mcpServers` and the argument goes (one the
+  update leaves out is left out); a computed one stays as written, and a
+  server written as a dict that the file does not configure is refused
+  while it does (it may be one of those, edited). Refused, not overwritten:
+  a `mcpServers` the file computes, or a server in it; a file that gives
+  an argument under both its spellings, or configures one server twice (the
+  run takes one of them); a write of `mcpServerConfigs`.
+  An agent written `@wfpy.agent(...)` is treated the same, under either
+  name the merge finds it by. An MCP server's args are exported as text:
+  one that is not a string (a `Path`) made the whole export fail.
 - An `@agent` given no reasoning level had the text `"None"` as its level
   (`str(None)`): `opencode-cli` was started with `--variant None`, and the
   graph export showed `reasoningEffort="None"`, which an IDE wrote back into

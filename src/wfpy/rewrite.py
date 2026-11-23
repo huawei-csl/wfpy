@@ -76,14 +76,16 @@ def _dict_entry(node: cst.Dict, key: str) -> cst.DictElement | None:
     return None
 
 
-def _configured_mcp_servers(value: cst.BaseExpression) -> dict[str, cst.Dict] | None:
-    """The servers a list of ``@agent``'s MCP servers configures, by name, as
-    written; None when the file computes the list or an item of it (only a
-    string, a registry server's name, and a dict with a literal ``"name"``
-    are read)."""
+def _configured_mcp_servers(value: cst.BaseExpression) -> list[tuple[str, cst.Dict]] | None:
+    """The servers a list of ``@agent``'s MCP servers configures, each with its
+    name, as written; None when the file computes the list or an item of it
+    (only a string, a registry server's name, and a dict with a literal
+    ``"name"`` are read). ``None`` is no server."""
+    if isinstance(value, cst.Name) and value.value == "None":
+        return []
     if not isinstance(value, (cst.List, cst.Tuple)):
         return None
-    configured: dict[str, cst.Dict] = {}
+    configured: list[tuple[str, cst.Dict]] = []
     for element in value.elements:
         if not isinstance(element, cst.Element):
             return None
@@ -95,8 +97,57 @@ def _configured_mcp_servers(value: cst.BaseExpression) -> dict[str, cst.Dict] | 
         name = _literal_text(entry.value) if entry is not None else None
         if name is None:
             return None
-        configured.setdefault(name, element.value)
+        configured.append((name, element.value))
     return configured
+
+
+def _without_entry(node: cst.Dict, key: str) -> cst.Dict:
+    """The dict display *node* without its entry *key*; the comma before the
+    closing brace stays as it was."""
+    entries = list(node.elements)
+    kept = [e for e in entries
+            if not (isinstance(e, cst.DictElement) and _literal_text(e.key) == key)]
+    if kept and kept[-1] is not entries[-1]:
+        kept[-1] = kept[-1].with_changes(comma=entries[-1].comma)
+    return node.with_changes(elements=kept)
+
+
+def _with_entries(source: cst.Dict, given: cst.Dict) -> cst.Dict:
+    """The file's dict *source*, laid out as it is, with the entries *given*:
+    one *source* has takes the given value in its place, one it lacks goes at
+    its end, laid out as the entries before it."""
+    keys = {_literal_text(e.key) for e in source.elements if isinstance(e, cst.DictElement)}
+    values: dict[str, cst.BaseExpression] = {}
+    added: list[cst.DictElement] = []
+    for entry in given.elements:
+        key = _literal_text(entry.key) if isinstance(entry, cst.DictElement) else None
+        if not isinstance(entry, cst.DictElement) or key is None:
+            continue
+        if key in keys:
+            values[key] = entry.value
+        else:
+            added.append(entry)
+    entries: list[cst.BaseDictElement] = []
+    for element in source.elements:
+        key = _literal_text(element.key) if isinstance(element, cst.DictElement) else None
+        if isinstance(element, cst.DictElement) and key is not None and key in values:
+            entries.append(element.with_changes(value=values[key]))
+        else:
+            entries.append(element)
+    for entry in added:
+        if not entries:
+            entries.append(entry.with_changes(comma=cst.MaybeSentinel.DEFAULT))
+            continue
+        # The new last entry takes the old last's comma (a trailing one, and the
+        # break before the brace); the old last, the comma between entries.
+        between: cst.Comma | cst.MaybeSentinel = cst.Comma(
+            whitespace_after=cst.SimpleWhitespace(" "))
+        if len(entries) > 1 and isinstance(entries[-2].comma, cst.Comma):
+            between = entries[-2].comma
+        trailing = entries[-1].comma
+        entries[-1] = entries[-1].with_changes(comma=between)
+        entries.append(entry.with_changes(comma=trailing))
+    return source.with_changes(elements=entries)
 
 
 def _keep_configured_mcp_servers(
@@ -105,90 +156,96 @@ def _keep_configured_mcp_servers(
     """``@agent``'s ``mcpServers`` as an IDE writes it, with what the file
     has kept; and whether the file's ``mcpServerConfigs`` goes.
 
-    The update is the agent's whole list of servers. The IDE sees the servers
-    configured in the file (dicts, in ``mcpServers`` or ``mcpServerConfigs``)
-    as the graph export gives them: their values, not the expressions that
-    compute them, and the names of their env, not its values. So it writes a
-    server it did not edit as its name, and an edited one with the fields it
-    changed. A name the file configures is that server's dict as the file
-    writes it; an edited server keeps each entry of the file's dict it does
-    not give (its ``env``, a ``url`` the file computes), and an ``envKeys``
-    the export gave is not written. A literal ``mcpServerConfigs`` goes: the
-    servers the update names are in ``mcpServers`` now, and one it leaves out
-    is left out. One the file computes stays as written, and a name in
-    ``mcpServers`` is its server when the workflow runs; a dict the file does
-    not configure may be one of its servers, edited, with the rest left out:
-    refused while it computes them. A ``mcpServers`` the file computes, or an
-    item of it (``SERVERS``, ``[*BASE]``, ``[DOCS]``, ``{"name": DOCS_NAME}``),
-    has no dict to keep: refused, not overwritten.
+    The update is the agent's whole list of servers, each one once. The IDE
+    sees the servers configured in the file (dicts, in ``mcpServers`` or
+    ``mcpServerConfigs``) as the graph export gives them: their values, not
+    the expressions that compute them, and the names of their env, not its
+    values. So it writes a server it did not edit as its name, and an edited
+    one with the fields it changed. A server is known by its name:
+
+    - a name the file configures is that server's dict as the file writes it;
+    - a dict for a server the file configures is the file's dict, laid out
+      as it is, with the values the update gives; every other entry (its
+      ``env``, a ``url`` the file computes) is kept;
+    - a dict for a name the file does not configure is a new server, written
+      as given (a server renamed in the IDE is one: the file's goes);
+    - an ``envKeys`` the export gave is not written, and a dict with no
+      literal name is refused.
+
+    A literal ``mcpServerConfigs`` goes: the servers the update names are in
+    ``mcpServers`` now, and one it leaves out is left out. One the file
+    computes stays as written, and a name in ``mcpServers`` is its server
+    when the workflow runs; a dict the file does not configure may be one of
+    its servers, edited, with the rest left out: refused while it computes
+    them. A ``mcpServers`` the file computes, or an item of it (``SERVERS``,
+    ``[*BASE]``, ``[DOCS]``, ``{"name": DOCS_NAME}``), has no dict to keep:
+    refused, not overwritten. So is a file that gives an argument under both
+    its spellings, or configures one server twice: the workflow reads one of
+    them.
     """
     configured: dict[str, cst.Dict] = {}
     drop_configs = False
     computed_configs: str | None = None
+    spellings: dict[str, str] = {}
     for arg in existing_args:
-        if arg.keyword is None:
+        keyword = arg.keyword.value if arg.keyword is not None else None
+        key = _decorator_arg_key("agent", keyword) if keyword is not None else None
+        if keyword is None or key is None or key not in ("mcp_servers", "mcp_server_configs"):
             continue
-        arg_key = _decorator_arg_key("agent", arg.keyword.value)
-        if arg_key == "mcp_servers":
-            found = _configured_mcp_servers(arg.value)
-            if found is None:
+        if key in spellings:
+            raise RewriteError(
+                message=f"@agent: the file gives both {spellings[key]} and {keyword}; keep one")
+        spellings[key] = keyword
+        found = _configured_mcp_servers(arg.value)
+        if found is None and key == "mcp_servers":
+            raise RewriteError(
+                message=(f"@agent: the file computes {keyword}, or a server in it; "
+                         "edit its MCP servers there"))
+        if found is None:
+            computed_configs = keyword
+            continue
+        for name, server in found:
+            if name in configured:
+                # The run takes one of them, a merge would keep the other.
                 raise RewriteError(
-                    message=f"@agent: the file computes {arg.keyword.value}, or a server in it; edit its MCP servers there"
-                )
-            for known, server in found.items():
-                configured.setdefault(known, server)
-        elif arg_key == "mcp_server_configs":
-            found = _configured_mcp_servers(arg.value)
-            if found is not None:
-                for known, server in found.items():
-                    configured.setdefault(known, server)
-                drop_configs = True
-            else:
-                computed_configs = arg.keyword.value
+                    message=f"@agent: the file configures the MCP server {name!r} twice; keep one")
+            configured[name] = server
+        if key == "mcp_server_configs":
+            drop_configs = True
     if not isinstance(update, (cst.List, cst.Tuple)):
         return update, drop_configs
 
     kept: list[cst.BaseElement] = []
+    named: set[str] = set()
     for element in update.elements:
-        value = element.value if isinstance(element, cst.Element) else None
-        if isinstance(value, cst.Dict) and _dict_entry(value, "envKeys") is not None:
-            rest = [e for e in value.elements if not (isinstance(e, cst.DictElement) and _literal_text(e.key) == "envKeys")]
-            if rest:
-                rest[-1] = rest[-1].with_changes(comma=cst.MaybeSentinel.DEFAULT)
-            value = value.with_changes(elements=rest)
-            element = element.with_changes(value=value)
-        name = _literal_text(value)
-        if name is None and isinstance(value, cst.Dict):
-            named = _dict_entry(value, "name")
-            name = _literal_text(named.value) if named is not None else None
-        source = configured.get(name) if name is not None else None
-        if source is None and computed_configs is not None and isinstance(value, cst.Dict):
+        if not isinstance(element, cst.Element):
+            kept.append(element)
+            continue
+        value: cst.BaseExpression = element.value
+        given: cst.Dict | None = None
+        server_name: str | None
+        if isinstance(value, cst.Dict):
+            given = _without_entry(value, "envKeys")
+            entry = _dict_entry(given, "name")
+            server_name = _literal_text(entry.value) if entry is not None else None
+            if server_name is None:
+                raise RewriteError(
+                    message="@agent: an MCP server in mcpServers needs a name, as a string")
+        else:
+            server_name = _literal_text(value)
+        if server_name is not None:
+            if server_name in named:
+                raise RewriteError(message=f"@agent: mcpServers gives {server_name!r} twice")
+            named.add(server_name)
+        source = configured.get(server_name) if server_name is not None else None
+        if given is not None and source is None and computed_configs is not None:
             raise RewriteError(
-                message=f"@agent: the file computes {computed_configs}; edit its MCP servers there"
-            )
-        if source is not None and _literal_text(value) is not None:
-            element = element.with_changes(value=source)
-        elif source is not None and isinstance(value, cst.Dict):
-            # The file's dict, as laid out there, with the update's value in each
-            # entry it gives, and an entry the file does not have added at its end.
-            given: dict[str, cst.DictElement] = {}
-            for entry in value.elements:
-                key = _literal_text(entry.key) if isinstance(entry, cst.DictElement) else None
-                if key is not None and isinstance(entry, cst.DictElement):
-                    given[key] = entry
-            entries: list[cst.BaseDictElement] = []
-            for entry in source.elements:
-                key = _literal_text(entry.key) if isinstance(entry, cst.DictElement) else None
-                if key is not None and key in given:
-                    entries.append(entry.with_changes(value=given.pop(key).value))
-                else:
-                    entries.append(entry)
-            for entry in given.values():
-                if entries and isinstance(entries[-1].comma, cst.MaybeSentinel):
-                    entries[-1] = entries[-1].with_changes(comma=cst.Comma(whitespace_after=cst.SimpleWhitespace(" ")))
-                entries.append(entry.with_changes(comma=cst.MaybeSentinel.DEFAULT))
-            element = element.with_changes(value=source.with_changes(elements=entries))
-        kept.append(element)
+                message=f"@agent: the file computes {computed_configs}; edit its MCP servers there")
+        if source is not None:
+            value = _with_entries(source, given) if given is not None else source
+        elif given is not None:
+            value = given
+        kept.append(element.with_changes(value=value))
     return update.with_changes(elements=kept), drop_configs
 
 
@@ -3861,7 +3918,8 @@ class RewriteEngine:
             # The export's mcpServerConfigs is a copy for display (env named, not
             # given): the servers are written in mcpServers, where the file's are kept.
             raise RewriteError(
-                message="@agent: mcpServerConfigs is not written back; write the servers in mcpServers"
+                message=("@agent: mcpServerConfigs is not written back; "
+                         "write the servers in mcpServers")
             )
 
         class _MergeArgs(_DefinitionTransformer):
@@ -3898,7 +3956,8 @@ class RewriteEngine:
                     removals = removal_keys
                     if leaf == "agent" and "mcp_servers" in updates_by_key:
                         written, value = updates_by_key["mcp_servers"]
-                        kept_value, drop_configs = _keep_configured_mcp_servers(value, existing_args)
+                        kept_value, drop_configs = _keep_configured_mcp_servers(
+                            value, existing_args)
                         updates = {**updates_by_key, "mcp_servers": (written, kept_value)}
                         if drop_configs:
                             removals = removal_keys | {"mcp_server_configs"}
