@@ -63,6 +63,13 @@ All notable changes to wfpy are documented here. The format follows
   model, `provider/model#variant`. An agent that names a level but no model,
   or a model that names another level, gets a warning and
   `opencodeVariantDropped` in its debug record.
+- A decorator written without parentheses keeps its comments when a merge
+  (`mergeDefinitionAnnotationArgs`) gives it its first argument (#82). The
+  merge wrote a new decorator in place of `@agent  # note`, and the comment
+  on its line and the comment lines above it were lost. The arguments now
+  go into the decorator that is there, laid out as in an empty `@agent()`:
+  on one line, where two arguments given to a bare `@agent` were written
+  one per line.
 
 ## [1.3.2] — 2026-11-23
 

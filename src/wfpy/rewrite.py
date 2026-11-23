@@ -3542,30 +3542,10 @@ class RewriteEngine:
                         self.updated = True
                         break
                     if not isinstance(call, cst.Call):
-                        # bare @agent with no parens → create a Call with the updates
-                        new_args = [
-                            cst.Arg(
-                                keyword=cst.Name(k),
-                                value=v,
-                                equal=cst.AssignEqual(
-                                    whitespace_before=cst.SimpleWhitespace(""),
-                                    whitespace_after=cst.SimpleWhitespace(""),
-                                ),
-                            )
-                            for k, v in parsed_updates.items()
-                        ]
-                        # Add trailing comma + newline formatting
-                        formatted = []
-                        for i, a in enumerate(new_args):
-                            comma = cst.Comma(whitespace_after=cst.ParenthesizedWhitespace(
-                                indent=True,
-                                last_line=cst.SimpleWhitespace("    "),
-                            )) if i < len(new_args) - 1 else cst.MaybeSentinel.DEFAULT
-                            formatted.append(a.with_changes(comma=comma))
-                        new_call = cst.Call(func=cst.Name(dec_name), args=formatted)
-                        decorators[idx] = cst.Decorator(decorator=new_call)
-                        self.updated = True
-                        break
+                        # A bare `@agent` is given its first args as `@agent()` is.
+                        # The decorator itself stays, with the comment on its line
+                        # and the comment lines above it.
+                        call = cst.Call(func=call)
 
                     # Merge into existing Call args
                     existing_args = list(call.args)
