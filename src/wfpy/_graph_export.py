@@ -613,7 +613,10 @@ def _build_agent_meta(meta: dict[str, Any], rec: Any) -> None:
                 "value": _wf_string_list_expr(rec.meta.agent_spec.mcp_servers),
             }
         )
-    # Emit inline MCP server configs as JSON for rich GUI display
+    # Emit inline MCP server configs as JSON for rich GUI display. Every field
+    # the server has: an IDE that edits one writes the server back whole, and a
+    # field left out here would be lost (`env` always, so an IDE can tell an
+    # empty env from a wfpy that does not report it).
     if rec.meta.agent_spec.mcp_server_configs:
         import json as _json
 
@@ -626,6 +629,7 @@ def _build_agent_meta(meta: dict[str, Any], rec: Any) -> None:
                     "url": _cfg.url,
                     "command": _cfg.command,
                     "args": _cfg.args,
+                    "env": dict(_cfg.env or {}),
                 }
             )
         agent_args.append(

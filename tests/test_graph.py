@@ -195,6 +195,53 @@ class TestExportDefinitionAnnotations:
         assert args.get("useSkillHooks") == "false"
         assert args.get("stateful") == "true"
 
+    def test_inline_mcp_servers_are_exported_whole(self):
+        # An IDE edits a configured server and writes it back whole: each of its
+        # fields is exported, env included, and empty when the server has none.
+        import json
+
+        @agent(
+            prompt="do x",
+            mcpServers=[
+                "github",
+                {"name": "docs", "transport": "stdio", "command": "npx", "args": ["-y", "docs-mcp"],
+                 "env": {"DOCS_TOKEN": "t0k"}},
+                {"name": "web", "url": "http://localhost:8080/mcp"},
+            ],
+        )
+        class McpAgent:
+            class Ports:
+                In = Port[str](direction="in")
+                Out = Port[str](direction="out")
+
+            def action(self, x: str) -> str:
+                return x
+
+        @workflow(inputs={"Input": str}, outputs={"Output": str})
+        def wf():
+            a = McpAgent()
+            connect("Input", a.In)
+            connect(a.Out, "Output")
+
+        graph = WorkflowGraph("wf")
+        with graph:
+            wf()
+
+        agent_nodes = [n for n in export_graph_json(graph)["graph"]["nodes"] if n.get("kind") == "agent"]
+        args = {
+            str(item.get("name")): str(item.get("value"))
+            for a in agent_nodes[0].get("meta", {}).get("definitionAnnotations", [])
+            if a.get("name") == "agent"
+            for item in a.get("arguments", [])
+        }
+        assert args.get("mcpServers") == '["github", "docs", "web"]'
+        assert json.loads(args["mcpServerConfigs"]) == [
+            {"name": "docs", "transport": "stdio", "url": "", "command": "npx", "args": ["-y", "docs-mcp"],
+             "env": {"DOCS_TOKEN": "t0k"}},
+            {"name": "web", "transport": "streamable-http", "url": "http://localhost:8080/mcp", "command": "",
+             "args": [], "env": {}},
+        ]
+
     def test_agent_backend_and_context_params_are_serialized(self):
         # transport / cliToolsMode / reasoningEffort / fireableWithoutInput /
         # truncationStrategy are surfaced to the IDE so the properties panel can edit them.
