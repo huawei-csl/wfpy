@@ -387,6 +387,7 @@ def _unparsed_graph(
     graph is empty and carries the errors, so the IDE shows an overlay and
     not a bare `status: error`."""
     faults: tuple[SourceFault, ...] = ()
+    source_text = ""
     workflow = args.get("workflow")
     try:
         module, source_text, faults = load_drawable_module(file_path)
@@ -395,7 +396,7 @@ def _unparsed_graph(
         return unparsed_file_graph(
             file_path, str(workflow) if workflow else "", faults=faults, refused=exc
         )
-    mark_faults(graph, faults, file_path)
+    mark_faults(graph, faults, file_path, source_text)
     return graph
 
 

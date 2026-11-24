@@ -14,7 +14,13 @@ from typing import TYPE_CHECKING, Any, Iterable, Iterator, NoReturn, Sequence
 import libcst as cst
 import libcst.matchers as m
 
-from wfpy._drawable_source import drawable_source, fault_errors, mark_faults, syntax_fault
+from wfpy._drawable_source import (
+    drawable_source,
+    fault_errors,
+    fault_owner,
+    mark_faults,
+    syntax_fault,
+)
 from wfpy._source_repair import SourceFault
 from wfpy.workflow_identity import (
     detect_dynamic_workflow_identity_issues,
@@ -1691,7 +1697,7 @@ class RewriteEngine:
                 )
             except RewriteError:
                 continue
-            mark_faults(nested_graph, faults, module_file)
+            mark_faults(nested_graph, faults, module_file, nested_source)
             return nested_graph
 
         raise RewriteError(
@@ -3363,7 +3369,7 @@ class RewriteEngine:
         _augment_graph_ids(nodes, edges)
         # What a drawing needs and the nodes and edges alone do not say: the
         # ports an edge ends on, and the workflow's own inputs and outputs.
-        self._add_static_ports(fn, nodes, edges)
+        elsewhere = self._add_static_ports(fn, nodes, edges)
         visited = set(_visited_workflows or set())
         visited.add(workflow_name)
 
@@ -3373,6 +3379,9 @@ class RewriteEngine:
             "edges": edges,
             "file": self.file_path,
         }
+        if elsewhere:
+            graph["partial"] = True
+            graph["errors"] = elsewhere
         if parents:
             factory_fn = parents[-1]
             helper_parameters = self._helper_default_parameters(factory_fn)
@@ -3429,7 +3438,7 @@ class RewriteEngine:
 
     def _add_static_ports(
         self, fn: cst.FunctionDef, nodes: list[dict[str, Any]], edges: list[dict[str, Any]]
-    ) -> None:
+    ) -> list[dict[str, Any]]:
         """Give the exported graph its ports, in place, from the source alone.
 
         Each node gets `ports`: those its class declares in `class Ports:` (a
@@ -3448,8 +3457,15 @@ class RewriteEngine:
         A control construct gets the `label` the runtime names it by (`loop`,
         `loop_1`, `if`), which is not the name the source binds it to. A
         reader that keys a drawing on labels then lays this graph out as it
-        does the runtime's, a node of a shared label resolved the same way."""
-        from wfpy._project_index import ProjectIndex, declared_ports
+        does the runtime's, a node of a shared label resolved the same way.
+
+        A class of another file that does not parse is read from the repaired
+        text of that file, so a port declared on a faulty line is not among
+        its ports. The faults of such a file are what this gives back, as
+        `syntax_error`s at their places in it, and the nodes of a class a
+        fault is in are flagged. No error is lost in a drawing that looks
+        whole."""
+        from wfpy._project_index import ProjectIndex, declared_as, declared_ports
 
         # One reading of the project for the module as it stands: a graph
         # with nested workflows of this file comes back here once for each.
@@ -3507,8 +3523,64 @@ class RewriteEngine:
                 controls[control] = seen + 1
                 node["label"] = f"{control}_{seen}" if seen else control
 
+        elsewhere: list[dict[str, Any]] = []
+        faulty: dict[Path, dict[str, list[Any]]] = {}
+        reported: set[tuple[Path, str]] = set()
+        defined: dict[str, Any] = {}
+        for node in nodes:
+            ref = str(node.get("ref", ""))
+            if ref and ref not in defined:
+                defined[ref] = declared_as(index, self.file_path, ref)
+            found_as = defined.get(ref)
+            # A nested workflow of a faulty file has its own graph to say so.
+            if found_as is None or found_as[0] == "workflow":
+                continue
+            definition = found_as[1]
+            source_file = Path(definition.file).resolve()
+            faults = index.faults.get(source_file)
+            if not faults:
+                continue
+            if source_file not in faulty:
+                repaired_tree = index.tree(source_file)
+                in_classes: dict[str, list[Any]] = {}
+                for fault in faults:
+                    if repaired_tree is None:
+                        break
+                    held_by = fault_owner(repaired_tree, fault)
+                    if held_by is not None and held_by[0] == "class":
+                        in_classes.setdefault(held_by[1], []).append(fault)
+                faulty[source_file] = in_classes
+            # Only a fault in the class of a node changes what is drawn here:
+            # one elsewhere in that file is that file's.
+            in_class = faulty[source_file].get(definition.name)
+            if not in_class:
+                continue
+            if (source_file, definition.name) not in reported:
+                reported.add((source_file, definition.name))
+                elsewhere.extend(fault_errors(tuple(in_class), str(source_file)))
+            flags = node.get("metadata")
+            if not isinstance(flags, dict):
+                flags = {}
+                node["metadata"] = flags
+            flags["isErrored"] = True
+            flags.setdefault("errorMessage", in_class[0].message)
+
         boundary: dict[str, dict[str, Any]] = {}
         positions = self._source_positions()
+        # A name the workflow assigns is a local, not a port of the workflow:
+        # `src = a.Out` then `connect(src, b.In)` names no input `src`.
+        local_names: set[str] = set()
+        for assign in m.findall(fn, m.Assign()):
+            if not isinstance(assign, cst.Assign):
+                continue
+            for assigned in assign.targets:
+                written = assigned.target
+                parts = (
+                    [element.value for element in written.elements]
+                    if isinstance(written, cst.Tuple)
+                    else [written]
+                )
+                local_names.update(part.value for part in parts if isinstance(part, cst.Name))
 
         def boundary_node(
             kind: str, name: str, type_name: str = "any", written_at: cst.CSTNode | None = None
@@ -3554,7 +3626,8 @@ class RewriteEngine:
                     continue
                 named = str(end.get("port", ""))
                 if end.get("kind") == "workflow":
-                    if named:
+                    node_id = f"{'wf:input' if kind == 'wf-input' else 'wf:output'}:{named}"
+                    if named and (node_id in boundary or named not in local_names):
                         boundary_node(kind, named)
                     continue
                 owner = by_name.get(str(end.get("nodeId", "")))
@@ -3565,6 +3638,7 @@ class RewriteEngine:
                     owner["ports"].append(port(port_id, named, direction, "any"))
 
         nodes[:0] = [boundary[node_id] for node_id in sorted(boundary)]
+        return elsewhere
 
     def create_task_type(
         self,

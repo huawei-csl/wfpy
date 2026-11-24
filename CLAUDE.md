@@ -56,6 +56,9 @@ src/wfpy/
 │                        line for line (drawing only: never run, never written)
 ├── _drawable_source.py  The repaired text with its nodes and connections kept;
 │                        marks the faults on the sidecar's static graph
+├── _static_plan.py      `plan --format graph --best-effort` for a file that
+│                        does not import: the static export through the
+│                        runtime's exporter, the error on the nodes it is in
 ├── workflow_identity.py  Workflow identity helpers
 ├── _agent_*_runtime.py   Agent subsystem modules (cli, io, prompt, request,
 │                         tools, validation) — split out of runner.py
@@ -101,7 +104,7 @@ Public API is re-exported from `src/wfpy/__init__.py`.
 - A run that fails writes `run.wf-checkpoint.json` (queues, actor/control state, sub-plans, context); `run(resume_from=...)` / `wfpy run --resume-from` restores it into a freshly built plan. A firing that raises gives its tokens back (`_atomic_firing`); nested workflows and if/loop are composite, not wrapped, and mark an interrupted firing in `RuntimeActor.pending`. New per-actor runtime state must be added to `_checkpoint_runtime.actor_state/restore_actor_state` (shared by the checkpoint and the journal) or a resume silently loses it.
 - Every wrapped firing is journalled (`run.wf-journal.jsonl`, on whenever `queue_trace` is); `run(resume_from=..., at_step=N)` replays each actor's first firings from it (`Journal.replay_firing`, called from `_step_actor`), chosen per actor by `_journal_runtime.entries_at_step` — not by one journal cut-off, which races with parallel workers. Token writes during a firing must go through `Queue.enqueue`/`dequeue` so the journal sees them.
 - CLI `--agent-tools` auto-discovers `agent-tools.json` beside the workflow file. Without the flag, the registry is not auto-loaded.
-- `wfpy plan --format graph --best-effort` falls back to the AST partial-graph builder in `partial.py`; plain `plan` does not.
+- `wfpy plan --format graph --best-effort` falls back to the AST partial-graph builder in `partial.py`; plain `plan` does not. A file that does not import or parse is drawn by `_static_plan.py` from the sidecar's static export (`RewriteEngine.export_workflow_graph`), so a change of that export's payload (node kinds, port ids, scope names) is a change of this document: `tests/test_static_plan.py` holds it against the runtime's on every example.
 - Do not use system `/tmp` for repo work or scratch — use the repo-local `.tmp/` directory.
 
 ## Tests

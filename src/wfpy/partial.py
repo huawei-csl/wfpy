@@ -4,6 +4,7 @@ import ast
 from dataclasses import dataclass
 from typing import Any
 
+from wfpy._static_plan import static_graph_document
 from wfpy.graph import ActorRecord
 from wfpy.graph import export_graph_json
 from wfpy.graph import WorkflowGraph
@@ -21,11 +22,19 @@ def _format_exc(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {exc}"
 
 
-def build_partial_graph(file_path: str, workflow_name: str | None, exc: BaseException) -> dict[str, Any]:
+def build_partial_graph(
+    file_path: str,
+    workflow_name: str | None,
+    exc: BaseException,
+    *,
+    imports: bool = True,
+) -> dict[str, Any]:
     """Build a best-effort graph from a Python workflow file.
 
     This is the ``wfpy plan --best-effort`` fallback used when a workflow fails
-    to elaborate (e.g. a ``connect()`` to a non-existent port raised).
+    to elaborate (e.g. a ``connect()`` to a non-existent port raised), or when
+    the file itself does not import (``imports=False``: ``exc`` is what the
+    import raised, and it is not tried a second time).
 
     The strategy is to reproduce the *normal* graph build as faithfully as
     possible: import the (importable) module, instantiate the real ``@task``
@@ -35,8 +44,11 @@ def build_partial_graph(file_path: str, workflow_name: str | None, exc: BaseExce
     graph still renders — instead of collapsing into synthetic boundary-port
     nodes.
 
-    If the module itself cannot be imported, we fall back to a conservative
-    AST-only stub so that at least node names still appear.
+    If the module itself cannot be imported, or does not parse, the graph is
+    the static reading of the file (``_static_plan``): its nodes, their ports
+    and its edges as the source declares them, with the error at its line and
+    on the nodes it belongs to. Where that reading cannot be made either, a
+    conservative AST-only stub keeps at least the node names.
     """
     top_error = PartialError(message=_format_exc(exc), file=file_path)
     errors: list[PartialError] = [top_error]
@@ -51,6 +63,9 @@ def build_partial_graph(file_path: str, workflow_name: str | None, exc: BaseExce
     try:
         module_ast = ast.parse(source, filename=file_path)
     except SyntaxError as syn:
+        drawn = static_graph_document(file_path, workflow_name, syn)
+        if drawn is not None:
+            return drawn
         errors.append(PartialError(
             message=f"SyntaxError: {syn.msg}",
             file=file_path,
@@ -68,10 +83,13 @@ def build_partial_graph(file_path: str, workflow_name: str | None, exc: BaseExce
 
     # Preferred path: import the module so we can build nodes from the REAL
     # task classes (real ports / kind / meta), exactly like the success path.
-    module = _try_import_module(file_path)
+    module = _try_import_module(file_path) if imports else None
     if module is not None:
         graph, failed_connects = _build_from_real_module(module, target_fn, workflow_name, file_path, errors)
     else:
+        drawn = static_graph_document(file_path, workflow_name, exc)
+        if drawn is not None:
+            return drawn
         graph = _build_from_ast_stub(target_fn, workflow_name, file_path, errors)
         failed_connects = []
 

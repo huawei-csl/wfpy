@@ -50,7 +50,10 @@ All notable changes to wfpy are documented here. The format follows
     and `wf:output:<name>` of kind `wf-output`, one port each, every
     declared one and any a connection only names. They are listed first,
     inputs by name then outputs by name, as that graph lists them. A reader
-    that took every entry of `nodes` for an instance now meets these.
+    that took every entry of `nodes` for an instance now meets these. A
+    name the workflow assigns (`src = a.Out`) is a local and makes no such
+    node. An input and an output of one name share the port id `wf:<name>`,
+    the `portId` the edges had: the side of the edge end tells them apart.
   - A `loop` or `if_` node has the `label` the runtime names it by (`loop`,
     `loop_1`, `if`); its `id` stays the name the source binds it to.
   On every tutorial and advanced example the static graph is now the graph
@@ -77,9 +80,40 @@ All notable changes to wfpy are documented here. The format follows
   `errorMessage`, a node under `metadata` and an edge under `meta`. The
   copy is for drawing: nothing is run, the file is not written, and every
   other op still refuses a file that does not parse. What is not done: a
-  fault is not yet placed on the nodes of the class it is in, and a string
-  left open in a file that holds a workflow as text can let lines of that
-  text be read as code.
+  string left open in a file that holds a workflow as text can let lines of
+  that text be read as code.
+- `wfpy plan --format graph --best-effort` draws a file it cannot import.
+  The command imports the file before anything else, and that import was
+  outside what `--best-effort` covers: a misspelt name, a failing import or
+  a syntax fault ended it on the traceback, with no graph. Such a file is
+  now drawn from the source. The static reading of the file goes through
+  the runtime's own exporter, so the document has the ids, the ports, the
+  edges and the scopes of the one the runtime gives when the file does
+  import (held on every tutorial and advanced example), and it is `partial`
+  with the error in `errors`: the exception at the last line of the file it
+  went through, or each syntax fault at its line and column. The document
+  follows the runtime where a file departs from the plain case: a port goes
+  by the name it is declared with (`Port[T](name="...")`), a direction left
+  open is `inout`, a `@source` or `@streamblocks` node has its kind, a name
+  bound in both branches of an `if_` is two nodes, and with no `--workflow`
+  the workflow drawn is the one the command takes when the file imports.
+  `--workflow` with a name the file has nowhere is `not found`, as it is for
+  a file that imports. Without `--best-effort` the command fails as it did.
+  What is not the runtime's: a node's parameters are not in its `meta`, and a
+  class defined on both sides of an `if` is read as the one written last.
+- An error is on the nodes it belongs to, in the static graph of the
+  sidecar and in the document of `wfpy plan`. An error in the body of a task
+  class (a misspelt name in a port, a syntax fault in an action) flags every
+  node of that class; one on a statement of the workflow flags the node or
+  the edge that statement makes; one elsewhere flags nothing and stays the
+  file's. A flag is `isErrored` and `errorMessage` (under `meta` in the
+  document, under `metadata` for a node of the sidecar's graph). The error
+  is reported once, in `errors`, at its own line: a flag is no second
+  report. A syntax fault in a task class of another file is said the same
+  way on the graph of the workflow that makes nodes of it: the graph is
+  `partial`, the error has the path and the line of that file, and the nodes
+  of the class are flagged. The class is read from the repaired text of its
+  file, so without this the drawing looked whole with a port missing.
 
 ### Fixed
 - The `syntax_error` of a static graph is at the line of the fault. It was

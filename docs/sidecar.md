@@ -65,7 +65,12 @@ file that does not import. It is one a reader can draw:
   `if_`'s own), followed through the project's imports, then any port a
   connection names that the declaration does not have.
 - The `id` of a port is the `portId` an edge ends on, so each end of each edge
-  is a port of a node of the graph.
+  is a port of a node of the graph. One case needs the side of the edge to
+  tell: a workflow with an input and an output of one name has the port
+  `wf:<name>` on both of its nodes. The `from` end of an edge is then the
+  input's and the `to` end the output's.
+- A name the workflow assigns is a local of it and no port of the workflow:
+  `src = a.Out` then `connect(src, b.In)` adds no input `src`.
 
 ```json
 {
@@ -127,10 +132,17 @@ parse with an error.
   same under `"meta"`. The fault is reported once, in `errors`.
 - A fault elsewhere (in a task's class, in a decorator, in the header of the
   workflow) leaves the graph whole. A port whose declaration is lost is drawn
-  when a connection names it.
+  when a connection names it. A fault in a class of the file flags every node
+  of that class the same way, so the diagram shows which nodes it concerns.
 - A nested workflow of another file that does not parse is drawn the same way,
   and it is its own graph under `children` that is `partial` and carries the
   errors, with that file's path.
+- A task class imported from a file that does not parse is read from the
+  repaired text of that file, so it keeps the ports it declares on its good
+  lines. A fault in the body of that class is said on this graph: it is
+  `partial`, `errors` has the `syntax_error` with the path and the line of the
+  other file, and every node of the class is flagged. A fault elsewhere in
+  that file is not this graph's.
 
 ```json
 {
@@ -156,6 +168,13 @@ parse with an error.
 
 When no copy can be made that parses, or the copy has no workflow left to
 draw, the graph has no nodes and no edges and carries the errors.
+
+`wfpy plan <file> --format graph --best-effort` gives the same reading in the
+runtime's document when it cannot import the file, for a syntax fault and for
+an error raised by the import (a misspelt name, a module that is not
+installed). The document is `partial`, its `errors` are `{message, file, line,
+column}`, and the nodes an error belongs to carry `isErrored` and
+`errorMessage` in `meta`.
 
 Response shape includes:
 

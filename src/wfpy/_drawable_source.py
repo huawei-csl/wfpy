@@ -31,7 +31,15 @@ from typing import Any
 
 from wfpy._source_repair import SourceFault, repair_source
 
-__all__ = ["DrawableSource", "drawable_source", "fault_errors", "mark_faults", "syntax_fault"]
+__all__ = [
+    "DrawableSource",
+    "drawable_source",
+    "fault_errors",
+    "fault_owner",
+    "mark_faults",
+    "owner_of",
+    "syntax_fault",
+]
 
 
 @dataclass(frozen=True)
@@ -188,25 +196,108 @@ def fault_errors(faults: tuple[SourceFault, ...], file_path: str) -> list[dict[s
     return errors
 
 
-def mark_faults(graph: dict[str, Any], faults: tuple[SourceFault, ...], file_path: str) -> None:
+def mark_faults(
+    graph: dict[str, Any],
+    faults: tuple[SourceFault, ...],
+    file_path: str,
+    source_text: str | None = None,
+) -> None:
     """Say on `graph`, drawn from a repaired text, what was repaired.
 
     The graph becomes `partial`, and `errors` gets a `syntax_error` for each
-    fault, at the line and column Python names. A node or an edge written on
-    the lines of a fault is flagged (`isErrored`, `errorMessage`): it is drawn
-    from what was left of its statement. The flag is no second report of the
-    fault, which `errors` places better than the start of a statement does.
-    The graphs of the nested workflows of the same file are flagged alike;
-    one of another file is not this file's to mark.
+    fault, at the line and column Python names. What a fault belongs to is
+    flagged (`isErrored`, `errorMessage`):
+
+    - a node or an edge written on the lines of the fault, which is drawn
+      from what was left of its statement;
+    - every node of a class of this file the fault is in, when `source_text`
+      (the repaired text) is given to find the class by.
+
+    The flag is no second report of the fault, which `errors` places better
+    than the start of a statement does. The graphs of the nested workflows
+    of the same file are flagged alike; one of another file is not this
+    file's to mark.
     """
     if not faults:
         return
     graph["partial"] = True
     graph.setdefault("errors", []).extend(fault_errors(faults, file_path))
-    _flag_elements(graph, faults, _resolved(file_path))
+    classes: dict[str, SourceFault] = {}
+    if source_text is not None:
+        try:
+            tree = ast.parse(source_text)
+        except (SyntaxError, ValueError):
+            tree = None
+        for fault in faults if tree is not None else ():
+            owner = fault_owner(tree, fault) if tree is not None else None
+            if owner is not None and owner[0] == "class":
+                classes.setdefault(owner[1], fault)
+    _flag_elements(graph, faults, _resolved(file_path), classes)
 
 
-def _flag_elements(graph: dict[str, Any], faults: tuple[SourceFault, ...], here: str) -> None:
+def owner_of(tree: ast.Module, line: int) -> tuple[str, str, int] | None:
+    """What `line` of a module belongs to.
+
+    `("class", name, line of its header)` for a line of a class written at
+    the top of the module, its decorators included; `("function", name, line
+    of the statement)` for a line of such a function, the statement being the
+    innermost one of its body that holds the line. None for a line that is in
+    neither.
+    """
+    for top in tree.body:
+        decorators = getattr(top, "decorator_list", [])
+        first = min([top.lineno, *(decorator.lineno for decorator in decorators)])
+        if not first <= line <= (top.end_lineno or top.lineno):
+            continue
+        if isinstance(top, ast.ClassDef):
+            return "class", top.name, top.lineno
+        if isinstance(top, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            return "function", top.name, _statement_line(top.body, line) or top.lineno
+        return None
+    return None
+
+
+def fault_owner(tree: ast.Module, fault: SourceFault) -> tuple[str, str, int] | None:
+    """What a repaired fault belongs to, in the tree of the repaired text.
+
+    The line the parser named may be one the repair left empty (the second
+    line of a statement that is one line now), and the first line of the
+    span may be a decorator that went with its statement. So the lines of
+    the span are tried in order: the first one in a class decides, or the
+    first one a statement of a function starts on.
+    """
+    inside: tuple[str, str, int] | None = None
+    for line in range(fault.first_line, fault.last_line + 1):
+        owner = owner_of(tree, line)
+        if owner is None:
+            continue
+        if owner[0] == "class" or owner[2] == line:
+            return owner
+        inside = inside or owner
+    return inside
+
+
+def _statement_line(body: list[ast.stmt], line: int) -> int | None:
+    for statement in body:
+        if not statement.lineno <= line <= (statement.end_lineno or statement.lineno):
+            continue
+        blocks = [getattr(statement, name, None) for name in ("body", "orelse", "finalbody")]
+        blocks += [handler.body for handler in getattr(statement, "handlers", [])]
+        blocks += [case.body for case in getattr(statement, "cases", [])]
+        for block in blocks:
+            inner = _statement_line(block, line) if isinstance(block, list) else None
+            if inner is not None:
+                return inner
+        return statement.lineno
+    return None
+
+
+def _flag_elements(
+    graph: dict[str, Any],
+    faults: tuple[SourceFault, ...],
+    here: str,
+    classes: dict[str, SourceFault],
+) -> None:
     # A node is read by `metadata` and an edge by `meta` or `metadata`: the
     # keys a reader of this payload takes the state of each from.
     for key, elements in (("metadata", graph.get("nodes")), ("meta", graph.get("edges"))):
@@ -214,6 +305,10 @@ def _flag_elements(graph: dict[str, Any], faults: tuple[SourceFault, ...], here:
             if not isinstance(element, dict):
                 continue
             fault = _fault_at(element.get("location"), faults, here)
+            if fault is None and key == "metadata":
+                # A class of this file is named as it is: a dotted name is
+                # one of another module.
+                fault = classes.get(str(element.get("ref", "")))
             if fault is None:
                 continue
             meta = element.get(key)
@@ -225,7 +320,7 @@ def _flag_elements(graph: dict[str, Any], faults: tuple[SourceFault, ...], here:
     for child in graph.get("children") or []:
         nested = child.get("graph") if isinstance(child, dict) else None
         if isinstance(nested, dict) and _resolved(str(nested.get("file", ""))) == here:
-            _flag_elements(nested, faults, here)
+            _flag_elements(nested, faults, here, classes)
 
 
 def _fault_at(location: Any, faults: tuple[SourceFault, ...], here: str) -> SourceFault | None:
