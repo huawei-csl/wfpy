@@ -163,6 +163,14 @@ class ProjectIndex:
                 self.errors[path] = str(exc)
         return self._texts[path]
 
+    def use_text(self, path: str | Path, text: str) -> None:
+        """Read ``path`` as ``text`` and not from disk: what the caller holds
+        of the file, which may not be what is saved."""
+        path = Path(path).resolve()
+        self._texts[path] = text
+        self._trees.pop(path, None)
+        self.errors.pop(path, None)
+
     def tree(self, path: Path) -> ast.Module | None:
         path = path.resolve()
         if path not in self._trees:
@@ -602,4 +610,228 @@ def type_parameters(file_path: str, type_name: str) -> dict[str, object]:
         "kind": kind,
         "file": str(definition.file),
         "parameters": parameters,
+    }
+
+
+# ── Ports, as the source declares them ─────────────────────────────────
+
+# A port of no declared direction is an output by these names and an input by
+# any other (`core._infer_direction`).
+_OUTPUT_PORT_NAMES = {"out", "output", "result", "report", "summary"}
+
+# wfpy's control constructs, as the runtime graph draws them
+# (`_graph_export.export_graph_json`): the kind the runtime names one by, and
+# its ports by name, direction, type.
+_CONTROL_PORTS: dict[str, tuple[str, tuple[tuple[str, str, str], ...]]] = {
+    "if_": ("if", (("cond", "in", "bool"), ("out", "out", "any"))),
+    "loop": ("loop", (("iter", "in", "iterable"), ("item", "out", "any"), ("out", "out", "any"))),
+}
+
+
+def declared_ports(
+    index: ProjectIndex, file: str | Path, ref: str
+) -> list[dict[str, object]] | None:
+    """The ports of what ``ref`` names in module ``file``, read from the
+    source and in the order written: a task class's ``class Ports:`` (a
+    base's when it has none of its own), the ``inputs`` and ``outputs`` of a
+    workflow, or of the workflow a factory builds when ``ref`` is the call of
+    one (``make(3)`` of ``flow = make(3)()``), a control construct's own.
+
+    Each port is its attribute (``attr``, what ``connect(node.<attr>, ...)``
+    writes), its ``name``, a ``direction`` of ``in`` or ``out`` (one the
+    source leaves open is settled by name, as the runtime settles it), its
+    ``type`` as written, a ``role``, and the ``file`` and ``line`` it is
+    declared at. A control construct's say which one it is (``control``:
+    ``if`` or ``loop``) and no place: wfpy declares them.
+
+    ``None`` when ``ref`` is not followed to a definition the project holds:
+    a class of an installed package, a call that builds no node. That is not
+    "no ports": the caller knows only what the connections name."""
+    here = Path(file).resolve()
+    try:
+        written: ast.expr = ast.parse(ref.strip(), mode="eval").body
+    except (SyntaxError, ValueError):
+        return None
+    # `make(3)`: what is instantiated is what the call returns.
+    called = isinstance(written, ast.Call)
+    if isinstance(written, ast.Call):
+        written = written.func
+    parts: list[str] = []
+    while isinstance(written, ast.Attribute):
+        parts.append(written.attr)
+        written = written.value
+    if not isinstance(written, ast.Name):
+        return None
+    parts.append(written.id)
+    name, module = parts[0], ".".join(reversed(parts[1:]))
+    home = here
+    if module:
+        found = _dotted_module(index, here, module)
+        if found is None:
+            head = index.binding(here, module.split(".")[0])
+            if isinstance(head, External) and head.module.split(".")[0] == "wfpy" and not called:
+                return _control_ports(name)
+            return None
+        home = found
+    bound = index.binding(home, name)
+    if isinstance(bound, External):
+        if called or bound.module.split(".")[0] != "wfpy":
+            return None
+        return _control_ports(bound.name)
+    if not isinstance(bound, Definition):
+        return None
+    node = index.definition_node(bound)
+    text = index.text(bound.file) or ""
+    if isinstance(node, ast.ClassDef) and not called:
+        return _class_ports(index, bound, node) or []
+    if isinstance(node, ast.FunctionDef):
+        workflow = factory_workflow(node) if called else node
+        if workflow is not None and is_workflow_function(workflow):
+            return workflow_ports(text, bound.file, workflow)
+    return None
+
+
+def workflow_ports(text: str, file: Path, fn: ast.FunctionDef) -> list[dict[str, object]]:
+    """The ports ``@workflow(inputs={...}, outputs={...})`` declares on
+    ``fn``: its inputs, then its outputs."""
+    ports: list[dict[str, object]] = []
+    for decorator in fn.decorator_list:
+        if not isinstance(decorator, ast.Call) or _decorator_name(decorator) != "workflow":
+            continue
+        for wanted, direction in (("inputs", "in"), ("outputs", "out")):
+            for keyword in decorator.keywords:
+                if keyword.arg != wanted or not isinstance(keyword.value, ast.Dict):
+                    continue
+                for key, value in zip(keyword.value.keys, keyword.value.values):
+                    if isinstance(key, ast.Constant) and isinstance(key.value, str):
+                        ports.append(
+                            {
+                                "attr": key.value,
+                                "name": key.value,
+                                "direction": direction,
+                                "type": _segment(text, value) or "any",
+                                "role": "data",
+                                "file": str(file),
+                                "line": key.lineno,
+                            }
+                        )
+    return ports
+
+
+def _control_ports(name: str) -> list[dict[str, object]] | None:
+    if name not in _CONTROL_PORTS:
+        return None
+    control, ports = _CONTROL_PORTS[name]
+    return [
+        {
+            "attr": port,
+            "name": port,
+            "direction": direction,
+            "type": kind,
+            "role": "control",
+            "control": control,
+        }
+        for port, direction, kind in ports
+    ]
+
+
+def _dotted_module(index: ProjectIndex, file: Path, dotted: str) -> Path | None:
+    """The project file ``dotted`` names in ``file`` after ``import pkg.mod``
+    or ``import pkg.mod as dotted``."""
+    head = dotted.split(".")[0]
+    bound = index.binding(file, head)
+    if not isinstance(bound, External) or bound.name:
+        return None
+    for candidate in (dotted, bound.module + dotted[len(head) :], bound.module):
+        found = index.module_file(candidate, near=file)
+        if found is not None:
+            return found
+    return None
+
+
+def _class_ports(
+    index: ProjectIndex, definition: Definition, node: ast.ClassDef, depth: int = 0
+) -> list[dict[str, object]] | None:
+    """The ports of a class: those of its ``class Ports:``, after those of the
+    ``Ports`` that one extends (``class Ports(Base.Ports):``). A class with no
+    ``Ports`` has its first base's that has one, as ``getattr(cls, "Ports")``
+    finds it. ``None`` when neither it nor a base has any."""
+    block = next(
+        (stmt for stmt in node.body if isinstance(stmt, ast.ClassDef) and stmt.name == "Ports"),
+        None,
+    )
+    bases: list[ast.expr] = (
+        list(node.bases)
+        if block is None
+        else [b.value for b in block.bases if isinstance(b, ast.Attribute) and b.attr == "Ports"]
+    )
+    inherited: list[dict[str, object]] = []
+    if depth < 8:
+        for base in bases:
+            if not isinstance(base, ast.Name):
+                continue
+            bound = index.binding(definition.file, base.id)
+            base_node = index.definition_node(bound) if isinstance(bound, Definition) else None
+            if not isinstance(bound, Definition) or not isinstance(base_node, ast.ClassDef):
+                continue
+            found = _class_ports(index, bound, base_node, depth + 1)
+            if found is None:
+                continue
+            if block is None:
+                return found
+            inherited.extend(entry for entry in found if entry not in inherited)
+    if block is None:
+        return None
+    text = index.text(definition.file) or ""
+    ports = inherited
+    for stmt in block.body:
+        entry = _port_entry(text, definition.file, stmt)
+        if entry is None:
+            continue
+        ports = [port for port in ports if port["attr"] != entry["attr"]]
+        ports.append(entry)
+    return ports
+
+
+def _port_entry(text: str, file: Path, stmt: ast.stmt) -> dict[str, object] | None:
+    """``Name = Port[T](...)`` (or the bare ``Port[T]``) as a port; ``None`` for
+    any other statement of a ``Ports`` block, and for a private name, which the
+    runtime does not take as a port either (`types.extract_ports`)."""
+    value: ast.expr | None
+    if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1:
+        target, value = stmt.targets[0], stmt.value
+    elif isinstance(stmt, ast.AnnAssign):
+        target, value = stmt.target, stmt.value
+    else:
+        return None
+    if not isinstance(target, ast.Name) or target.id.startswith("_") or value is None:
+        return None
+    call = value if isinstance(value, ast.Call) else None
+    factory = call.func if call is not None else value
+    if not isinstance(factory, ast.Subscript) or _decorator_name(factory.value) != "Port":
+        return None
+    name = target.id
+    direction = "inout"
+    if call is not None:
+        first = call.args[0] if call.args else None
+        if isinstance(first, ast.Constant) and isinstance(first.value, str):
+            name = first.value
+        for keyword in call.keywords:
+            given = keyword.value
+            if not isinstance(given, ast.Constant) or not isinstance(given.value, str):
+                continue
+            if keyword.arg == "name":
+                name = given.value
+            elif keyword.arg == "direction":
+                direction = given.value
+    if direction not in ("in", "out"):
+        direction = "out" if name.lower() in _OUTPUT_PORT_NAMES else "in"
+    return {
+        "attr": target.id,
+        "name": name,
+        "direction": direction,
+        "type": _segment(text, factory.slice) or "any",
+        "role": "data",
+        "file": str(file),
+        "line": stmt.lineno,
     }

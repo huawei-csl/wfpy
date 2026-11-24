@@ -9,7 +9,7 @@ import re
 import sys
 import tempfile
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Iterable, NoReturn, Sequence
+from typing import TYPE_CHECKING, Any, Iterable, Iterator, NoReturn, Sequence
 
 import libcst as cst
 import libcst.matchers as m
@@ -1001,6 +1001,36 @@ def _parse_port_value(value: cst.BaseExpression) -> dict[str, str] | None:
     return {"direction": direction, "type": port_type}
 
 
+def _assigned_calls(
+    simple: cst.BaseSmallStatement,
+) -> Iterator[tuple[cst.BaseExpression | None, cst.Call, cst.CSTNode]]:
+    """The calls a statement assigns, each with the target it is bound to and
+    the node its place in the source is read from: `a = A()` is one, and
+    `a, b = A(), B()` is one for each name. A target of several names bound to
+    one call (`a = b = A()`) comes with no target: it is no node."""
+    if not isinstance(simple, cst.Assign):
+        return
+    if isinstance(simple.value, cst.Call):
+        target = simple.targets[0].target if len(simple.targets) == 1 else None
+        yield target, simple.value, simple
+        return
+    if len(simple.targets) != 1:
+        return
+    names, values = simple.targets[0].target, simple.value
+    if not isinstance(names, (cst.Tuple, cst.List)):
+        return
+    if not isinstance(values, (cst.Tuple, cst.List)):
+        return
+    if len(names.elements) != len(values.elements):
+        return
+    pairs = list(zip(names.elements, values.elements))
+    if not all(isinstance(n, cst.Element) and isinstance(v, cst.Element) for n, v in pairs):
+        return  # a starred name or value: which call a name takes is not read here
+    for name, value in pairs:
+        if isinstance(value.value, cst.Call):
+            yield name.value, value.value, value.value
+
+
 def _graph_port_id(endpoint: dict[str, Any]) -> str:
     """Canonical port id for a graph edge endpoint (contract v2)."""
     if endpoint.get("kind") == "node":
@@ -1912,8 +1942,8 @@ class RewriteEngine:
             if not isinstance(stmt, cst.SimpleStatementLine):
                 continue
             for simple in stmt.body:
-                if isinstance(simple, cst.Assign) and isinstance(simple.value, cst.Call):
-                    helper_call = self._get_same_file_helper_call(simple.value)
+                for target, call, written_at in _assigned_calls(simple):
+                    helper_call = self._get_same_file_helper_call(call)
                     if helper_call is not None:
                         helper_fn, helper_bindings = helper_call
                         helper_name = helper_fn.name.value
@@ -1930,14 +1960,9 @@ class RewriteEngine:
                             instance_to_type.update(nested_instances)
                         continue
 
-                    if len(simple.targets) != 1:
-                        continue
-
-                    target = simple.targets[0].target
                     if isinstance(target, cst.Name):
-                        call = simple.value
                         callee = self._resolve_expr_code(call.func, bindings)
-                        loc = _loc(simple)
+                        loc = _loc(written_at)
                         node = {
                             "id": target.value,
                             "ref": callee,
@@ -1952,7 +1977,6 @@ class RewriteEngine:
                         }
                         instance_to_type[target.value] = callee
                         nodes.append(node)
-                        continue
 
                 if isinstance(simple, cst.Expr) and isinstance(simple.value, cst.Call):
                     helper_call = self._get_same_file_helper_call(simple.value)
@@ -3254,6 +3278,9 @@ class RewriteEngine:
         # Additively attach canonical, stable element ids (contract v2) without
         # touching the existing fields the diagram server / tests rely on.
         _augment_graph_ids(nodes, edges)
+        # What a drawing needs and the nodes and edges alone do not say: the
+        # ports an edge ends on, and the workflow's own inputs and outputs.
+        self._add_static_ports(fn, nodes, edges)
         visited = set(_visited_workflows or set())
         visited.add(workflow_name)
 
@@ -3316,6 +3343,143 @@ class RewriteEngine:
                 graph["children"] = children
 
         return graph
+
+    def _add_static_ports(
+        self, fn: cst.FunctionDef, nodes: list[dict[str, Any]], edges: list[dict[str, Any]]
+    ) -> None:
+        """Give the exported graph its ports, in place, from the source alone.
+
+        Each node gets `ports`: those its class declares in `class Ports:` (a
+        nested workflow's `inputs` and `outputs`, a control construct's own),
+        read through the project so a class imported from another file is
+        followed, then any port a connection names that the declaration does
+        not have. The id of a port is the `portId` the edges already end on.
+
+        The workflow's own inputs and outputs come first, as `wf-input` and
+        `wf-output` nodes of one port each, the ones the runtime graph draws
+        and in its order (inputs by name, then outputs by name): every
+        declared one, connected or not, and any a connection only names.
+        Without them an edge of the file has no element to end on, and a
+        reader of this graph can draw its nodes and nothing else.
+
+        A control construct gets the `label` the runtime names it by (`loop`,
+        `loop_1`, `if`), which is not the name the source binds it to. A
+        reader that keys a drawing on labels then lays this graph out as it
+        does the runtime's, a node of a shared label resolved the same way."""
+        from wfpy._project_index import ProjectIndex, declared_ports
+
+        # One reading of the project for the module as it stands: a graph
+        # with nested workflows of this file comes back here once for each.
+        cached = getattr(self, "_ports_index_cache", None)
+        if cached is not None and cached[0] is self.module:
+            index: ProjectIndex = cached[1]
+        else:
+            index = ProjectIndex.for_file(self.file_path)
+            # This file is read as the engine holds it, which a caller may
+            # have given and not loaded from disk.
+            index.use_text(self.file_path, self.module.code)
+            self._ports_index_cache = (self.module, index)
+        here = str(Path(self.file_path).resolve())
+
+        def port(
+            port_id: str, name: str, direction: str, kind: str, role: str = "data"
+        ) -> dict[str, Any]:
+            return {"id": port_id, "name": name, "direction": direction, "type": kind, "role": role}
+
+        declared_by_ref: dict[str, list[dict[str, object]]] = {}
+        by_name: dict[str, dict[str, Any]] = {}
+        controls: dict[str, int] = {}
+        for node in nodes:
+            name, ref = str(node.get("id", "")), str(node.get("ref", ""))
+            if ref not in declared_by_ref:
+                found = declared_ports(index, self.file_path, ref) if ref else None
+                declared_by_ref[ref] = found or []
+            ports: list[dict[str, Any]] = []
+            for declared in declared_by_ref[ref]:
+                entry = port(
+                    f"n:{name}:p:{declared['attr']}",
+                    str(declared["name"]),
+                    str(declared["direction"]),
+                    str(declared["type"]),
+                    str(declared["role"]),
+                )
+                if declared.get("file") and declared.get("line"):
+                    # This file goes by the path the graph's other places
+                    # give it, another file by its resolved one.
+                    declared_in = str(declared["file"])
+                    if declared_in == here:
+                        declared_in = self.file_path
+                    entry["location"] = {"file": declared_in, "line": declared["line"]}
+                ports.append(entry)
+            node["ports"] = ports
+            by_name.setdefault(name, node)
+            known = declared_by_ref[ref]
+            control = str(known[0].get("control", "")) if known else ""
+            if control:
+                # `graph.WorkflowGraph.register_control_node`: the first of a
+                # kind is the kind, the next ones are numbered from 1.
+                seen = controls.get(control, 0)
+                controls[control] = seen + 1
+                node["label"] = f"{control}_{seen}" if seen else control
+
+        boundary: dict[str, dict[str, Any]] = {}
+        positions = self._source_positions()
+
+        def boundary_node(
+            kind: str, name: str, type_name: str = "any", written_at: cst.CSTNode | None = None
+        ) -> None:
+            node_id = f"{'wf:input' if kind == 'wf-input' else 'wf:output'}:{name}"
+            if node_id in boundary:
+                return
+            # A workflow's own port is the other way round inside it: an input
+            # is where tokens come out of.
+            entry = port(f"wf:{name}", name, "out" if kind == "wf-input" else "in", type_name)
+            node: dict[str, Any] = {
+                "id": node_id,
+                "kind": kind,
+                "label": name,
+                "scope": "scope:root",
+                "nodeId": node_id,
+                "ports": [entry],
+            }
+            at = positions.get(written_at) if positions and written_at is not None else None
+            if at is not None:
+                location = {
+                    "file": self.file_path,
+                    "line": at.start.line,
+                    "column": at.start.column + 1,
+                }
+                node["location"] = location
+                entry["location"] = dict(location)
+            boundary[node_id] = node
+
+        for ports_kw, kind in (("inputs", "wf-input"), ("outputs", "wf-output")):
+            mapping = self._workflow_port_dict(fn, ports_kw)
+            for element in mapping.elements if mapping is not None else []:
+                if isinstance(element, cst.DictElement):
+                    key = _string_value(element.key)
+                    if key is not None:
+                        declared_type = _expr_to_code(element.value).strip() or "any"
+                        boundary_node(kind, key, declared_type, element)
+
+        for edge in edges:
+            for side, direction, kind in (("from", "out", "wf-input"), ("to", "in", "wf-output")):
+                end = edge.get(side)
+                if not isinstance(end, dict):
+                    continue
+                named = str(end.get("port", ""))
+                if end.get("kind") == "workflow":
+                    if named:
+                        boundary_node(kind, named)
+                    continue
+                owner = by_name.get(str(end.get("nodeId", "")))
+                port_id = str(end.get("portId", ""))
+                if owner is None or not named or not port_id:
+                    continue
+                if all(known["id"] != port_id for known in owner["ports"]):
+                    owner["ports"].append(port(port_id, named, direction, "any"))
+
+        nodes[:0] = [boundary[node_id] for node_id in sorted(boundary)]
 
     def create_task_type(
         self,
