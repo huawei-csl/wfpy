@@ -6,6 +6,15 @@ All notable changes to wfpy are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.4.1] — 2026-11-24
+
+One deprecation and the fix that led to it (#94). A port declared without
+`direction="in"` or `direction="out"` still works and is now warned of where
+it is declared; wfpy 2.0 will refuse it. The sidecar, which took such a port
+for an input whatever its name, reads it as the runtime does. Nothing that
+ran stops running. Read the Deprecated entry before running a suite with
+warnings turned into errors.
+
 ### Deprecated
 - A port declared without `direction="in"` or `direction="out"`:
   `Port[T]()`, the bare `Port[T]`, `direction="inout"`, and any other value.
