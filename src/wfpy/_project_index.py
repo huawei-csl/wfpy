@@ -27,7 +27,7 @@ import os
 from pathlib import Path
 from typing import Iterator
 
-from wfpy._source_repair import repair_source
+from wfpy._source_repair import SourceFault, repair_source
 from wfpy._source_text import signature_parameters
 
 # Folders that hold no project source: environments, caches, build output.
@@ -142,6 +142,8 @@ class ProjectIndex:
         # from a repaired copy of its text (`_source_repair`). An op that
         # edits leaves this off, so it never acts on what a repair left out.
         self.repair_unparsed = False
+        # The faults of each file read from a repaired text (`repair_unparsed`).
+        self.faults: dict[Path, tuple[SourceFault, ...]] = {}
 
     @classmethod
     def for_file(cls, file_path: str | Path) -> "ProjectIndex":
@@ -202,6 +204,7 @@ class ProjectIndex:
         except (SyntaxError, ValueError):
             return None
         self._texts[path] = repaired.text
+        self.faults[path] = tuple(repaired.faults)
         return tree
 
     def module_name(self, path: Path) -> str | None:
@@ -872,12 +875,16 @@ def _port_entry(text: str, file: Path, stmt: ast.stmt) -> dict[str, object] | No
                 name = given.value
             elif keyword.arg == "direction":
                 direction = given.value
+    # `declared` is the direction as it is written (`inout` when it is not),
+    # which the runtime's graph gives; `direction` is the side it is drawn on.
+    declared = direction
     if direction not in ("in", "out"):
         direction = "out" if name.lower() in _OUTPUT_PORT_NAMES else "in"
     return {
         "attr": target.id,
         "name": name,
         "direction": direction,
+        "declared": declared,
         "type": _segment(text, factory.slice) or "any",
         "role": "data",
         "file": str(file),

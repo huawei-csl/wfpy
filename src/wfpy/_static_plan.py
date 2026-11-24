@@ -24,16 +24,25 @@ import traceback
 from pathlib import Path
 from typing import Any, cast
 
-from wfpy._drawable_source import fault_owner, owner_of
+from wfpy._drawable_source import drawable_source, fault_owner, owner_of
 from wfpy._graph_export import export_graph_json
-from wfpy._project_index import ProjectIndex, declared_as
+from wfpy._project_index import ProjectIndex, _decorator_name, declared_as, declared_ports
 from wfpy._source_repair import SourceFault
 from wfpy.graph import ActorRecord, Connection, ControlPortInstance, WorkflowGraph
 
-__all__ = ["static_graph_document"]
+__all__ = ["may_hold_workflow", "static_graph_document"]
 
 # The decorator a class is written under → the kind the runtime gives it.
-_RUNTIME_KIND = {"task": "internal", "tool": "external", "agent": "agent", "viewer": "viewer"}
+_RUNTIME_KIND = {
+    "task": "internal",
+    "tool": "external",
+    "agent": "agent",
+    "viewer": "viewer",
+    "source": "source",
+    "streamblocks": "streamblocks",
+}
+# What the runtime says of a node of that kind beside the kind.
+_KIND_FLAGS = {"viewer": "viewer", "source": "external", "streamblocks": "external"}
 _SCOPE_KINDS = {"then": "if-then", "else": "if-else", "body": "loop-body"}
 
 
@@ -88,23 +97,29 @@ def static_graph_document(
 
     try:
         module, source_text, faults = load_drawable_module(file_path)
-        engine = RewriteEngine(file_path, module, source_text)
-        payload = engine.export_workflow_graph(workflow=workflow_name, include_nested=False)
-    except (cst.ParserSyntaxError, RewriteError, OSError, UnicodeDecodeError):
+    except (cst.ParserSyntaxError, OSError, UnicodeDecodeError):
         return None
-
+    try:
+        tree: ast.Module | None = ast.parse(source_text)
+    except (SyntaxError, ValueError):
+        tree = None
     index = ProjectIndex.for_file(file_path)
     index.repair_unparsed = True
     index.use_text(file_path, source_text)
+    if workflow_name is None and tree is not None:
+        workflow_name = _default_workflow(tree, index, file_path)
+    try:
+        engine = RewriteEngine(file_path, module, source_text)
+        payload = engine.export_workflow_graph(workflow=workflow_name, include_nested=False)
+    except RewriteError:
+        return None
+
     document, doc_ids = _document(payload, index, file_path)
 
     errors = _errors(file_path, exc, faults)
     document["partial"] = True
     document["errors"] = errors
-    try:
-        tree: ast.Module | None = ast.parse(source_text)
-    except (SyntaxError, ValueError):
-        tree = None
+    _add_errors_elsewhere(errors, payload)
     if tree is not None and faults:
         for fault in faults:
             message = f"SyntaxError: {fault.message}"
@@ -121,19 +136,88 @@ def static_graph_document(
 # ── From the static reading to the runtime's document ──────────────────
 
 
+def _default_workflow(tree: ast.Module, index: ProjectIndex, file_path: str) -> str | None:
+    """The workflow `wfpy plan` draws when none is named (`cli._default_workflow`):
+    the only one the module holds, else the only one the file writes itself,
+    else the first by name. One the file imports is drawn from its own file,
+    so of several the first by name that this file writes is taken."""
+    own: list[str] = []
+    imported: list[str] = []
+    for statement in tree.body:
+        if isinstance(statement, (ast.FunctionDef, ast.ClassDef)):
+            if any(_decorator_name(d) == "workflow" for d in statement.decorator_list):
+                own.append(statement.name)
+        elif isinstance(statement, ast.ImportFrom):
+            for alias in statement.names:
+                name = alias.asname or alias.name
+                found = declared_as(index, file_path, name) if name != "*" else None
+                if found is not None and found[0] == "workflow":
+                    imported.append(name)
+    if len(own) == 1 or (own and not imported):
+        return sorted(own)[0]
+    if len(set(own) | set(imported)) == 1:
+        return (own or imported)[0]
+    return sorted(own)[0] if own else None
+
+
+def may_hold_workflow(file_path: str, name: str) -> bool:
+    """Whether `file_path` can have a workflow called `name`: a function or a
+    class of that name anywhere in it, or the name bound at its top (an
+    assignment, an import). True when the text cannot be read to tell."""
+    try:
+        text = Path(file_path).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return True
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError):
+        drawable = drawable_source(text)
+        if drawable is None:
+            return True
+        try:
+            tree = ast.parse(drawable.text)
+        except (SyntaxError, ValueError):
+            return True
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if node.name == name:
+                return True
+    for statement in tree.body:
+        if isinstance(statement, (ast.Import, ast.ImportFrom)):
+            for alias in statement.names:
+                bound = alias.asname or alias.name.split(".")[0]
+                if bound in (name, "*"):
+                    return True
+        elif isinstance(statement, (ast.Assign, ast.AnnAssign)):
+            targets = statement.targets if isinstance(statement, ast.Assign) else [statement.target]
+            for target in targets:
+                if any(isinstance(n, ast.Name) and n.id == name for n in ast.walk(target)):
+                    return True
+    return False
+
+
 def _document(
     payload: dict[str, Any], index: ProjectIndex, file_path: str
-) -> tuple[dict[str, Any], dict[str, str]]:
-    """`payload` as `export_graph_json` writes a graph, and the id each node
-    of the payload has in it."""
+) -> tuple[dict[str, Any], list[str | None]]:
+    """`payload` as `export_graph_json` writes a graph, and the id in it of
+    each node of the payload, in the payload's order."""
     graph = WorkflowGraph(name=str(payload.get("workflow") or "workflow"))
     scopes = {"scope:root": "scope:root"}
-    doc_ids: dict[str, str] = {}
+    payload_nodes = list(payload.get("nodes", []))
+    doc_ids: list[str | None] = [None] * len(payload_nodes)
     controls: dict[str, Any] = {}
-    instances: dict[str, _Instance] = {}
-    declared: dict[str, tuple[str, dict[str, Any] | None]] = {}
+    # The instances a name is bound to, in the order of the source.
+    bound: dict[str, list[_Bound]] = {}
+    actors: list[tuple[tuple[int, int], int, _Bound, ActorRecord]] = []
+    declared: dict[int, tuple[str, dict[str, Any] | None, dict[str, str]]] = {}
+    first: dict[str, int] = {}
+    last: dict[str, int] = {}
+    for position, node in enumerate(payload_nodes):
+        first.setdefault(str(node.get("id", "")), position)
+        last[str(node.get("id", ""))] = position
+    made: dict[str, int] = {}
 
-    for node in payload.get("nodes", []):
+    for position, node in enumerate(payload_nodes):
         name = str(node.get("id", ""))
         kind = node.get("kind")
         ports = node.get("ports") or []
@@ -145,7 +229,7 @@ def _document(
             place = _place(port.get("location"), file_path)
             if place:
                 graph.port_sources.setdefault(label, place)
-            doc_ids[name] = name
+            doc_ids[position] = name
             continue
         written_in = str(node.get("scope", "scope:root"))
         scope = scopes.get(written_in, "scope:root")
@@ -169,7 +253,7 @@ def _document(
                 else:
                     scopes[f"{written_in}/{inside}"] = record.scopes[branch]
             controls[name] = record
-            doc_ids[name] = record.node_id
+            doc_ids[position] = record.node_id
             continue
         ref = str(node.get("ref", ""))
         found = declared_as(index, file_path, ref)
@@ -183,17 +267,55 @@ def _document(
             statement = index.definition_node(definition)
             if statement is not None:
                 defined_at = {"file": str(definition.file), "line": statement.lineno}
-        instance = _Instance(ref.split("(")[0].split(".")[-1] or ref, name)
-        instances[name] = instance
-        graph.actors[name] = ActorRecord(
-            instance_name=name, instance=instance, meta=_Meta(runtime_kind), scope_id=scope
+        class_name = ref.split("(")[0].split(".")[-1] or ref
+        count = made.get(class_name, 0)
+        made[class_name] = count + 1
+        key = name
+        if last[name] != position:
+            # The name is bound again further down, and the runtime names a
+            # node by the name it has at the end. This one keeps the name it
+            # was made with (`graph.WorkflowGraph.register_actor`).
+            key = f"{class_name.lower()}_{count}" if count else class_name.lower()
+        instance = _Instance(class_name, key)
+        line = (node.get("location") or {}).get("line")
+        binding = _Bound(
+            line if isinstance(line, int) else 0,
+            instance,
+            {_attr(port): str(port.get("name", _attr(port))) for port in ports},
         )
-        graph._creation_order.append(("actor", name))
-        declared[name] = (runtime_kind, defined_at)
-        doc_ids[name] = f"node:{scope}:{name}"
+        bound.setdefault(name, []).append(binding)
+        actor = ActorRecord(
+            instance_name=key, instance=instance, meta=_Meta(runtime_kind), scope_id=scope
+        )
+        # `graph.actors` in the runtime's order: a node that kept the name it
+        # was made with stays where it was made, a named one is where its
+        # name was first bound.
+        order = (0, position) if key != name else (1, first[name])
+        actors.append((order, position, binding, actor))
+        declared_directions = {
+            str(entry["attr"]): str(entry["declared"])
+            for entry in (declared_ports(index, file_path, ref) if ref else None) or []
+            if entry.get("declared")
+        }
+        declared[position] = (runtime_kind, defined_at, declared_directions)
+        doc_ids[position] = f"node:{scope}:{key}"
+
+    taken: set[str] = set()
+    for _order, position, binding, actor in sorted(actors, key=lambda entry: entry[0]):
+        key = actor.instance_name
+        while key in taken:  # two nodes cannot share a name in one graph
+            key += "_"
+        if key != actor.instance_name:
+            binding.instance._wfpy_instance_name = key
+            actor.instance_name = key
+            doc_ids[position] = f"node:{actor.scope_id}:{key}"
+        taken.add(key)
+        graph.actors[key] = actor
+        graph._creation_order.append(("actor", key))
 
     for edge in payload.get("edges", []):
         ends: list[Any] = []
+        written_at = (edge.get("location") or {}).get("line")
         for side in ("from", "to"):
             end = edge.get(side) or {}
             port = str(end.get("port", ""))
@@ -203,8 +325,9 @@ def _document(
             elif owner in controls:
                 control_node = controls[owner]
                 ends.append(ControlPortInstance(control_node.node_id, control_node.name, port))
-            elif owner in instances:
-                ends.append(_Port(instances[owner], port))
+            elif owner in bound:
+                binding = _bound_at(bound[owner], written_at)
+                ends.append(_Port(binding.instance, binding.port_names.get(port, port)))
         if len(ends) != 2:
             continue  # an end on a name the workflow does not bind
         graph.connections.append(
@@ -218,21 +341,83 @@ def _document(
 
     document = export_graph_json(graph)
     written = {str(node.get("id")): node for node in document["graph"]["nodes"]}
-    for node in payload.get("nodes", []):
-        name = str(node.get("id", ""))
-        if name not in declared:
+    for position, node in enumerate(payload_nodes):
+        if position not in declared:
             continue
-        drawn = written[doc_ids[name]]
-        runtime_kind, defined_at = declared[name]
-        drawn["ports"] = [_port(drawn["id"], port, file_path) for port in node.get("ports") or []]
+        drawn = written[str(doc_ids[position])]
+        runtime_kind, defined_at, directions = declared[position]
+        drawn["ports"] = [
+            _port(drawn["id"], port, file_path, directions) for port in node.get("ports") or []
+        ]
         meta: dict[str, Any] = {"taskKind": runtime_kind}
+        if runtime_kind in _KIND_FLAGS:
+            meta[_KIND_FLAGS[runtime_kind]] = True
         place = _place(node.get("location"), file_path)
         if place:
             meta["source"] = place
         if defined_at:
             meta["referencedSource"] = defined_at
+        # What the static reading flagged: a class of a file that does not parse.
+        flags = node.get("metadata")
+        if isinstance(flags, dict) and flags.get("isErrored"):
+            meta["isErrored"] = True
+            meta["errorMessage"] = f"SyntaxError: {flags.get('errorMessage', '')}"
         drawn["meta"] = meta
     return document, doc_ids
+
+
+class _Bound:
+    """One binding of a name of the workflow to a node."""
+
+    def __init__(self, line: int, instance: _Instance, port_names: dict[str, str]) -> None:
+        self.line = line
+        self.instance = instance
+        # What a connection writes after the dot → the name the port has.
+        self.port_names = port_names
+
+
+def _bound_at(bindings: list[_Bound], line: Any) -> _Bound:
+    """The node a name stands for on `line`: the last one bound above it, as
+    the builder runs both branches of an `if` in the order they are written."""
+    if isinstance(line, int):
+        above = [binding for binding in bindings if binding.line <= line]
+        if above:
+            return above[-1]
+    return bindings[-1]
+
+
+def _attr(port: dict[str, Any]) -> str:
+    """What a connection writes after the dot for a port of the payload."""
+    return str(port.get("id", "")).rsplit(":p:", 1)[-1] or str(port.get("name", ""))
+
+
+def _add_errors_elsewhere(errors: list[dict[str, Any]], payload: dict[str, Any]) -> None:
+    """The faults of the other files the static reading went through, each
+    once: the error importing raised is often one of them."""
+    seen = {(_resolved(str(error.get("file", ""))), error.get("line")) for error in errors}
+    for error in payload.get("errors") or []:
+        location = error.get("location") if isinstance(error, dict) else None
+        if not isinstance(location, dict):
+            continue
+        place = (_resolved(str(location.get("file", ""))), location.get("line"))
+        if place in seen:
+            continue
+        seen.add(place)
+        errors.append(
+            {
+                "message": f"SyntaxError: {error.get('message', '')}",
+                "file": str(location.get("file", "")),
+                "line": location.get("line"),
+                "column": location.get("column"),
+            }
+        )
+
+
+def _resolved(file: str) -> str:
+    try:
+        return str(Path(file).resolve())
+    except OSError:
+        return file
 
 
 def _control_kind(ports: list[dict[str, Any]]) -> str:
@@ -243,14 +428,18 @@ def _control_kind(ports: list[dict[str, Any]]) -> str:
     return "loop" if "iter" in names else "if" if "cond" in names else ""
 
 
-def _port(node_id: str, port: dict[str, Any], file_path: str) -> dict[str, Any]:
-    # The id goes by what a connection writes after the dot, which is the
-    # end the exporter gave the edges of this node.
-    attr = str(port.get("id", "")).rsplit(":p:", 1)[-1] or str(port.get("name", ""))
+def _port(
+    node_id: str, port: dict[str, Any], file_path: str, directions: dict[str, str]
+) -> dict[str, Any]:
+    # The runtime names a port by the name it is declared with
+    # (`Port[T](name="...")`), else by its attribute, and gives the direction
+    # as it is written: `inout` for one that is not.
+    attr = _attr(port)
+    name = str(port.get("name", attr))
     entry: dict[str, Any] = {
-        "id": f"port:{node_id}:{attr}",
-        "name": port.get("name", attr),
-        "direction": port.get("direction", "in"),
+        "id": f"port:{node_id}:{name}",
+        "name": name,
+        "direction": directions.get(attr) or port.get("direction", "in"),
         "type": port.get("type", "any"),
         "role": port.get("role", "data"),
     }
@@ -317,7 +506,7 @@ def _raised_at(exc: BaseException, file_path: str) -> tuple[str, int | None, int
 def _flag(
     document: dict[str, Any],
     payload: dict[str, Any],
-    doc_ids: dict[str, str],
+    doc_ids: list[str | None],
     owner: tuple[str, str, int] | None,
     message: str,
 ) -> None:
@@ -329,15 +518,15 @@ def _flag(
     kind, name, statement_line = owner
     nodes = {str(node.get("id")): node for node in document["graph"]["nodes"]}
     if kind == "class":
-        for node in payload.get("nodes", []):
-            if str(node.get("ref", "")) == name and str(node.get("id")) in doc_ids:
-                _mark(nodes.get(doc_ids[str(node["id"])]), message)
+        for position, node in enumerate(payload.get("nodes", [])):
+            if str(node.get("ref", "")) == name and doc_ids[position] is not None:
+                _mark(nodes.get(str(doc_ids[position])), message)
         return
     if name != payload.get("workflow"):
         return
-    for node in payload.get("nodes", []):
+    for position, node in enumerate(payload.get("nodes", [])):
         if (node.get("location") or {}).get("line") == statement_line and node.get("ref"):
-            _mark(nodes.get(doc_ids.get(str(node.get("id")), "")), message)
+            _mark(nodes.get(str(doc_ids[position])), message)
     drawn = [edge for edge in document["graph"]["edges"] if edge.get("source")]
     for edge in drawn:
         if edge["source"].get("line") == statement_line:

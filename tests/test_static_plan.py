@@ -367,6 +367,313 @@ def test_a_file_with_nothing_to_draw_is_an_empty_document_with_the_error(tmp_pat
 # ── Every example ──────────────────────────────────────────────────────
 
 
+# ── Where the static reading and the runtime could differ ───────────────
+#
+# Each of these is a file the examples do not have. The static document of
+# the file with an import that fails must be the runtime's of the file as it
+# is: the ids, the kinds, the ports with their names and directions, the edges.
+
+UP = """
+
+@task
+class Up:
+    class Ports:
+        In = Port[str](direction="in")
+        Out = Port[str](direction="out")
+
+    @action(consumes={"In": 1}, produces={"Out": 1})
+    def up(self, text: str) -> str:
+        return text.upper()
+
+"""
+
+CASES = {
+    # `Port[T]("Text")` and `Port[T](name="Shout")`: the port goes by that name.
+    "a port declared with its own name": """from wfpy import Port, action, connect, task, workflow
+
+
+@task
+class Up:
+    class Ports:
+        In = Port[str]("Text", direction="in")
+        Out = Port[str](name="Shout", direction="out")
+
+    @action(consumes={"Text": 1}, produces={"Shout": 1})
+    def up(self, text: str) -> str:
+        return text.upper()
+
+
+@workflow(inputs={"data": str}, outputs={"res": str})
+def flow() -> None:
+    u = Up()
+    v = Up()
+    connect("data", u.In)
+    connect(u.Out, v.In)
+    connect(v.Out, "res")
+""",
+    # `Port[T]()`: the runtime's graph says `inout`, as it is written.
+    "a port with no direction": """from wfpy import Port, action, connect, task, workflow
+
+
+@task
+class Up:
+    class Ports:
+        In = Port[str]()
+        Out = Port[str]()
+
+    @action(consumes={"In": 1}, produces={"Out": 1})
+    def up(self, text: str) -> str:
+        return text.upper()
+
+
+@workflow(inputs={"data": str}, outputs={"res": str})
+def flow() -> None:
+    a = Up()
+    b = Up()
+    connect("data", a.In)
+    connect(a.Out, b.In)
+    connect(b.Out, "res")
+""",
+    "a source": """from wfpy import File, Port, action, connect, source, task, workflow
+
+
+@source
+class Frames:
+    path: File
+
+    class Ports:
+        Out = Port[File](direction="out")
+
+
+@task
+class Take:
+    class Ports:
+        In = Port[File](direction="in")
+        Out = Port[str](direction="out")
+
+    @action(consumes={"In": 1}, produces={"Out": 1})
+    def take(self, f: File) -> str:
+        return str(f)
+
+
+@workflow(outputs={"res": str})
+def flow() -> None:
+    f = Frames(path=File("a.txt"))
+    t = Take()
+    connect(f.Out, t.In)
+    connect(t.Out, "res")
+""",
+    # The name `z` is bound in both branches: two nodes, and each connection
+    # ends on the one its name stood for where it is written.
+    "a name bound in both branches": "from wfpy import Port, action, connect, if_, task, workflow\n"
+    + UP
+    + """
+@workflow(inputs={"data": str}, outputs={"res": str})
+def flow() -> None:
+    a = Up()
+    b = Up()
+    connect("data", a.In)
+    connect("data", b.In)
+    cond = if_(True)
+    with cond.then:
+        z = Up()
+        connect(a.Out, z.In)
+    with cond.else_:
+        z = Up()
+        connect(b.Out, z.In)
+    connect(z.Out, "res")
+""",
+    # With no `--workflow`, the command takes the first by name of several.
+    "two workflows, the first by name second in the file": (
+        "from wfpy import Port, action, connect, task, workflow\n"
+        + UP
+        + """
+@workflow(inputs={"x": str}, outputs={"y": str})
+def prep() -> None:
+    u = Up()
+    connect("x", u.In)
+    connect(u.Out, "y")
+
+
+@workflow(inputs={"data": str}, outputs={"res": str})
+def main() -> None:
+    a = Up()
+    b = Up()
+    p = prep()
+    connect("data", a.In)
+    connect(a.Out, b.In)
+    connect(b.Out, p.x)
+    connect(p.y, "res")
+"""
+    ),
+}
+
+
+def _drawn(document: dict[str, Any]) -> tuple[Any, Any]:
+    """The nodes in their order, with kind and ports, and the edges."""
+    graph = document["graph"]
+    nodes = [
+        (
+            node["id"],
+            node.get("kind"),
+            (node.get("meta") or {}).get("taskKind"),
+            (node.get("meta") or {}).get("external"),
+            [(port["id"], port["name"], port["direction"]) for port in node.get("ports") or []],
+        )
+        for node in graph["nodes"]
+    ]
+    return nodes, [(edge["id"], edge["from"], edge["to"], edge["scope"]) for edge in graph["edges"]]
+
+
+@pytest.mark.parametrize("case", sorted(CASES))
+def test_the_static_document_is_the_runtime_s_where_they_could_differ(
+    tmp_path: Path, case: str
+) -> None:
+    good = tmp_path / "good.py"
+    good.write_text(CASES[case], encoding="utf-8")
+    broken = tmp_path / "broken.py"
+    broken.write_text("import not_a_module_of_this_test\n" + CASES[case], encoding="utf-8")
+
+    runtime = _best_effort(good)
+    static = _best_effort(broken)
+
+    assert "partial" not in runtime
+    assert static["partial"] is True
+    assert _drawn(static) == _drawn(runtime)
+
+
+def test_a_workflow_the_file_does_not_have_is_not_found_importable_or_not(
+    tmp_path: Path,
+) -> None:
+    text = CASES["two workflows, the first by name second in the file"]
+    good = tmp_path / "good.py"
+    good.write_text(text, encoding="utf-8")
+    broken = tmp_path / "broken.py"
+    broken.write_text("import not_a_module_of_this_test\n" + text, encoding="utf-8")
+
+    for path in (good, broken):
+        done = _plan(path, "--best-effort", "--workflow", "nothere")
+        assert done.returncode == 1, path.name
+        assert done.stdout == ""
+        assert "workflow 'nothere' not found" in done.stderr
+
+    # One it has is drawn, by its name.
+    done = _plan(broken, "--best-effort", "--workflow", "prep")
+    assert done.returncode == 0, done.stderr
+    assert [node["id"] for node in json.loads(done.stdout)["graph"]["nodes"]] == [
+        "wf:input:x",
+        "wf:output:y",
+        "node:scope:root:u",
+    ]
+
+
+TASKS = """from wfpy import Port, action, task
+
+
+@task
+class Up:
+    class Ports:
+        In = Port[str](direction="in")
+        Out = Port[str](direction="out")
+
+    @action(consumes={"In": 1}, produces={"Out": 1})
+    def up(self, text: str) -> str:
+        return text.upper()
+
+
+@task
+class Down:
+    class Ports:
+        In = Port[str](direction="in")
+        Out = Port[str](direction="out")
+
+    @action(consumes={"In": 1}, produces={"Out": 1})
+    def down(self, text: str) -> str:
+        return text.lower()
+"""
+
+TOP = """from tasks import Down, Up
+from wfpy import connect, workflow
+
+
+@workflow(inputs={"data": str}, outputs={"res": str})
+def flow() -> None:
+    a = Up()
+    d = Down()
+    connect("data", a.In)
+    connect(a.Out, d.In)
+    connect(d.Out, "res")
+"""
+
+
+def test_a_fault_in_a_class_of_another_file_is_said_and_is_on_its_nodes(tmp_path: Path) -> None:
+    # The class is read from the repaired text of its file, which has lost
+    # the port declared on the faulty line. The drawing must not look whole.
+    tasks = tmp_path / "tasks.py"
+    tasks.write_text(
+        TASKS.replace('Out = Port[str](direction="out")', 'Out = Port[str](direction="out"', 1),
+        encoding="utf-8",
+    )
+    top = tmp_path / "top.py"
+    top.write_text(TOP, encoding="utf-8")
+
+    response = _handle_request({"file": str(top), "op": "wfpy.exportWorkflowGraph", "args": {}})
+    assert response.diagnostic is not None
+    graph = response.diagnostic["graph"]
+    assert graph["partial"] is True
+    assert [
+        (error["code"], error["location"]["file"], error["location"]["line"])
+        for error in graph["errors"]
+    ] == [("syntax_error", str(tasks), 8)]
+    assert [
+        node["id"] for node in graph["nodes"] if (node.get("metadata") or {}).get("isErrored")
+    ] == ["a"]
+
+    document = _best_effort(top)
+    assert [(Path(e["file"]).name, e["line"]) for e in document["errors"]] == [("tasks.py", 8)]
+    assert _flagged(document) == ["node:scope:root:a"]
+    assert len(document["graph"]["edges"]) == 3
+
+
+def test_a_fault_elsewhere_in_that_file_is_not_this_graph_s(tmp_path: Path) -> None:
+    # `Down` is at fault and this workflow makes no node of it.
+    tasks = tmp_path / "tasks.py"
+    tasks.write_text(TASKS.replace("return text.lower()", "return text.lower("), encoding="utf-8")
+    top = tmp_path / "top.py"
+    top.write_text(TOP.replace("d = Down()", "d = Up()"), encoding="utf-8")
+
+    response = _handle_request({"file": str(top), "op": "wfpy.exportWorkflowGraph", "args": {}})
+    assert response.diagnostic is not None
+    graph = response.diagnostic["graph"]
+    assert "partial" not in graph
+    assert "errors" not in graph
+    assert all("metadata" not in node for node in graph["nodes"])
+
+
+def test_a_local_name_that_holds_a_port_is_no_port_of_the_workflow(tmp_path: Path) -> None:
+    path = tmp_path / "wf.py"
+    path.write_text(
+        "from wfpy import Port, action, connect, task, workflow\n"
+        + UP
+        + """
+@workflow(inputs={"data": str}, outputs={"res": str})
+def flow() -> None:
+    a = Up()
+    b = Up()
+    connect("data", a.In)
+    src = a.Out
+    connect(src, b.In)
+    connect(b.Out, "res")
+""",
+        encoding="utf-8",
+    )
+
+    response = _handle_request({"file": str(path), "op": "wfpy.exportWorkflowGraph", "args": {}})
+    assert response.diagnostic is not None
+    ids = [node["id"] for node in response.diagnostic["graph"]["nodes"]]
+    assert ids == ["wf:input:data", "wf:output:res", "a", "b"]
+
+
 def _own_workflows(path: Path) -> list[str]:
     module = _load_module(str(path))
     names = []

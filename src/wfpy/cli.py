@@ -537,6 +537,13 @@ def cmd_plan(args: argparse.Namespace) -> None:
             and Path(args.file).is_file()
         ):
             raise
+        if args.workflow:
+            # A name the file has nowhere is no workflow of it, importable or not.
+            from wfpy._static_plan import may_hold_workflow
+
+            if not may_hold_workflow(args.file, args.workflow):
+                print(f"Error: workflow {args.workflow!r} not found.", file=sys.stderr)
+                sys.exit(1)
         plan_json = build_partial_graph(args.file, args.workflow, exc, imports=False)
         _write_plan_json(plan_json, args.output)
         return

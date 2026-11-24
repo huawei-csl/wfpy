@@ -65,7 +65,12 @@ file that does not import. It is one a reader can draw:
   `if_`'s own), followed through the project's imports, then any port a
   connection names that the declaration does not have.
 - The `id` of a port is the `portId` an edge ends on, so each end of each edge
-  is a port of a node of the graph.
+  is a port of a node of the graph. One case needs the side of the edge to
+  tell: a workflow with an input and an output of one name has the port
+  `wf:<name>` on both of its nodes. The `from` end of an edge is then the
+  input's and the `to` end the output's.
+- A name the workflow assigns is a local of it and no port of the workflow:
+  `src = a.Out` then `connect(src, b.In)` adds no input `src`.
 
 ```json
 {
@@ -132,6 +137,12 @@ parse with an error.
 - A nested workflow of another file that does not parse is drawn the same way,
   and it is its own graph under `children` that is `partial` and carries the
   errors, with that file's path.
+- A task class imported from a file that does not parse is read from the
+  repaired text of that file, so it keeps the ports it declares on its good
+  lines. A fault in the body of that class is said on this graph: it is
+  `partial`, `errors` has the `syntax_error` with the path and the line of the
+  other file, and every node of the class is flagged. A fault elsewhere in
+  that file is not this graph's.
 
 ```json
 {
