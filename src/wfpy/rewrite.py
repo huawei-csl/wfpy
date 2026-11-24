@@ -1540,7 +1540,7 @@ class RewriteEngine:
                 )
             except RewriteError:
                 continue
-            mark_faults(nested_graph, faults, module_file)
+            mark_faults(nested_graph, faults, module_file, nested_source)
             return nested_graph
 
         raise RewriteError(

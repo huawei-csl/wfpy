@@ -667,33 +667,7 @@ def declared_ports(
     ``None`` when ``ref`` is not followed to a definition the project holds:
     a class of an installed package, a call that builds no node. That is not
     "no ports": the caller knows only what the connections name."""
-    here = Path(file).resolve()
-    try:
-        written: ast.expr = ast.parse(ref.strip(), mode="eval").body
-    except (SyntaxError, ValueError):
-        return None
-    # `make(3)`: what is instantiated is what the call returns.
-    called = isinstance(written, ast.Call)
-    if isinstance(written, ast.Call):
-        written = written.func
-    parts: list[str] = []
-    while isinstance(written, ast.Attribute):
-        parts.append(written.attr)
-        written = written.value
-    if not isinstance(written, ast.Name):
-        return None
-    parts.append(written.id)
-    name, module = parts[0], ".".join(reversed(parts[1:]))
-    home = here
-    if module:
-        found = _dotted_module(index, here, module)
-        if found is None:
-            head = index.binding(here, module.split(".")[0])
-            if isinstance(head, External) and head.module.split(".")[0] == "wfpy" and not called:
-                return _control_ports(name)
-            return None
-        home = found
-    bound = index.binding(home, name)
+    bound, called = _ref_binding(index, file, ref)
     if isinstance(bound, External):
         if called or bound.module.split(".")[0] != "wfpy":
             return None
@@ -709,6 +683,60 @@ def declared_ports(
         if workflow is not None and is_workflow_function(workflow):
             return workflow_ports(text, bound.file, workflow)
     return None
+
+
+def declared_as(index: ProjectIndex, file: str | Path, ref: str) -> tuple[str, Definition] | None:
+    """What ``ref`` names in module ``file``, by the decorator it is written
+    under, and where it is defined: ``task``, ``agent``, ``tool``, ... for a
+    class, ``workflow`` for a workflow or the call of a factory of one.
+
+    ``None`` when ``ref`` is not followed to such a definition of the
+    project."""
+    bound, called = _ref_binding(index, file, ref)
+    if not isinstance(bound, Definition):
+        return None
+    node = index.definition_node(bound)
+    if isinstance(node, ast.ClassDef) and not called:
+        for decorator in node.decorator_list:
+            if _decorator_name(decorator) in TASK_DECORATORS:
+                return _decorator_name(decorator), bound
+    if isinstance(node, ast.FunctionDef):
+        workflow = factory_workflow(node) if called else node
+        if workflow is not None and is_workflow_function(workflow):
+            return "workflow", bound
+    return None
+
+
+def _ref_binding(
+    index: ProjectIndex, file: str | Path, ref: str
+) -> tuple[Definition | External | None, bool]:
+    """What the name ``ref`` is written with is bound to in module ``file``,
+    and whether ``ref`` is a call of it (``make(3)`` of ``flow = make(3)()``:
+    what is instantiated is then what the call returns)."""
+    here = Path(file).resolve()
+    try:
+        written: ast.expr = ast.parse(ref.strip(), mode="eval").body
+    except (SyntaxError, ValueError):
+        return None, False
+    called = isinstance(written, ast.Call)
+    if isinstance(written, ast.Call):
+        written = written.func
+    parts: list[str] = []
+    while isinstance(written, ast.Attribute):
+        parts.append(written.attr)
+        written = written.value
+    if not isinstance(written, ast.Name):
+        return None, called
+    parts.append(written.id)
+    name, module = parts[0], ".".join(reversed(parts[1:]))
+    if not module:
+        return index.binding(here, name), called
+    home = _dotted_module(index, here, module)
+    if home is not None:
+        return index.binding(home, name), called
+    # `wfpy.loop`: a name of a module the project does not hold.
+    head = index.binding(here, module.split(".")[0])
+    return (External(head.module, name) if isinstance(head, External) else None), called
 
 
 def workflow_ports(text: str, file: Path, fn: ast.FunctionDef) -> list[dict[str, object]]:

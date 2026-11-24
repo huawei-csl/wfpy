@@ -525,7 +525,21 @@ def cmd_plan(args: argparse.Namespace) -> None:
     from wfpy.graph import export_graph_json
     from wfpy.partial import build_partial_graph
 
-    module = _load_module(args.file)
+    try:
+        module = _load_module(args.file)
+    except Exception as exc:
+        # A file that does not import, or does not parse, has no graph to
+        # ask the runtime for. `--best-effort` draws it from the source, with
+        # the error at its line; without it the error is the answer.
+        if not (
+            getattr(args, "format", "plan") == "graph"
+            and getattr(args, "best_effort", False)
+            and Path(args.file).is_file()
+        ):
+            raise
+        plan_json = build_partial_graph(args.file, args.workflow, exc, imports=False)
+        _write_plan_json(plan_json, args.output)
+        return
     workflows = _find_workflows(module)
 
     # A diagram drill-down into a workflow a factory builds names that
@@ -904,7 +918,8 @@ def main() -> None:
     plan_parser.add_argument(
         "--best-effort",
         action="store_true",
-        help="Return a partial graph on errors (graph format only)",
+        help="Return a partial graph on errors, also for a file that does not import "
+        "or parse: it is then drawn from the source (graph format only)",
     )
     plan_parser.add_argument(
         "--hierarchy",

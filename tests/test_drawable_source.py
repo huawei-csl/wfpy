@@ -223,27 +223,35 @@ def test_a_node_whose_line_is_indented_wrong_is_drawn_whole_and_flagged(tmp_path
 
 
 @pytest.mark.parametrize(
-    ("good", "bad", "line"),
+    ("good", "bad", "line", "flagged"),
     [
-        ('        In = Port[int](direction="in")', '        In = Port[int](direction="in"', 9),
-        ("class Add:", "class Add", 19),
+        (
+            '        In = Port[int](direction="in")',
+            '        In = Port[int](direction="in"',
+            9,
+            ["scale_a", "scale_b"],
+        ),
+        ("class Add:", "class Add", 19, ["add"]),
         (
             '    @action(consumes={"A": 1, "B": 1}, produces={"Out": 1})',
             '    @action(consumes={"A": 1, "B": 1}, produces={"Out": 1)',
             25,
+            ["add"],
         ),
         (
             "    def add(self, a: int, b: int) -> int:",
             "    def add(self, a: int b: int) -> int:",
             26,
+            ["add"],
         ),
-        ("        return a + b", "        return a +", 27),
+        ("        return a + b", "        return a +", 27, ["add"]),
         (
             '@workflow(inputs={"A": int}, outputs={"Out": int})',
             '@workflow(inputs={"A": int}, outputs={"Out": int}',
             30,
+            [],
         ),
-        ("def scaled_sum():", "def scaled_sum(:", 31),
+        ("def scaled_sum():", "def scaled_sum(:", 31, []),
     ],
     ids=[
         "port",
@@ -256,7 +264,7 @@ def test_a_node_whose_line_is_indented_wrong_is_drawn_whole_and_flagged(tmp_path
     ],
 )
 def test_a_fault_outside_the_workflow_s_statements_leaves_the_graph_whole(
-    tmp_path: Path, good: str, bad: str, line: int
+    tmp_path: Path, good: str, bad: str, line: int, flagged: list[str]
 ) -> None:
     path = _broken(tmp_path, good, bad)
 
@@ -275,7 +283,9 @@ def test_a_fault_outside_the_workflow_s_statements_leaves_the_graph_whole(
     assert graph["partial"] is True
     assert [error["location"]["line"] for error in graph["errors"]] == [line]
     assert graph["errors"] == [_python_stops_at(path)]
-    assert _flagged(graph) == []
+    # A fault in a class is on every node of that class; one in the
+    # workflow's own header is on none.
+    assert _flagged(graph) == flagged
 
 
 def test_two_faults_are_two_errors_in_line_order(tmp_path: Path) -> None:
@@ -289,7 +299,9 @@ def test_two_faults_are_two_errors_in_line_order(tmp_path: Path) -> None:
     assert {error["code"] for error in graph["errors"]} == {"syntax_error"}
     # Python names the first only.
     assert graph["errors"][0] == _python_stops_at(path)
-    assert len(_flagged(graph)) == 1
+    # The first is in the class `Add`, the second on a connection.
+    assert _flagged(graph)[0] == "add"
+    assert len(_flagged(graph)) == 2
 
 
 # ── The copy stays a copy ──────────────────────────────────────────────

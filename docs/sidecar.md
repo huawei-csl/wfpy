@@ -127,7 +127,8 @@ parse with an error.
   same under `"meta"`. The fault is reported once, in `errors`.
 - A fault elsewhere (in a task's class, in a decorator, in the header of the
   workflow) leaves the graph whole. A port whose declaration is lost is drawn
-  when a connection names it.
+  when a connection names it. A fault in a class of the file flags every node
+  of that class the same way, so the diagram shows which nodes it concerns.
 - A nested workflow of another file that does not parse is drawn the same way,
   and it is its own graph under `children` that is `partial` and carries the
   errors, with that file's path.
@@ -156,6 +157,13 @@ parse with an error.
 
 When no copy can be made that parses, or the copy has no workflow left to
 draw, the graph has no nodes and no edges and carries the errors.
+
+`wfpy plan <file> --format graph --best-effort` gives the same reading in the
+runtime's document when it cannot import the file, for a syntax fault and for
+an error raised by the import (a misspelt name, a module that is not
+installed). The document is `partial`, its `errors` are `{message, file, line,
+column}`, and the nodes an error belongs to carry `isErrored` and
+`errorMessage` in `meta`.
 
 Response shape includes:
 
