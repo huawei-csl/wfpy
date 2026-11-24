@@ -1220,56 +1220,155 @@ class _Use:
     ordinal: int | None = None
 
 
-def _comment_lines(stmt: cst.SimpleStatementLine) -> list[cst.EmptyLine]:
-    """The lines above `stmt` from its first comment on: what is said of it."""
-    lines = list(stmt.leading_lines)
-    first = next((k for k, line in enumerate(lines) if line.comment is not None), len(lines))
-    return lines[first:]
+def _comment_run(lines: Sequence[cst.EmptyLine]) -> list[cst.EmptyLine]:
+    """The comment lines at the end of `lines`, with no blank line among
+    them: the comment directly above what follows. A comment further up,
+    past a blank line (a section's header), is not part of it."""
+    k = len(lines)
+    while k > 0 and lines[k - 1].comment is not None:
+        k -= 1
+    return list(lines[k:])
 
 
-def _moved_line(moved: cst.CSTNode, slot: cst.CSTNode) -> cst.CSTNode:
-    """`moved` in the place of `slot`: with the blank lines `slot` had above it
-    and the comments `moved` had above it."""
-    assert isinstance(moved, cst.SimpleStatementLine) and isinstance(slot, cst.SimpleStatementLine)
-    blanks = list(slot.leading_lines)[: len(slot.leading_lines) - len(_comment_lines(slot))]
-    return moved.with_changes(leading_lines=[*blanks, *_comment_lines(moved)])
+def _moved_line(moved: cst.SimpleStatementLine, slot: cst.SimpleStatementLine) -> cst.SimpleStatementLine:
+    """`moved` in the place of `slot`: below what `slot` had above it, but
+    for the comment directly above `slot`, which goes with `slot`, and with
+    the comment directly above `moved`."""
+    above = list(slot.leading_lines)
+    kept = above[: len(above) - len(_comment_run(above))]
+    return moved.with_changes(leading_lines=[*kept, *_comment_run(moved.leading_lines)])
 
 
-def _entry_trail(mapping: cst.Dict, k: int) -> cst.ParenthesizedWhitespace | None:
-    """Where the line of entry `k` of `mapping` ends, when it ends after it:
-    after its comma, or, for the last entry, before the closing brace."""
-    entry = mapping.elements[k]
-    ws = entry.comma.whitespace_after if isinstance(entry.comma, cst.Comma) else None
-    if not isinstance(ws, cst.ParenthesizedWhitespace) and k == len(mapping.elements) - 1:
-        ws = mapping.rbrace.whitespace_before
-    return ws if isinstance(ws, cst.ParenthesizedWhitespace) else None
+def _port_value_name(value: cst.BaseExpression | None, attr: str) -> str | None:
+    """The name of the port `value` declares, when it declares one: the name
+    it is given (`Port[int]("Output")`, `Port[int](name="Output")`), else
+    `attr`, the name it is assigned to. None for any other value."""
+
+    def is_factory(node: cst.BaseExpression) -> bool:
+        target = node.value if isinstance(node, cst.Subscript) else None
+        tail = target.value if isinstance(target, cst.Name) else target.attr.value if isinstance(target, cst.Attribute) else None
+        return tail == "Port"
+
+    if value is None:
+        return None
+    if is_factory(value):
+        return attr
+    if isinstance(value, cst.Call) and is_factory(value.func):
+        for at, arg in enumerate(value.args):
+            if (arg.keyword is None and at == 0) or (arg.keyword is not None and arg.keyword.value == "name"):
+                return _string_value(arg.value) or attr
+        return attr
+    return None
 
 
-def _reordered_dict(mapping: cst.Dict, names: list[str]) -> cst.Dict:
-    """`mapping` with its string-keyed entries in the order of `names`: the
-    commas and line breaks stay where they are, and each entry takes along
-    the comment after it on its line."""
+def _port_statement_names(stmt: cst.BaseSmallStatement) -> list[str]:
+    """The ports one statement of `class Ports` declares, by name."""
+    pairs: list[tuple[cst.BaseAssignTargetExpression | cst.BaseExpression, cst.BaseExpression | None]]
+    if isinstance(stmt, cst.Assign):
+        pairs = [(t.target, stmt.value) for t in stmt.targets]
+    elif isinstance(stmt, cst.AnnAssign):
+        pairs = [(stmt.target, stmt.value)]
+    else:
+        return []
+    names = []
+    for target, value in pairs:
+        if isinstance(target, cst.Name) and not target.value.startswith("_"):
+            name = _port_value_name(value, target.value)
+            if name is not None:
+                names.append(name)
+    return names
+
+
+@dataclasses.dataclass
+class _DictGaps:
+    """The whitespace around the entries of a dict, entry by entry: `gaps[k]`
+    is what comes before entry `k` (after `{`, or after the comma of entry
+    `k - 1`), `gaps[n]` what comes after the last entry. Where a gap holds a
+    line break, its first line ends the line of the entry before it (with
+    that entry's comment) and its empty lines are the lines above the entry
+    after it."""
+
+    mapping: cst.Dict
+    gaps: list[cst.BaseParenthesizableWhitespace]
+    owners: list[tuple[str, int]]
+
+    @classmethod
+    def of(cls, mapping: cst.Dict) -> "_DictGaps":
+        elements = mapping.elements
+        gaps: list[cst.BaseParenthesizableWhitespace] = [mapping.lbrace.whitespace_after]
+        owners = [("lbrace", -1)]
+        for k, element in enumerate(elements):
+            comma = element.comma
+            last = k == len(elements) - 1
+            if isinstance(comma, cst.Comma) and (not last or isinstance(comma.whitespace_after, cst.ParenthesizedWhitespace)):
+                gaps.append(comma.whitespace_after)
+                owners.append(("comma", k))
+            elif last:
+                gaps.append(mapping.rbrace.whitespace_before)
+                owners.append(("rbrace", -1))
+        return cls(mapping, gaps, owners)
+
+    def above(self, k: int) -> list[cst.EmptyLine]:
+        gap = self.gaps[k]
+        return _comment_run(gap.empty_lines) if isinstance(gap, cst.ParenthesizedWhitespace) else []
+
+    def trail(self, k: int) -> cst.TrailingWhitespace | None:
+        gap = self.gaps[k + 1]
+        return gap.first_line if isinstance(gap, cst.ParenthesizedWhitespace) else None
+
+
+def _reordered_dict(mapping: cst.Dict, names: list[str], entity: str) -> cst.Dict:
+    """`mapping` with its string-keyed entries in the order of `names`. The
+    commas and line breaks stay where they are; each entry takes along the
+    comment directly above it and the comment after it on its line. A comment
+    that would have no line to go to is refused, not dropped."""
     elements = list(mapping.elements)
     slot_of = {
         _string_value(e.key): k
         for k, e in enumerate(elements)
         if isinstance(e, cst.DictElement) and _string_value(e.key) is not None
     }
-    trails = [_entry_trail(mapping, k) for k in range(len(elements))]
-    slots = sorted(slot_of.values())
+    at = _DictGaps.of(mapping)
+    gaps = list(at.gaps)
+
+    def refuse(name: str) -> NoReturn:
+        raise RewriteError(
+            message=(
+                f"the comment of {name!r} in the ports of '{entity}' would have no line to go to "
+                "in the new order: write each entry of the dict on a line of its own"
+            ),
+            diagnostic={"code": "entries_share_a_line", "entityType": entity, "port": name},
+        )
+
+    for slot, name in zip(sorted(slot_of.values()), names):
+        moved = slot_of[name]
+        before, after = gaps[slot], gaps[slot + 1]
+        above, trail = at.above(moved), at.trail(moved)
+        if isinstance(before, cst.ParenthesizedWhitespace):
+            was = at.gaps[slot]
+            own = list(was.empty_lines) if isinstance(was, cst.ParenthesizedWhitespace) else []
+            kept = own[: len(own) - len(at.above(slot))]
+            gaps[slot] = before.with_changes(empty_lines=[*kept, *above])
+        elif above:
+            refuse(name)
+        if isinstance(after, cst.ParenthesizedWhitespace):
+            gaps[slot + 1] = after.with_changes(first_line=trail if trail is not None else cst.TrailingWhitespace())
+        elif trail is not None and trail.comment is not None:
+            refuse(name)
     reordered = list(elements)
-    rbrace = mapping.rbrace
-    for slot, name in zip(slots, names):
-        moved = elements[slot_of[name]]
-        here, said = trails[slot], trails[slot_of[name]]
-        comma = elements[slot].comma
-        if here is not None and said is not None:
-            if isinstance(comma, cst.Comma) and comma.whitespace_after is here:
-                comma = comma.with_changes(whitespace_after=here.with_changes(first_line=said.first_line))
-            elif rbrace.whitespace_before is here:
-                rbrace = rbrace.with_changes(whitespace_before=here.with_changes(first_line=said.first_line))
-        reordered[slot] = moved.with_changes(comma=comma)
-    return mapping.with_changes(elements=reordered, rbrace=rbrace)
+    for slot, name in zip(sorted(slot_of.values()), names):
+        reordered[slot] = elements[slot_of[name]].with_changes(comma=elements[slot].comma)
+    lbrace, rbrace = mapping.lbrace, mapping.rbrace
+    for gap, (owner, k) in zip(gaps, at.owners):
+        if owner == "lbrace":
+            lbrace = lbrace.with_changes(whitespace_after=gap)
+        elif owner == "rbrace":
+            rbrace = rbrace.with_changes(whitespace_before=gap)
+        else:
+            comma = reordered[k].comma
+            assert isinstance(comma, cst.Comma)
+            reordered[k] = reordered[k].with_changes(comma=comma.with_changes(whitespace_after=gap))
+    return mapping.with_changes(lbrace=lbrace, elements=reordered, rbrace=rbrace)
 
 
 class RewriteEngine:
@@ -5014,39 +5113,42 @@ class RewriteEngine:
 
     def _reorder_class_ports(self, cls: cst.ClassDef, entity: str, names: list[str]) -> None:
         ports_cls = self._ports_class(cls)
-        declared = self._class_port_names(cls)
-        self._refuse_other_ports(entity, declared, names)
-        if ports_cls is None or names == declared:
-            return
-        body = list(ports_cls.body.body)
+        body = list(ports_cls.body.body) if ports_cls is not None else []
         line_of: dict[str, int] = {}
+        declared: list[str] = []
         for index, stmt in enumerate(body):
             if not isinstance(stmt, cst.SimpleStatementLine):
                 continue
-            targets = [
-                t
-                for small in stmt.body
-                if isinstance(small, (cst.Assign, cst.AnnAssign))
-                for t in ([x.target for x in small.targets] if isinstance(small, cst.Assign) else [small.target])
-                if isinstance(t, cst.Name)
-            ]
-            if not targets:
+            ports = [name for small in stmt.body for name in _port_statement_names(small)]
+            if not ports:
                 continue
-            if len(targets) > 1 or len(stmt.body) > 1:
-                shared = ", ".join(repr(t.value) for t in targets)
-                line = self._line_of(stmt)
+            line = self._line_of(stmt)
+            where = f" (line {line})" if line else ""
+            if len(ports) > 1 or len(stmt.body) > 1:
+                shared = ", ".join(map(repr, ports))
                 raise RewriteError(
                     message=(
-                        f"ports {shared} of '{entity}' share a line{f' (line {line})' if line else ''}, "
-                        "so they cannot be put in another order: write each on a line of its own"
+                        f"port{'s' if len(ports) > 1 else ''} {shared} of '{entity}' share{'' if len(ports) > 1 else 's'} "
+                        f"a line{where}, so {'they' if len(ports) > 1 else 'it'} cannot be put in another order: "
+                        "write each port on a line of its own"
                     ),
-                    diagnostic={"code": "ports_share_a_line", "entityType": entity, "ports": [t.value for t in targets]},
+                    diagnostic={"code": "ports_share_a_line", "entityType": entity, "ports": ports},
                 )
-            line_of[targets[0].value] = index
-        slots = sorted(line_of.values())
+            if ports[0] in line_of:
+                raise RewriteError(
+                    message=f"port {ports[0]!r} of '{entity}' is declared twice{where}: which line is meant is not known",
+                    diagnostic={"code": "port_declared_twice", "entityType": entity, "port": ports[0]},
+                )
+            line_of[ports[0]] = index
+            declared.append(ports[0])
+        self._refuse_other_ports(entity, declared, names)
+        if ports_cls is None or names == declared:
+            return
         reordered = list(body)
-        for slot, port in zip(slots, names):
-            reordered[slot] = _moved_line(body[line_of[port]], body[slot])
+        for slot, port in zip(sorted(line_of.values()), names):
+            moved, here = body[line_of[port]], body[slot]
+            assert isinstance(moved, cst.SimpleStatementLine) and isinstance(here, cst.SimpleStatementLine)
+            reordered[slot] = _moved_line(moved, here)
         self._replace_node(ports_cls, ports_cls.with_changes(body=ports_cls.body.with_changes(body=reordered)))
 
     def _reorder_workflow_ports(self, fn: cst.FunctionDef, entity: str, names: list[str]) -> None:
@@ -5066,7 +5168,7 @@ class RewriteEngine:
             wanted = [n for n in names if n in own]
             if wanted == own:
                 continue
-            args[at] = arg.with_changes(value=_reordered_dict(mapping, wanted))
+            args[at] = arg.with_changes(value=_reordered_dict(mapping, wanted, entity))
             changed = True
         if changed:
             self._replace_node(fn, self._with_workflow_decorator(fn, call.with_changes(args=args)))

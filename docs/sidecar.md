@@ -114,6 +114,7 @@ Use either `from_expr` / `to_expr` or structured `from_port` / `to_port`:
 ```json
 { "op": "wfpy.createIf", "args": {"workflow": "MyWorkflow", "name": "cond1", "condition_expr": "flag"} }
 { "op": "wfpy.createLoop", "args": {"workflow": "MyWorkflow", "name": "loop1", "iterable_expr": "items"} }
+```
 
 ### Port edits
 
@@ -126,9 +127,11 @@ Use either `from_expr` / `to_expr` or structured `from_port` / `to_port`:
 `reorderEntityPorts` puts a definition's ports in the order a diagram draws
 them: the lines of a class's `class Ports`, each with its comments, or the
 entries of a `@workflow` decorator's `inputs=` / `outputs=` dicts, each dict
-in the order its names have in `order`. `order` names every port once.
-Nothing else of the file changes.
-```
+in the order its names have in `order`. `order` names every port once,
+by the name the diagram shows (`Port[int]("Output")` is `Output`). Nothing
+else of the file changes. Refused, with the file left as it was: an order
+that leaves out a port or names one twice, ports sharing a line or declared
+twice, and a dict comment that would have no line to go to.
 
 ### Wrap / unwrap
 

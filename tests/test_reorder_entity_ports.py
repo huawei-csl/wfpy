@@ -163,3 +163,83 @@ def test_a_definition_the_file_does_not_have_is_refused(tmp_path: Path) -> None:
     assert answer["status"] == "error", answer
     assert answer["diagnostic"]["code"] == "definition_not_found"
     assert text == FLOW
+
+
+def _flow_with_inputs(inputs: str) -> str:
+    return f"""from wfpy import workflow
+
+
+@workflow(
+    inputs={inputs},
+)
+def flow():
+    pass
+"""
+
+
+def test_each_dict_comment_goes_with_its_entry_once(tmp_path: Path) -> None:
+    source = _flow_with_inputs('{\n        "A": str,  # c1\n        "B": str,  # c2\n        "C": str}')
+    answer, text = _reordered(tmp_path, "flow", ["B", "A", "C"], source)
+    assert answer["status"] == "ok", answer
+    assert 'inputs={\n        "B": str,  # c2\n        "A": str,  # c1\n        "C": str},' in text, text
+    # The dict closes on C's line: B's comment would have no line after it.
+    answer, text = _reordered(tmp_path, "flow", ["C", "A", "B"], source)
+    assert answer["status"] == "error", answer
+    assert answer["diagnostic"]["code"] == "entries_share_a_line"
+    assert text == source
+
+
+def test_a_comment_above_a_dict_entry_moves_with_it(tmp_path: Path) -> None:
+    source = _flow_with_inputs('{\n        # about A\n        "A": str,\n\n        # about B\n        "B": str,\n    }')
+    answer, text = _reordered(tmp_path, "flow", ["B", "A"], source)
+    assert answer["status"] == "ok", answer
+    assert "inputs={\n        # about B\n        \"B\": str,\n\n        # about A\n        \"A\": str,\n    }," in text, text
+
+
+def test_a_dict_comment_with_no_line_to_go_to_is_refused(tmp_path: Path) -> None:
+    source = _flow_with_inputs('{"A": str, "B": str,  # about B\n    }')
+    answer, text = _reordered(tmp_path, "flow", ["B", "A"], source)
+    assert answer["status"] == "error", answer
+    assert answer["diagnostic"]["code"] == "entries_share_a_line"
+    assert text == source
+
+
+PORTS = '''from wfpy import Port, task
+
+
+@task
+class T:
+    class Ports:
+        LIMIT = 3
+
+        # --- inputs ---
+
+        # the a
+        A = Port[str](direction="in")
+        B = Port[int]("Bee", direction="in")
+        Out: Port = Port[str](name="Result", direction="out")
+'''
+
+
+def test_only_ports_move_and_a_section_header_stays(tmp_path: Path) -> None:
+    answer, text = _reordered(tmp_path, "T", ["Bee", "A", "Result"], PORTS)
+    assert answer["status"] == "ok", answer
+    assert text == PORTS.replace(
+        '        # the a\n        A = Port[str](direction="in")\n        B = Port[int]("Bee", direction="in")\n',
+        '        B = Port[int]("Bee", direction="in")\n        # the a\n        A = Port[str](direction="in")\n',
+    ), text
+
+
+def test_ports_are_named_as_the_diagram_names_them(tmp_path: Path) -> None:
+    answer, _ = _reordered(tmp_path, "T", ["B", "A", "Out"], PORTS)
+    assert answer["status"] == "error", answer
+    assert answer["diagnostic"]["code"] == "port_order_mismatch"
+    assert answer["diagnostic"]["missing"] == ["Bee", "Result"]
+
+
+def test_a_port_declared_twice_is_refused(tmp_path: Path) -> None:
+    source = PORTS.replace('        Out: Port', '        A = Port[str](direction="in")\n        Out: Port')
+    answer, text = _reordered(tmp_path, "T", ["Bee", "A", "Result"], source)
+    assert answer["status"] == "error", answer
+    assert answer["diagnostic"]["code"] == "port_declared_twice"
+    assert text == source
