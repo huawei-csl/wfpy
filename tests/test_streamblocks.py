@@ -517,12 +517,15 @@ class TestNetworkParameter:
 
         actor = FakeActor(Net, {})  # `In` not connected
         actor.instance = Net(network="designs/core.py")
+        # an edge drawn from source: the overlay reads its token by that path
+        actor.out_queues["Out"][0].overlay_ast_path = "flow/net-out"
         plan = FakePlan(tmp_path)
 
         assert _step_streamblocks_instance(actor, tmp_path, plan, verbose=False)
         assert actor.out_queues["Out"][0].enqueued == ["designs/core.py"]
         # the run's overlay draws the edge as having carried it
         assert plan.edge_last_token_by_queue_id == {"Net.Out": "designs/core.py"}
+        assert plan.edge_last_token_by_ast_path == {"flow/net-out": "designs/core.py"}
         # with nothing connected, once
         assert not _step_streamblocks_instance(actor, tmp_path, plan, verbose=False)
 
