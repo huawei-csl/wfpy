@@ -7,6 +7,15 @@ All notable changes to wfpy are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- The sidecar op `reorderEntityPorts` (`RewriteEngine.reorder_entity_ports`):
+  a definition's ports in a given order, written into its source, for an
+  IDE that lays a diagram out with its ports reordered against crossings.
+  A class's `class Ports` lines move, each with the comments above it and
+  after it; the other lines (a docstring, blank lines) stay where they
+  are. A `@workflow def`'s `inputs=` and `outputs=` dict entries move, the
+  commas and line breaks staying in place and each entry taking the comment
+  after it. An order that leaves out a port, names one the definition does
+  not have, or names one twice is refused, as are ports written on one line.
 - The reasoning level over ACP: an agent's `reasoningEffort` (or
   `variant`) is set on the session where the agent offers a config option
   of category `thought_level` (OpenCode 2's `effort`: minimal, low, medium,

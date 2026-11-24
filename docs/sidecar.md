@@ -120,7 +120,14 @@ Use either `from_expr` / `to_expr` or structured `from_port` / `to_port`:
 ```json
 { "op": "wfpy.renamePort", "args": {"entity": "TaskA", "portDirection": "input", "portName": "In", "newValue": "Input"} }
 { "op": "wfpy.updatePortType", "args": {"entity": "TaskA", "portDirection": "output", "portName": "Out", "newValue": "int"} }
+{ "op": "wfpy.reorderEntityPorts", "args": {"entity": "TaskA", "order": ["Model", "Image", "Program", "Network"]} }
 ```
+
+`reorderEntityPorts` puts a definition's ports in the order a diagram draws
+them: the lines of a class's `class Ports`, each with its comments, or the
+entries of a `@workflow` decorator's `inputs=` / `outputs=` dicts, each dict
+in the order its names have in `order`. `order` names every port once.
+Nothing else of the file changes.
 ```
 
 ### Wrap / unwrap

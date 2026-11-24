@@ -1220,6 +1220,58 @@ class _Use:
     ordinal: int | None = None
 
 
+def _comment_lines(stmt: cst.SimpleStatementLine) -> list[cst.EmptyLine]:
+    """The lines above `stmt` from its first comment on: what is said of it."""
+    lines = list(stmt.leading_lines)
+    first = next((k for k, line in enumerate(lines) if line.comment is not None), len(lines))
+    return lines[first:]
+
+
+def _moved_line(moved: cst.CSTNode, slot: cst.CSTNode) -> cst.CSTNode:
+    """`moved` in the place of `slot`: with the blank lines `slot` had above it
+    and the comments `moved` had above it."""
+    assert isinstance(moved, cst.SimpleStatementLine) and isinstance(slot, cst.SimpleStatementLine)
+    blanks = list(slot.leading_lines)[: len(slot.leading_lines) - len(_comment_lines(slot))]
+    return moved.with_changes(leading_lines=[*blanks, *_comment_lines(moved)])
+
+
+def _entry_trail(mapping: cst.Dict, k: int) -> cst.ParenthesizedWhitespace | None:
+    """Where the line of entry `k` of `mapping` ends, when it ends after it:
+    after its comma, or, for the last entry, before the closing brace."""
+    entry = mapping.elements[k]
+    ws = entry.comma.whitespace_after if isinstance(entry.comma, cst.Comma) else None
+    if not isinstance(ws, cst.ParenthesizedWhitespace) and k == len(mapping.elements) - 1:
+        ws = mapping.rbrace.whitespace_before
+    return ws if isinstance(ws, cst.ParenthesizedWhitespace) else None
+
+
+def _reordered_dict(mapping: cst.Dict, names: list[str]) -> cst.Dict:
+    """`mapping` with its string-keyed entries in the order of `names`: the
+    commas and line breaks stay where they are, and each entry takes along
+    the comment after it on its line."""
+    elements = list(mapping.elements)
+    slot_of = {
+        _string_value(e.key): k
+        for k, e in enumerate(elements)
+        if isinstance(e, cst.DictElement) and _string_value(e.key) is not None
+    }
+    trails = [_entry_trail(mapping, k) for k in range(len(elements))]
+    slots = sorted(slot_of.values())
+    reordered = list(elements)
+    rbrace = mapping.rbrace
+    for slot, name in zip(slots, names):
+        moved = elements[slot_of[name]]
+        here, said = trails[slot], trails[slot_of[name]]
+        comma = elements[slot].comma
+        if here is not None and said is not None:
+            if isinstance(comma, cst.Comma) and comma.whitespace_after is here:
+                comma = comma.with_changes(whitespace_after=here.with_changes(first_line=said.first_line))
+            elif rbrace.whitespace_before is here:
+                rbrace = rbrace.with_changes(whitespace_before=here.with_changes(first_line=said.first_line))
+        reordered[slot] = moved.with_changes(comma=comma)
+    return mapping.with_changes(elements=reordered, rbrace=rbrace)
+
+
 class RewriteEngine:
     def __init__(self, file_path: str, module: cst.Module, source_text: str) -> None:
         self.file_path = file_path
@@ -4891,6 +4943,133 @@ class RewriteEngine:
             body=ports_cls.body.with_changes(body=kept or [cst.SimpleStatementLine([cst.Pass()])])
         )
         self._replace_node(ports_cls, new_ports)
+
+    def reorder_entity_ports(
+        self,
+        *,
+        entity: str | None = None,
+        entityType: str | None = None,
+        order: Any = None,
+    ) -> None:
+        """Put the ports of `entity` in `order` (its port names, each once),
+        the order a diagram draws them in: the lines of its `class Ports`
+        for a class (a task, an agent, a workflow written as a class), the
+        entries of its decorator's `inputs=` and `outputs=` dicts for a
+        `@workflow def`, each dict in the order its names have in `order`.
+
+        A port's line keeps its comments, the ones above it and the one
+        after it; every other line of `class Ports` (a docstring, a blank
+        line) stays where it is. In a dict the commas and the line breaks
+        stay where they are and each entry keeps the comment after it.
+        Nothing else of the file changes; an order the ports already have
+        changes nothing at all."""
+        name = str(entity if entity is not None else entityType or "")
+        names = self._port_order_names(order, name)
+        cls = self._class_def(name)
+        if cls is not None:
+            self._reorder_class_ports(cls, name, names)
+            return
+        fns = self._workflow_defs_named(name)
+        if not fns:
+            raise RewriteError(
+                message=f"no class or @workflow '{name}' in {Path(self.file_path).name}",
+                diagnostic={"code": "definition_not_found", "entityType": name, "file": self.file_path},
+            )
+        if len(fns) > 1:
+            raise RewriteError(
+                message=f"{len(fns)} @workflow defs are named '{name}' in {Path(self.file_path).name}: which one is meant is not known",
+                diagnostic={"code": "ambiguous_definition", "entityType": name, "file": self.file_path},
+            )
+        self._reorder_workflow_ports(fns[0], name, names)
+
+    @staticmethod
+    def _port_order_names(order: Any, entity: str) -> list[str]:
+        if not isinstance(order, list) or not all(isinstance(n, str) for n in order):
+            raise RewriteError(
+                message=f"the port order of '{entity}' must be a list of port names",
+                diagnostic={"code": "invalid_port_order", "entityType": entity},
+            )
+        twice = sorted({n for n in order if order.count(n) > 1})
+        if twice:
+            raise RewriteError(
+                message=f"the port order of '{entity}' names {', '.join(map(repr, twice))} more than once",
+                diagnostic={"code": "invalid_port_order", "entityType": entity, "repeated": twice},
+            )
+        return list(order)
+
+    @staticmethod
+    def _refuse_other_ports(entity: str, declared: list[str], names: list[str]) -> None:
+        missing = [n for n in declared if n not in names]
+        unknown = [n for n in names if n not in declared]
+        if missing or unknown:
+            said = []
+            if missing:
+                said.append(f"leaves out {', '.join(map(repr, missing))}")
+            if unknown:
+                said.append(f"names {', '.join(map(repr, unknown))}, which it does not have")
+            raise RewriteError(
+                message=f"the port order of '{entity}' {' and '.join(said)}",
+                diagnostic={"code": "port_order_mismatch", "entityType": entity, "missing": missing, "unknown": unknown},
+            )
+
+    def _reorder_class_ports(self, cls: cst.ClassDef, entity: str, names: list[str]) -> None:
+        ports_cls = self._ports_class(cls)
+        declared = self._class_port_names(cls)
+        self._refuse_other_ports(entity, declared, names)
+        if ports_cls is None or names == declared:
+            return
+        body = list(ports_cls.body.body)
+        line_of: dict[str, int] = {}
+        for index, stmt in enumerate(body):
+            if not isinstance(stmt, cst.SimpleStatementLine):
+                continue
+            targets = [
+                t
+                for small in stmt.body
+                if isinstance(small, (cst.Assign, cst.AnnAssign))
+                for t in ([x.target for x in small.targets] if isinstance(small, cst.Assign) else [small.target])
+                if isinstance(t, cst.Name)
+            ]
+            if not targets:
+                continue
+            if len(targets) > 1 or len(stmt.body) > 1:
+                shared = ", ".join(repr(t.value) for t in targets)
+                line = self._line_of(stmt)
+                raise RewriteError(
+                    message=(
+                        f"ports {shared} of '{entity}' share a line{f' (line {line})' if line else ''}, "
+                        "so they cannot be put in another order: write each on a line of its own"
+                    ),
+                    diagnostic={"code": "ports_share_a_line", "entityType": entity, "ports": [t.value for t in targets]},
+                )
+            line_of[targets[0].value] = index
+        slots = sorted(line_of.values())
+        reordered = list(body)
+        for slot, port in zip(slots, names):
+            reordered[slot] = _moved_line(body[line_of[port]], body[slot])
+        self._replace_node(ports_cls, ports_cls.with_changes(body=ports_cls.body.with_changes(body=reordered)))
+
+    def _reorder_workflow_ports(self, fn: cst.FunctionDef, entity: str, names: list[str]) -> None:
+        declared = self._workflow_port_names(fn)
+        self._refuse_other_ports(entity, [*declared["inputs"], *[n for n in declared["outputs"] if n not in declared["inputs"]]], names)
+        decorator = self._workflow_decorator(fn)
+        if decorator is None or not isinstance(decorator[1].decorator, cst.Call):
+            return
+        call = decorator[1].decorator
+        args = list(call.args)
+        changed = False
+        for at, arg in enumerate(args):
+            if arg.keyword is None or arg.keyword.value not in declared or not isinstance(arg.value, cst.Dict):
+                continue
+            mapping = arg.value
+            own = declared[arg.keyword.value]
+            wanted = [n for n in names if n in own]
+            if wanted == own:
+                continue
+            args[at] = arg.with_changes(value=_reordered_dict(mapping, wanted))
+            changed = True
+        if changed:
+            self._replace_node(fn, self._with_workflow_decorator(fn, call.with_changes(args=args)))
 
     def _body_assigns(self, fn: cst.FunctionDef, name: str) -> bool:
         """Whether workflow `fn`'s body binds `name` (`name = ...`): an instance."""
