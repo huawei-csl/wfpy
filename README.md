@@ -27,10 +27,10 @@ these to install a version that is not on PyPI, or without PyPI access:
 
 ```bash
 # a release wheel straight from GitHub
-pip install "wfpy @ https://github.com/huawei-csl/wfpy/releases/download/v1.4.0/wfpy-1.4.0-py3-none-any.whl"
+pip install "wfpy @ https://github.com/huawei-csl/wfpy/releases/download/v1.4.1/wfpy-1.4.1-py3-none-any.whl"
 
 # or a tagged source
-pip install "git+https://github.com/huawei-csl/wfpy@v1.4.0"
+pip install "git+https://github.com/huawei-csl/wfpy@v1.4.1"
 ```
 
 For local development, clone and install editable: `pip install -e ".[dev]"`.
