@@ -839,6 +839,8 @@ def _class_ports(
         entry = _port_entry(text, definition.file, stmt)
         if entry is None:
             continue
+        # The class whose `Ports` writes it, which a subclass's node shares.
+        entry["owner"] = node.name
         ports = [port for port in ports if port["attr"] != entry["attr"]]
         ports.append(entry)
     return ports

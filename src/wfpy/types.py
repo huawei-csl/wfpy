@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import dataclasses
 import os
+import sys
+import warnings
 from urllib.parse import urlparse
 from typing import Any, TypeVar
 
@@ -296,6 +298,11 @@ def extract_ports(cls: type) -> dict[str, PortDescriptor]:
         return {}
 
     result: dict[str, PortDescriptor] = {}
+    # The `Ports` class that writes each name, read before a bare `Port[T]` is
+    # replaced below: a `class Ports(Base.Ports)` holds the ports of its base.
+    written_in: dict[str, type] = {
+        name: klass for klass in reversed(ports_cls.__mro__) for name in vars(klass)
+    }
     source_map: dict[str, tuple[str, int]] = {}
     try:
         import inspect
@@ -341,4 +348,59 @@ def extract_ports(cls: type) -> dict[str, PortDescriptor]:
                 desc.source_file, desc.source_line = source_map[attr_name]
             result[attr_name] = desc
             setattr(ports_cls, attr_name, desc)  # replace factory with descriptor
+    for attr_name, desc in result.items():
+        if desc.direction not in ("in", "out"):
+            _warn_port_without_direction(written_in.get(attr_name, ports_cls), attr_name, desc)
     return result
+
+
+# A port of no stated direction is an output by these names and an input by
+# any other (`core._infer_direction`).
+_OUTPUT_PORT_NAMES = ("out", "output", "result", "report", "summary")
+
+
+def port_without_direction_notice(owner: str, attr_name: str, name: str) -> str:
+    """What wfpy says of a port declared without ``direction="in"`` or
+    ``direction="out"``: ``owner`` is the class that holds the ``Ports``,
+    ``name`` the port's own name, which is what decides the side it is taken
+    for. The runtime's warning and the sidecar's are this one text."""
+    side, word = (
+        ("an output", "out") if name.lower() in _OUTPUT_PORT_NAMES else ("an input", "in")
+    )
+    return (
+        f'{owner}.Ports.{attr_name}: a port declared without direction="in" or '
+        f'direction="out" is deprecated, and wfpy 2.0 will refuse it. wfpy takes this '
+        f'one for {side}, by its name: write direction="{word}" to keep that.'
+    )
+
+
+def _warn_port_without_direction(ports_cls: type, attr_name: str, desc: PortDescriptor) -> None:
+    """Warn of a port whose direction is left to its name, at the line that
+    declares it: once for a line, as a warning raised there would be.
+
+    A ``FutureWarning`` and not a ``DeprecationWarning``: Python shows the
+    second only for code run as ``__main__``, and a workflow file is loaded by
+    ``wfpy run``, so its author would not see it."""
+    # `Up.Ports` is `Up`, and `f.<locals>.Up.Ports` too.
+    owner = ports_cls.__qualname__.split(".")[-2:][0]
+    message = port_without_direction_notice(owner, attr_name, desc.name or attr_name)
+    if desc.source_file and desc.source_line:
+        # The module's own registry, where a warning raised on that line
+        # would be counted. A file that is run and not imported has none.
+        module_globals = getattr(sys.modules.get(ports_cls.__module__), "__dict__", None)
+        warnings.warn_explicit(
+            message,
+            FutureWarning,
+            desc.source_file,
+            desc.source_line,
+            module=ports_cls.__module__,
+            registry=(
+                module_globals.setdefault("__warningregistry__", {})
+                if isinstance(module_globals, dict)
+                else None
+            ),
+        )
+        return
+    # No line to point at: the source cannot be read (a class written in a
+    # string that is executed), or the port is one a `Ports` inherits.
+    warnings.warn(message, FutureWarning, stacklevel=4)

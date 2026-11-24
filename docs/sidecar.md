@@ -111,6 +111,31 @@ open (`Port[int]()`) is an output by the names `out`, `output`, `result`,
 `if_` node carries the `label` the runtime names it by (`loop`, `loop_1`,
 `if`); its `id` is the name the source binds it to, which the ops go by.
 
+Such a port is deprecated, and the graph says so as the runtime does when the
+class is defined. Every node of a class that declares one has a warning for
+it under `metadata.diagnostics`, with the runtime's text and the place of the
+declaration:
+
+```json
+{
+  "id": "a", "ref": "Up", "kind": "task",
+  "metadata": {
+    "diagnostics": [
+      {
+        "severity": "warning", "code": "port_without_direction",
+        "message": "Up.Ports.Out: a port declared without direction=\"in\" or direction=\"out\" is deprecated, and wfpy 2.0 will refuse it. wfpy takes this one for an output, by its name: write direction=\"out\" to keep that.",
+        "location": {"file": "/abs/path/to/workflow.py", "line": 8}
+      }
+    ]
+  }
+}
+```
+
+A warning is no fault: the node is not `isErrored`, the graph is not
+`partial` and has no `errors` entry for it. A connection is not refused for
+such a port at either end, by `checkConnection`, by `connect`, or as an edge
+of the graph, since the runtime checks no direction on it.
+
 #### A file that does not parse
 
 A file with a syntax fault is drawn too, from a repaired copy of its text:

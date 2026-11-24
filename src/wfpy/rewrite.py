@@ -22,6 +22,7 @@ from wfpy._drawable_source import (
     syntax_fault,
 )
 from wfpy._source_repair import SourceFault
+from wfpy.types import port_without_direction_notice
 from wfpy.workflow_identity import (
     detect_dynamic_workflow_identity_issues,
     format_dynamic_workflow_identity_error,
@@ -990,7 +991,11 @@ def _source_revision(text: str) -> str:
 
 
 def _parse_port_value(value: cst.BaseExpression) -> dict[str, str] | None:
-    """Extract `{direction, type}` from a `Port[<type>](direction="…")` expression."""
+    """Extract `{direction, type}` from a `Port[<type>](direction="…")` expression.
+
+    A direction that is not written, or is neither `in` nor `out`, is `inout`,
+    which is `Port`'s own default: the runtime checks no direction on such a
+    port, so a connection is not refused for it at either end."""
     call = value if isinstance(value, cst.Call) else None
     subscript = call.func if call and isinstance(call.func, cst.Subscript) else (
         value if isinstance(value, cst.Subscript) else None
@@ -1002,12 +1007,12 @@ def _parse_port_value(value: cst.BaseExpression) -> dict[str, str] | None:
         sl = subscript.slice[0].slice
         if isinstance(sl, cst.Index):
             port_type = cst.Module([]).code_for_node(sl.value).strip()
-    direction = "in"
+    direction = "inout"
     if call is not None:
         for arg in call.args:
             if arg.keyword is not None and arg.keyword.value == "direction":
                 raw = cst.Module([]).code_for_node(arg.value).strip().strip("\"'")
-                direction = raw or "in"
+                direction = raw if raw in ("in", "out") else "inout"
     return {"direction": direction, "type": port_type}
 
 
@@ -3315,8 +3320,8 @@ class RewriteEngine:
 
     def port_metadata(self, type_name: str, port_name: str) -> dict[str, str] | None:
         """Resolve a component port's `{direction, type}` from its type's `class Ports`.
-        Returns None if the type/port cannot be found. Direction defaults to "in" when no
-        `direction=` kwarg is present (matches the Port default)."""
+        Returns None if the type/port cannot be found. Direction is "inout" when no
+        `direction=` kwarg is present (the Port default)."""
         for stmt in self.module.body:
             if not (isinstance(stmt, cst.ClassDef) and stmt.name.value == type_name):
                 continue
@@ -3496,6 +3501,7 @@ class RewriteEngine:
                 found = declared_ports(index, self.file_path, ref) if ref else None
                 declared_by_ref[ref] = found or []
             ports: list[dict[str, Any]] = []
+            notices: list[dict[str, Any]] = []
             for declared in declared_by_ref[ref]:
                 entry = port(
                     f"n:{name}:p:{declared['attr']}",
@@ -3512,7 +3518,33 @@ class RewriteEngine:
                         declared_in = self.file_path
                     entry["location"] = {"file": declared_in, "line": declared["line"]}
                 ports.append(entry)
+                # Only a port of a `class Ports` has a direction as written.
+                if str(declared.get("declared", "in")) in ("in", "out"):
+                    continue
+                # The runtime warns of such a port when the class is defined
+                # (`types.extract_ports`). Nothing is run here, so the graph
+                # says it, in the runtime's words and at the declaration.
+                notice: dict[str, Any] = {
+                    "severity": "warning",
+                    "code": "port_without_direction",
+                    "message": port_without_direction_notice(
+                        str(declared.get("owner") or ref),
+                        str(declared["attr"]),
+                        str(declared["name"]),
+                    ),
+                }
+                if "location" in entry:
+                    notice["location"] = dict(entry["location"])
+                notices.append(notice)
             node["ports"] = ports
+            if notices:
+                # A warning is no fault of the graph: the node is not
+                # `isErrored` and the graph is not `partial`.
+                noted = node.get("metadata")
+                if not isinstance(noted, dict):
+                    noted = {}
+                    node["metadata"] = noted
+                noted.setdefault("diagnostics", []).extend(notices)
             by_name.setdefault(name, node)
             known = declared_by_ref[ref]
             control = str(known[0].get("control", "")) if known else ""

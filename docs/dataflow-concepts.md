@@ -65,9 +65,12 @@ An **action** declares its token rates explicitly:
   parameter names are documentation, not a lookup key.
 - `produces={"Out": 1}` emits one token on `Out`, valued by the return.
 
-Ports default to `direction="inout"`; wfpy also treats a port named `out`,
-`output`, `result`, `report`, or `summary` as an output. Declaring `direction=`
-is clearer, and the examples always do.
+State the direction of every port: `direction="in"` or `direction="out"`. A
+port declared without one (`Port[int]()`, which is `direction="inout"`) is
+still taken for an output when it is named `out`, `output`, `result`,
+`report`, or `summary` and for an input by any other name, but it is
+deprecated. wfpy warns of it at the line that declares it, with the direction
+to write to keep what the workflow does, and wfpy 2.0 will refuse it.
 
 **Always decorate actions with `@action`.** A bare method named `action` is
 inferred for convenience, but it only produces output when it carries a return

@@ -311,8 +311,8 @@ class Doubler:
     factor: int                       # parameter
 
     class Ports:
-        In  = Port[int]()
-        Out = Port[int]()
+        In  = Port[int](direction="in")
+        Out = Port[int](direction="out")
 
     def action(self, x: int) -> int:
         return x * self.factor

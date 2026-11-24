@@ -70,6 +70,8 @@ class Ports:
 - `Port[...]()` defaults to `direction="inout"`, and the name then decides: `out`,
   `output`, `result`, `report` and `summary` are outputs, every other name is an input.
   A port named `Verdict` with no direction is an input. **Always state the direction.**
+  A port without `direction="in"` or `direction="out"` is deprecated: wfpy warns of it
+  at the line that declares it (a `FutureWarning`), and wfpy 2.0 will refuse it.
 - **Declare `ext=` on every `File` port, and return a path that ends in it.** The copy
   wfpy makes of a file a task returns keeps that path's own suffix, and `ext` names it
   only when the path has none. Measured on ports of one task: `ext=".md"` handed `a` came

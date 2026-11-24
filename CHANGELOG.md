@@ -6,6 +6,35 @@ All notable changes to wfpy are documented here. The format follows
 
 ## [Unreleased]
 
+### Deprecated
+- A port declared without `direction="in"` or `direction="out"`:
+  `Port[T]()`, the bare `Port[T]`, `direction="inout"`, and any other value.
+  Nothing in the runtime treats such a port as two-way. Its side is read from
+  its name (`out`, `output`, `result`, `report` and `summary` are outputs,
+  every other name is an input), so `Verdict = Port[str]()` is an input with
+  nothing to say so. wfpy now warns where such a port is declared, with the
+  class, the port and the direction to write to keep what the workflow does:
+  a `FutureWarning`, since Python hides a `DeprecationWarning` of a file that
+  `wfpy run` loads. Every workflow that ran still runs and gives what it
+  gave; only a run that turns warnings into errors (`python -W error`) now
+  stops at such a port. wfpy 2.0 will refuse it. The sidecar's graph
+  (`wfpy.exportWorkflowGraph`) says the same on each node of a class that
+  declares one: a `metadata.diagnostics` entry of severity `warning` and code
+  `port_without_direction`, with the runtime's text and the place of the
+  declaration. The node is not `isErrored` and the graph is not `partial`.
+  The README's minimal example, which was written with two such ports, now
+  states them.
+
+### Fixed
+- The sidecar took a port declared without a direction for an input, where
+  the runtime checks no direction on it. A connection out of one
+  (`connect(a.Out, b.In)` with `Out = Port[str]()`), which runs, was refused
+  by `checkConnection` and by `connect` with `invalid_source_direction`, and
+  its edge in the graph of `wfpy.exportWorkflowGraph` was flagged as an
+  error, which also made that graph `partial`. Such a port is now accepted
+  at either end of a connection, as at run time. A port that states `in` is
+  still refused as a source, and one that states `out` as a target.
+
 ## [1.4.0] — 2026-11-24
 
 A workflow file has a diagram while it is broken. The sidecar's static graph
