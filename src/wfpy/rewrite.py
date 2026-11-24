@@ -22,7 +22,7 @@ from wfpy._drawable_source import (
     syntax_fault,
 )
 from wfpy._source_repair import SourceFault
-from wfpy.types import port_without_direction_notice
+from wfpy.types import port_side_by_name, port_without_direction_notice
 from wfpy.workflow_identity import (
     detect_dynamic_workflow_identity_issues,
     format_dynamic_workflow_identity_error,
@@ -990,12 +990,15 @@ def _source_revision(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def _parse_port_value(value: cst.BaseExpression) -> dict[str, str] | None:
-    """Extract `{direction, type}` from a `Port[<type>](direction="…")` expression.
+def _parse_port_value(value: cst.BaseExpression, attr: str = "") -> dict[str, str] | None:
+    """Extract `{direction, type}` from a `Port[<type>](direction="…")` expression
+    assigned to `attr`.
 
-    A direction that is not written, or is neither `in` nor `out`, is `inout`,
-    which is `Port`'s own default: the runtime checks no direction on such a
-    port, so a connection is not refused for it at either end."""
+    A port that states neither `in` nor `out` (no direction, `inout`, any
+    other string) has the side its name gives, as the runtime takes it
+    (`core._infer_direction`) and as it is drawn: `Out = Port[T]()` is an
+    output. A direction that is written but is no string (`direction=OUT`)
+    is not read here: it is `inout`, and no connection is refused for it."""
     call = value if isinstance(value, cst.Call) else None
     subscript = call.func if call and isinstance(call.func, cst.Subscript) else (
         value if isinstance(value, cst.Subscript) else None
@@ -1007,12 +1010,21 @@ def _parse_port_value(value: cst.BaseExpression) -> dict[str, str] | None:
         sl = subscript.slice[0].slice
         if isinstance(sl, cst.Index):
             port_type = cst.Module([]).code_for_node(sl.value).strip()
-    direction = "inout"
+    name, direction = attr, ""
     if call is not None:
-        for arg in call.args:
-            if arg.keyword is not None and arg.keyword.value == "direction":
-                raw = cst.Module([]).code_for_node(arg.value).strip().strip("\"'")
-                direction = raw if raw in ("in", "out") else "inout"
+        for position, arg in enumerate(call.args):
+            written = _string_value(arg.value)
+            if arg.keyword is None:
+                if position == 0 and written:
+                    name = written
+            elif arg.keyword.value == "name" and written:
+                name = written
+            elif arg.keyword.value == "direction":
+                if written is None:
+                    return {"direction": "inout", "type": port_type}
+                direction = written
+    if direction not in ("in", "out"):
+        direction = port_side_by_name(name)
     return {"direction": direction, "type": port_type}
 
 
@@ -3320,8 +3332,8 @@ class RewriteEngine:
 
     def port_metadata(self, type_name: str, port_name: str) -> dict[str, str] | None:
         """Resolve a component port's `{direction, type}` from its type's `class Ports`.
-        Returns None if the type/port cannot be found. Direction is "inout" when no
-        `direction=` kwarg is present (the Port default)."""
+        Returns None if the type/port cannot be found. A port with no `in` or `out`
+        direction has the side its name gives (`_parse_port_value`)."""
         for stmt in self.module.body:
             if not (isinstance(stmt, cst.ClassDef) and stmt.name.value == type_name):
                 continue
@@ -3338,7 +3350,7 @@ class RewriteEngine:
                     if isinstance(s, cst.Assign) and any(
                         isinstance(t.target, cst.Name) and t.target.value == port_name for t in s.targets
                     ):
-                        return _parse_port_value(s.value)
+                        return _parse_port_value(s.value, port_name)
             return None
         return None
 
@@ -3495,11 +3507,16 @@ class RewriteEngine:
         declared_by_ref: dict[str, list[dict[str, object]]] = {}
         by_name: dict[str, dict[str, Any]] = {}
         controls: dict[str, int] = {}
+        defined: dict[str, Any] = {}
         for node in nodes:
             name, ref = str(node.get("id", "")), str(node.get("ref", ""))
             if ref not in declared_by_ref:
                 found = declared_ports(index, self.file_path, ref) if ref else None
                 declared_by_ref[ref] = found or []
+                defined[ref] = declared_as(index, self.file_path, ref) if ref else None
+            # A task's class, of whatever kind: the side of a port it leaves
+            # open is read from the port's name, which is what the notice says.
+            by_its_name = defined[ref] is not None and defined[ref][0] != "workflow"
             ports: list[dict[str, Any]] = []
             notices: list[dict[str, Any]] = []
             for declared in declared_by_ref[ref]:
@@ -3518,8 +3535,9 @@ class RewriteEngine:
                         declared_in = self.file_path
                     entry["location"] = {"file": declared_in, "line": declared["line"]}
                 ports.append(entry)
-                # Only a port of a `class Ports` has a direction as written.
-                if str(declared.get("declared", "in")) in ("in", "out"):
+                # Only a port of a `class Ports` has a direction as written,
+                # and one written by a name (`direction=OUT`) is not read.
+                if not by_its_name or str(declared.get("declared") or "in") in ("in", "out"):
                     continue
                 # The runtime warns of such a port when the class is defined
                 # (`types.extract_ports`). Nothing is run here, so the graph
@@ -3528,9 +3546,8 @@ class RewriteEngine:
                     "severity": "warning",
                     "code": "port_without_direction",
                     "message": port_without_direction_notice(
-                        str(declared.get("owner") or ref),
-                        str(declared["attr"]),
-                        str(declared["name"]),
+                        f"{declared.get('owner') or ref}.Ports.{declared['attr']}",
+                        port_side_by_name(str(declared["name"])),
                     ),
                 }
                 if "location" in entry:
@@ -3558,11 +3575,8 @@ class RewriteEngine:
         elsewhere: list[dict[str, Any]] = []
         faulty: dict[Path, dict[str, list[Any]]] = {}
         reported: set[tuple[Path, str]] = set()
-        defined: dict[str, Any] = {}
         for node in nodes:
             ref = str(node.get("ref", ""))
-            if ref and ref not in defined:
-                defined[ref] = declared_as(index, self.file_path, ref)
             found_as = defined.get(ref)
             # A nested workflow of a faulty file has its own graph to say so.
             if found_as is None or found_as[0] == "workflow":
@@ -5306,6 +5320,10 @@ class RewriteEngine:
         direction = _PORT_DIRECTIONS.get(str(portDirection), None)
         if direction is None:
             raise RewriteError(message=f"Invalid port direction: {portDirection}", diagnostic={"code": "invalid_direction"})
+        if direction == "inout":
+            # A port that states no side is deprecated. What is written is
+            # the side the runtime would take this one for, by its name.
+            direction = port_side_by_name(portName)
         cls = self._require_class(entityType)
         if portName in self._class_port_names(cls):
             raise RewriteError(

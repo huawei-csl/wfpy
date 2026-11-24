@@ -1761,7 +1761,12 @@ def _process_workflow_class(
     max_workers: int | None = None,
 ) -> type:
     """Process a class-based @workflow definition."""
-    ports = extract_ports(cls)
+    # With `inputs=` or `outputs=` the side of a port is what they say, and
+    # its name is not read: the warning of a port with no direction says so.
+    stated: dict[str, str] | None = None
+    if inputs or outputs:
+        stated = {**dict.fromkeys(inputs or {}, "in"), **dict.fromkeys(outputs or {}, "out")}
+    ports = extract_ports(cls, stated)
 
     # Derive inputs/outputs from Ports class if not explicitly provided
     in_names = inputs or {}

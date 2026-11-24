@@ -22,18 +22,33 @@ All notable changes to wfpy are documented here. The format follows
   declares one: a `metadata.diagnostics` entry of severity `warning` and code
   `port_without_direction`, with the runtime's text and the place of the
   declaration. The node is not `isErrored` and the graph is not `partial`.
-  The README's minimal example, which was written with two such ports, now
-  states them.
+  The graph says it for the classes of tasks; a workflow written as a class
+  is warned of by the runtime alone, and with `inputs=` or `outputs=` the
+  direction it is told to write is the one they give. The README's minimal
+  example, which was written with two such ports, now states them.
+
+### Changed
+- The sidecar op `createEntityPort` asked for the direction `inout` writes
+  the side the runtime would take the port for by its name
+  (`direction="out"` for `Summary`, `direction="in"` for `Extra`), and no
+  longer `direction="inout"`, which is now deprecated.
 
 ### Fixed
-- The sidecar took a port declared without a direction for an input, where
-  the runtime checks no direction on it. A connection out of one
+- The sidecar took a port declared without a direction for an input
+  whatever its name, where the runtime takes one named `out`, `output`,
+  `result`, `report` or `summary` for an output. A connection out of one
   (`connect(a.Out, b.In)` with `Out = Port[str]()`), which runs, was refused
   by `checkConnection` and by `connect` with `invalid_source_direction`, and
   its edge in the graph of `wfpy.exportWorkflowGraph` was flagged as an
-  error, which also made that graph `partial`. Such a port is now accepted
-  at either end of a connection, as at run time. A port that states `in` is
-  still refused as a source, and one that states `out` as a target.
+  error, which also made that graph `partial`. For a connection such a port
+  now has the side its name gives: the side the runtime takes it for, the
+  side the graph draws it on, and the direction the new warning says to
+  write. A port's own name counts (`Port[str]("Result")` is an output). A
+  port that is an input by its name is still refused as a source, and an
+  output as a target, as a port that states its direction is.
+- A direction written by a name (`direction=OUT`) was read by the sidecar
+  as no valid direction, and a connection out of such a port was refused.
+  The name is not followed, so no connection is refused for that port.
 
 ## [1.4.0] — 2026-11-24
 

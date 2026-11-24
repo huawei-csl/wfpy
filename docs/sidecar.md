@@ -132,9 +132,21 @@ declaration:
 ```
 
 A warning is no fault: the node is not `isErrored`, the graph is not
-`partial` and has no `errors` entry for it. A connection is not refused for
-such a port at either end, by `checkConnection`, by `connect`, or as an edge
-of the graph, since the runtime checks no direction on it.
+`partial` and has no `errors` entry for it. It is given for the classes of
+tasks (`@task`, `@agent`, `@tool`, ...), whose ports the runtime reads by
+name; a workflow written as a class gets it from the runtime alone.
+
+For a connection such a port has the side its name gives, which is the side
+it is drawn on and the direction the warning says to write. `checkConnection`,
+`connect` and the edges of the graph take `Out = Port[str]()` as a source and
+refuse it as a target; a port named otherwise is the reverse. The runtime
+itself checks no direction of a connection, so one that goes against the
+names can still run where an action names the port; it is refused here until
+the direction is stated.
+
+A direction written by a name (`direction=OUT`) is stated, and this reading
+does not follow the name: the port is drawn by its name, no warning is given
+for it, and no connection is refused for it.
 
 #### A file that does not parse
 
