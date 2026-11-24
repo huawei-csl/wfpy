@@ -6,6 +6,20 @@ All notable changes to wfpy are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.4.0] — 2026-11-24
+
+A workflow file has a diagram while it is broken. The sidecar's static graph
+has ports and the workflow's own inputs and outputs, a file with a syntax
+fault is drawn from a repaired copy of its text, and `wfpy plan --format graph
+--best-effort` draws a file it cannot import, with the error on the nodes it
+belongs to. Two of these change what a reader of the graphs meets, and both
+are under Changed: the static graph lists `wf-input` and `wf-output` nodes
+before the instances, and the `plan` command answers a file that does not
+import with exit code 0 and a `partial` document, where it ended on the
+traceback. The release also has the sidecar op `reorderEntityPorts`, the
+reasoning level of an agent over ACP, and the fixes made since 1.3.2 to the
+edits an IDE writes through the sidecar and to OpenCode 2.
+
 ### Added
 - The sidecar op `reorderEntityPorts` (`RewriteEngine.reorder_entity_ports`):
   a definition's ports in a given order, written into its source, for an
