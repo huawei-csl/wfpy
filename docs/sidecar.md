@@ -106,6 +106,57 @@ open (`Port[int]()`) is an output by the names `out`, `output`, `result`,
 `if_` node carries the `label` the runtime names it by (`loop`, `loop_1`,
 `if`); its `id` is the name the source binds it to, which the ops go by.
 
+#### A file that does not parse
+
+A file with a syntax fault is drawn too, from a repaired copy of its text:
+each statement Python refuses is replaced, the rest is the file's own, and
+every line keeps its number. The copy is for this op only. Nothing is run, the
+file is not written, and every other op still answers a file that does not
+parse with an error.
+
+- The graph has `"partial": true` and an `errors` entry of code `syntax_error`
+  for each fault, with the message, the line and the column Python gives for
+  it (`'(' was never closed`, at the bracket). Python itself names only the
+  first; the others are found as each one before is repaired.
+- A node or an edge written on a faulty line is still drawn where the start of
+  its statement can be read: `scale_a = Scale(scale=2` is the node `scale_a`
+  of `Scale` with no arguments, `a, b = A(), B(` is two nodes,
+  `connect(a.Out b.In)` is the edge, and `with stream` (its colon missing)
+  still holds the connections under it. Such a node has
+  `"metadata": {"isErrored": true, "errorMessage": "..."}` and such an edge the
+  same under `"meta"`. The fault is reported once, in `errors`.
+- A fault elsewhere (in a task's class, in a decorator, in the header of the
+  workflow) leaves the graph whole. A port whose declaration is lost is drawn
+  when a connection names it.
+- A nested workflow of another file that does not parse is drawn the same way,
+  and it is its own graph under `children` that is `partial` and carries the
+  errors, with that file's path.
+
+```json
+{
+  "workflow": "scaled_sum",
+  "file": "/abs/path/to/workflow.py",
+  "partial": true,
+  "errors": [
+    {
+      "severity": "error", "code": "syntax_error",
+      "message": "'(' was never closed",
+      "location": {"file": "/abs/path/to/workflow.py", "line": 63, "column": 20}
+    }
+  ],
+  "nodes": [
+    {
+      "id": "scale_a", "ref": "Scale", "kind": "task", "args": [], "kwargs": {},
+      "metadata": {"isErrored": true, "errorMessage": "'(' was never closed"}
+    }
+  ],
+  "edges": []
+}
+```
+
+When no copy can be made that parses, or the copy has no workflow left to
+draw, the graph has no nodes and no edges and carries the errors.
+
 Response shape includes:
 
 ```json

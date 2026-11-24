@@ -17,8 +17,10 @@ from typing import Any
 
 import libcst as cst
 
+from wfpy._drawable_source import mark_faults
 from wfpy._project_index import port_uses, type_parameters
 from wfpy._python_environment import python_environment
+from wfpy._source_repair import SourceFault
 from wfpy._workflow_instance import discover_workflow_instances
 from wfpy.package_exports import apply_package_export, find_package_export
 from wfpy.rewrite import (
@@ -26,7 +28,9 @@ from wfpy.rewrite import (
     RewriteError,
     _atomic_write_if_unchanged,
     _source_revision,
+    load_drawable_module,
     load_module,
+    unparsed_file_graph,
 )
 
 __all__ = ["run_sidecar"]
@@ -366,35 +370,32 @@ def _annotate_graph_diagnostics(
         graph["partial"] = True
 
 
-def _syntax_error_graph(file_path: str, exc: cst.ParserSyntaxError) -> dict[str, Any]:
-    """Build a partial-graph payload for an un-parseable file: empty nodes/edges plus a
-    file-level `syntax_error` diagnostic (contract v2). The IDE shows a file-level
-    overlay instead of collapsing to a bare `status: error`."""
-    line = getattr(exc, "editor_line", None) or getattr(exc, "raw_line", None)
-    column = getattr(exc, "editor_column", None)
-    if column is None:
-        raw_col = getattr(exc, "raw_column", None)
-        column = (raw_col + 1) if isinstance(raw_col, int) else None
-    location: dict[str, Any] = {"file": file_path}
-    if isinstance(line, int):
-        location["line"] = line
-    if isinstance(column, int):
-        location["column"] = column
-    return {
-        "workflow": "",
-        "nodes": [],
-        "edges": [],
-        "file": file_path,
-        "partial": True,
-        "errors": [
-            {
-                "severity": "error",
-                "code": "syntax_error",
-                "message": str(exc),
-                "location": location,
-            }
-        ],
-    }
+def _unparsed_graph(
+    file_path: str, args: dict[str, Any], exc: cst.ParserSyntaxError
+) -> dict[str, Any]:
+    """The graph of a file that does not parse (partial-graph contract v2).
+
+    It is drawn from a repaired copy of the text: the statements Python
+    refuses are replaced, the rest is the file's, and every line keeps its
+    number. The graph is `partial`, each fault is a file-level `syntax_error`
+    at the line Python names, and a node or an edge written on a faulty line
+    is flagged. The copy is for drawing: nothing is run and the file is not
+    written.
+
+    When no such copy can be made, or it has no workflow left to draw, the
+    graph is empty and carries the errors, so the IDE shows an overlay and
+    not a bare `status: error`."""
+    faults: tuple[SourceFault, ...] = ()
+    workflow = args.get("workflow")
+    try:
+        module, source_text, faults = load_drawable_module(file_path)
+        graph = _export_graph(RewriteEngine(file_path, module, source_text), args)
+    except (cst.ParserSyntaxError, RewriteError, OSError):
+        return unparsed_file_graph(
+            file_path, str(workflow) if workflow else "", faults=faults, refused=exc
+        )
+    mark_faults(graph, faults, file_path)
+    return graph
 
 
 def _check_connection(engine: RewriteEngine, args: dict[str, Any]) -> SidecarResponse:
@@ -666,16 +667,19 @@ def _handle_request(payload: dict[str, Any]) -> SidecarResponse:
         )
     except cst.ParserSyntaxError as exc:
         # Partial-graph contract v2: an un-parseable file must NOT collapse the diagram for
-        # the export op — return `status: ok` with an empty, partial graph carrying a
-        # file-level `syntax_error` so the IDE shows an overlay. All OTHER ops keep their
-        # original error behavior (fall through to the generic internal_error envelope).
+        # the export op — return `status: ok` with a partial graph drawn from a repaired
+        # copy of the text, carrying a file-level `syntax_error` for each fault. All OTHER
+        # ops keep their original error behavior (fall through to the generic
+        # internal_error envelope): none of them edits a file that does not parse.
         if op == "exportWorkflowGraph":
             return SidecarResponse(
                 status="ok",
                 file=file_path,
                 revision=_current_revision(file_path),
                 message="ok",
-                diagnostic={"graph": _syntax_error_graph(file_path, exc)},
+                diagnostic={
+                    "graph": _unparsed_graph(file_path, payload.get("args", {}) or {}, exc)
+                },
             )
         return SidecarResponse(
             status="error",

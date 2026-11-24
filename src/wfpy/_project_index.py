@@ -27,6 +27,7 @@ import os
 from pathlib import Path
 from typing import Iterator
 
+from wfpy._source_repair import repair_source
 from wfpy._source_text import signature_parameters
 
 # Folders that hold no project source: environments, caches, build output.
@@ -137,6 +138,10 @@ class ProjectIndex:
         self._trees: dict[Path, ast.Module | None] = {}
         self._texts: dict[Path, str | None] = {}
         self.errors: dict[Path, str] = {}
+        # For a reader that only draws: a file that does not parse is read
+        # from a repaired copy of its text (`_source_repair`). An op that
+        # edits leaves this off, so it never acts on what a repair left out.
+        self.repair_unparsed = False
 
     @classmethod
     def for_file(cls, file_path: str | Path) -> "ProjectIndex":
@@ -181,8 +186,23 @@ class ProjectIndex:
                     tree = ast.parse(text, filename=str(path))
                 except SyntaxError as exc:
                     self.errors[path] = f"{type(exc).__name__}: {exc}"
+                    if self.repair_unparsed:
+                        tree = self._repaired_tree(path, text)
             self._trees[path] = tree
         return self._trees[path]
+
+    def _repaired_tree(self, path: Path, text: str) -> ast.Module | None:
+        """The tree of a repaired copy of ``text``, which is then the text
+        the places of that tree are read in. None when it cannot be made."""
+        repaired = repair_source(text)
+        if not repaired.parsed:
+            return None
+        try:
+            tree = ast.parse(repaired.text, filename=str(path))
+        except (SyntaxError, ValueError):
+            return None
+        self._texts[path] = repaired.text
+        return tree
 
     def module_name(self, path: Path) -> str | None:
         """The dotted name ``path`` is imported by from the project root."""

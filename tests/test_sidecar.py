@@ -536,7 +536,9 @@ def test_sidecar_export_graph_syntax_error_is_partial_not_catastrophic(tmp_path:
     assert err["code"] == "syntax_error"
     assert err["severity"] == "error"
     assert err["location"]["file"] == str(src)
-    assert err["location"]["line"] == 2
+    # The line of the fault, which is the one Python names. It was 2: the
+    # line libcst stops at, one past the header that is at fault.
+    assert err["location"]["line"] == 1
 
 
 def test_sidecar_export_graph_reports_partial_graph_feature() -> None:

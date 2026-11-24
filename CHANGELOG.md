@@ -50,8 +50,36 @@ All notable changes to wfpy are documented here. The format follows
   Reader()`) is a node of the static graph. It was not seen: the graph of
   such a workflow had no nodes, and `connect` and `checkConnection`
   answered `unknown node` for a name the workflow binds.
+- A file with a syntax fault has a static graph. Neither `ast` nor libcst
+  gives a tree for a file with one bracket left open, so
+  `wfpy.exportWorkflowGraph` answered with no nodes and no edges, and the
+  diagram of a file under edit went blank at each keystroke that left it
+  unparsable. The export now draws from a repaired copy of the text
+  (`wfpy._source_repair`): each statement Python refuses is replaced, the
+  rest is the file's own, and every line keeps its number. The graph is
+  `partial`, and `errors` has a `syntax_error` for each fault with the
+  message, the line and the column Python gives. A node or an edge written
+  on a faulty line is still drawn where the start of its statement can be
+  read (`scale_a = Scale(scale=2` is the node `scale_a` of `Scale`,
+  `connect(a.Out b.In)` is the edge) and is flagged with `isErrored` and
+  `errorMessage`, a node under `metadata` and an edge under `meta`. The
+  copy is for drawing: nothing is run, the file is not written, and every
+  other op still refuses a file that does not parse. What is not done: a
+  fault is not yet placed on the nodes of the class it is in, and a string
+  left open in a file that holds a workflow as text can let lines of that
+  text be read as code.
 
 ### Fixed
+- The `syntax_error` of a static graph is at the line of the fault. It was
+  at the line libcst stops at, which is one or two lines further on (line
+  65 for a bracket left open on line 63), and its message was libcst's list
+  of the tokens it expected. It is now the line, the column and the message
+  of `python file.py`.
+- A syntax fault in the file of a nested workflow no longer takes the
+  diagram of the workflow that uses it. The parent's graph came back empty,
+  with the fault reported at a line of the parent file. The parent is now
+  drawn whole, and the nested graph under `children` is the one that is
+  `partial` and carries the error, with its own file's path.
 - An IDE that writes `@agent`'s `mcpServers` back no longer loses what the
   file configures. The graph export gives the servers configured on an
   agent (`mcpServerConfigs`) as values, and their env by name only
