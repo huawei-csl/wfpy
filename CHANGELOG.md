@@ -17,6 +17,40 @@ All notable changes to wfpy are documented here. The format follows
   (`claude-agent-acp` 0.108.0: default, low, medium, high, xhigh, max), so a
   level on a Claude Code agent, which was ignored, is now applied.
 
+### Changed
+- The static graph of a file (`wfpy.exportWorkflowGraph`, which reads the
+  file and runs nothing) is one a reader can draw. It gave the nodes of a
+  workflow and the edges between them, but no port for an edge to end on:
+  an IDE that falls back on it when the file does not import (a misspelt
+  name, a failing import) drew the nodes and nothing else. Three things
+  are added, and the keys it had are as they were:
+  - Each node has `ports` (`id`, `name`, `direction` of `in` or `out`,
+    `type`, `role`, and the `location` it is declared at). They are read
+    from the `class Ports:` of its class, followed through the project's
+    imports and to a base class, from the `inputs` and `outputs` of a
+    nested workflow (of the one a factory builds for `flow = make()()`),
+    and from wfpy for `loop` and `if_`. A direction the source leaves open
+    is settled by name, as the runtime settles it. A port a connection
+    names that the class does not declare is there too, so its edge has an
+    end. The `id` of a port is the `portId` the edges already carry.
+  - The workflow's own inputs and outputs are nodes, as in the graph
+    `wfpy plan --format graph` gives: `wf:input:<name>` of kind `wf-input`
+    and `wf:output:<name>` of kind `wf-output`, one port each, every
+    declared one and any a connection only names. They are listed first,
+    inputs by name then outputs by name, as that graph lists them. A reader
+    that took every entry of `nodes` for an instance now meets these.
+  - A `loop` or `if_` node has the `label` the runtime names it by (`loop`,
+    `loop_1`, `if`); its `id` stays the name the source binds it to.
+  On every tutorial and advanced example the static graph is now the graph
+  the runtime builds: the same nodes, the same ports with their direction
+  and type, the same edges. What is not done: a node a workflow makes in a
+  Python loop or a comprehension is still not seen, and a port is not
+  judged, so one a class does not declare is drawn and not flagged.
+- A node written in a tuple assignment (`author, reader = Author(),
+  Reader()`) is a node of the static graph. It was not seen: the graph of
+  such a workflow had no nodes, and `connect` and `checkConnection`
+  answered `unknown node` for a name the workflow binds.
+
 ### Fixed
 - An IDE that writes `@agent`'s `mcpServers` back no longer loses what the
   file configures. The graph export gives the servers configured on an

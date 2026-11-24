@@ -153,8 +153,9 @@ def demo():
     graph = engine.export_workflow_graph(workflow="demo")
 
     assert graph["workflow"] == "demo"
-    assert [node["id"] for node in graph["nodes"]] == ["a", "b"]
-    assert graph["nodes"][1]["kwargs"] == {"tries": "7"}
+    # The workflow's own ports its connections name, then the helper's nodes.
+    assert [node["id"] for node in graph["nodes"]] == ["wf:input:In", "wf:output:Out", "a", "b"]
+    assert graph["nodes"][3]["kwargs"] == {"tries": "7"}
     assert len(graph["edges"]) == 3
     assert engine.list_instance_names(workflow="demo") == ["a", "b"]
 
