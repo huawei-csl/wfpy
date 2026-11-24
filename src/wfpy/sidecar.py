@@ -119,6 +119,7 @@ _MUTATION_OPS = {
     "updateDefinitionParameter": "update_definition_parameter",
     "createEntityPort": "create_entity_port",
     "deleteEntityPort": "delete_entity_port",
+    "reorderEntityPorts": "reorder_entity_ports",
     "renameNode": "rename_node",
     "renamePort": "rename_port",
     "updatePortType": "update_port_type",
