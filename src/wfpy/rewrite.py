@@ -14,6 +14,8 @@ from typing import TYPE_CHECKING, Any, Iterable, Iterator, NoReturn, Sequence
 import libcst as cst
 import libcst.matchers as m
 
+from wfpy._drawable_source import drawable_source, fault_errors, mark_faults, syntax_fault
+from wfpy._source_repair import SourceFault
 from wfpy.workflow_identity import (
     detect_dynamic_workflow_identity_issues,
     format_dynamic_workflow_identity_error,
@@ -25,7 +27,9 @@ if TYPE_CHECKING:
 __all__ = [
     "RewriteError",
     "RewriteEngine",
+    "load_drawable_module",
     "load_module",
+    "unparsed_file_graph",
 ]
 
 
@@ -1113,6 +1117,78 @@ def _staged_copy(file_path: str, text: str) -> str:
 
 def load_module(file_path: str) -> tuple[cst.Module, str, str]:
     raw_source = open(file_path, "r", encoding="utf-8").read()
+    return parse_source(file_path, raw_source)
+
+
+def load_drawable_module(file_path: str) -> tuple[cst.Module, str, tuple[SourceFault, ...]]:
+    """`load_module` for a reader that only draws the file.
+
+    A file that does not parse is read from a repaired copy of its text
+    (`_drawable_source`), and comes with the faults that were repaired: none
+    for a file that parses. The copy is never written, so an op that edits the
+    file goes on asking `load_module`, which refuses it. Raises the parser's
+    error when the copy cannot be made.
+    """
+    raw_source = open(file_path, "r", encoding="utf-8").read()
+    try:
+        module, source_text, _revision = parse_source(file_path, raw_source)
+    except cst.ParserSyntaxError:
+        drawable = drawable_source(raw_source)
+        if drawable is None:
+            raise
+        module, source_text, _revision = parse_source(file_path, drawable.text)
+        return module, source_text, drawable.faults
+    return module, source_text, ()
+
+
+def unparsed_file_graph(
+    file_path: str,
+    workflow: str = "",
+    faults: tuple[SourceFault, ...] = (),
+    refused: cst.ParserSyntaxError | None = None,
+) -> dict[str, Any]:
+    """The graph of a file nothing can be drawn of: no node, no edge, and why.
+
+    The errors are the `faults` when a repair found them, else the place
+    Python stops at in the file, else the one `refused` names (a text Python
+    takes and libcst does not).
+    """
+    errors = fault_errors(faults, file_path)
+    if not errors:
+        location: dict[str, Any] = {"file": file_path}
+        message = "the file does not parse"
+        try:
+            stopped = syntax_fault(open(file_path, "r", encoding="utf-8").read())
+        except (OSError, UnicodeDecodeError):
+            stopped = None
+        if stopped is not None:
+            location["line"] = stopped[0]
+            if stopped[1] is not None:
+                location["column"] = stopped[1]
+            message = stopped[2]
+        elif refused is not None:
+            message = str(refused)
+            line = getattr(refused, "editor_line", None) or getattr(refused, "raw_line", None)
+            column = getattr(refused, "editor_column", None)
+            if isinstance(line, int):
+                location["line"] = line
+            if isinstance(column, int):
+                location["column"] = column
+        errors = [
+            {"severity": "error", "code": "syntax_error", "message": message, "location": location}
+        ]
+    return {
+        "workflow": workflow,
+        "nodes": [],
+        "edges": [],
+        "file": file_path,
+        "partial": True,
+        "errors": errors,
+    }
+
+
+def parse_source(file_path: str, raw_source: str) -> tuple[cst.Module, str, str]:
+    """The module, its text and its revision for `raw_source`, the text of `file_path`."""
     issues = detect_dynamic_workflow_identity_issues(raw_source)
     if issues:
         raise RewriteError(
@@ -1589,7 +1665,12 @@ class RewriteEngine:
 
         module_files = self._resolve_nested_workflow_candidates(workflow_type)
         for module_file in module_files:
-            nested_module, nested_source, _nested_rev = load_module(module_file)
+            # Drawn, not edited: a nested file with a syntax fault is read
+            # from its repaired text, and its graph says what was repaired.
+            try:
+                nested_module, nested_source, faults = load_drawable_module(module_file)
+            except cst.ParserSyntaxError as refused:
+                return unparsed_file_graph(module_file, workflow_type, refused=refused)
             nested_engine = RewriteEngine(module_file, nested_module, nested_source)
             if workflow_type in visited:
                 return {
@@ -1603,13 +1684,15 @@ class RewriteEngine:
             next_visited = set(visited)
             next_visited.add(workflow_type)
             try:
-                return nested_engine.export_workflow_graph(
+                nested_graph = nested_engine.export_workflow_graph(
                     workflow=workflow_type,
                     include_nested=True,
                     _visited_workflows=next_visited,
                 )
             except RewriteError:
                 continue
+            mark_faults(nested_graph, faults, module_file)
+            return nested_graph
 
         raise RewriteError(
             message=f"Nested workflow '{workflow_type}' is not imported in this module",
@@ -3375,6 +3458,8 @@ class RewriteEngine:
             index: ProjectIndex = cached[1]
         else:
             index = ProjectIndex.for_file(self.file_path)
+            # A class in a file with a syntax fault still has its ports.
+            index.repair_unparsed = True
             # This file is read as the engine holds it, which a caller may
             # have given and not loaded from disk.
             index.use_text(self.file_path, self.module.code)

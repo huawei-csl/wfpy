@@ -52,6 +52,10 @@ src/wfpy/
 ├── sidecar_cli.py Sidecar CLI entry-point (wfpy-sidecar-op)
 ├── partial.py     AST partial-graph builder (used by `wfpy plan --format
 │                  graph --best-effort` fallback)
+├── _source_repair.py    Text of a file with syntax faults made to parse again,
+│                        line for line (drawing only: never run, never written)
+├── _drawable_source.py  The repaired text with its nodes and connections kept;
+│                        marks the faults on the sidecar's static graph
 ├── workflow_identity.py  Workflow identity helpers
 ├── _agent_*_runtime.py   Agent subsystem modules (cli, io, prompt, request,
 │                         tools, validation) — split out of runner.py
