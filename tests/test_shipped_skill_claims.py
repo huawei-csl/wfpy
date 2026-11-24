@@ -206,16 +206,28 @@ class TestWhatAnActionReturns:
 
 class TestPorts:
     def test_a_port_with_no_direction_is_classified_by_its_name(self):
-        @task
-        class Guess:
-            class Ports:
-                Kernel = Port[str]()
-                Report = Port[str]()
-                Verdict = Port[str]()
+        with pytest.warns(FutureWarning) as warned:
+
+            @task
+            class Guess:
+                class Ports:
+                    Kernel = Port[str]()
+                    Report = Port[str]()
+                    Verdict = Port[str]()
 
         meta = Guess._wfpy_meta
         assert set(meta.input_ports) == {"Kernel", "Verdict"}
         assert set(meta.output_ports) == {"Report"}
+        # Deprecated: warned of at the line that declares it, one port a line.
+        said = [str(w.message) for w in warned]
+        assert [text.split(":")[0] for text in said] == [
+            "Guess.Ports.Kernel",
+            "Guess.Ports.Report",
+            "Guess.Ports.Verdict",
+        ]
+        assert all("wfpy 2.0 will refuse it" in text for text in said)
+        assert {w.filename for w in warned} == {__file__}
+        assert [w.lineno for w in warned] == sorted(w.lineno for w in warned)
 
     def test_a_returned_path_keeps_its_suffix_and_ext_names_one_that_has_none(self, tmp_path):
         made = tmp_path / "made"

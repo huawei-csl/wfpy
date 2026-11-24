@@ -839,6 +839,8 @@ def _class_ports(
         entry = _port_entry(text, definition.file, stmt)
         if entry is None:
             continue
+        # The class whose `Ports` writes it, which a subclass's node shares.
+        entry["owner"] = node.name
         ports = [port for port in ports if port["attr"] != entry["attr"]]
         ports.append(entry)
     return ports
@@ -863,6 +865,7 @@ def _port_entry(text: str, file: Path, stmt: ast.stmt) -> dict[str, object] | No
         return None
     name = target.id
     direction = "inout"
+    unread = False
     if call is not None:
         first = call.args[0] if call.args else None
         if isinstance(first, ast.Constant) and isinstance(first.value, str):
@@ -870,14 +873,17 @@ def _port_entry(text: str, file: Path, stmt: ast.stmt) -> dict[str, object] | No
         for keyword in call.keywords:
             given = keyword.value
             if not isinstance(given, ast.Constant) or not isinstance(given.value, str):
+                # `direction=OUT`: stated, by a name this reading does not follow.
+                unread = unread or keyword.arg == "direction"
                 continue
             if keyword.arg == "name":
                 name = given.value
             elif keyword.arg == "direction":
                 direction = given.value
     # `declared` is the direction as it is written (`inout` when it is not),
-    # which the runtime's graph gives; `direction` is the side it is drawn on.
-    declared = direction
+    # which the runtime's graph gives, and empty when it is written in a way
+    # that is not read here; `direction` is the side it is drawn on.
+    declared = "" if unread else direction
     if direction not in ("in", "out"):
         direction = "out" if name.lower() in _OUTPUT_PORT_NAMES else "in"
     return {

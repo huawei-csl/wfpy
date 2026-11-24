@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import dataclasses
 import os
+import sys
+import warnings
 from urllib.parse import urlparse
-from typing import Any, TypeVar
+from typing import Any, Mapping, TypeVar
 
 __all__ = [
     "Port",
@@ -229,6 +231,11 @@ class PortDescriptor:
     attr_name: str = ""
     source_file: str | None = None
     source_line: int | None = None
+    # A port with no stated direction is warned of once, however many classes
+    # share its declaration and however often their ports are read.
+    _direction_warned: bool = dataclasses.field(
+        default=False, init=False, repr=False, compare=False
+    )
 
     def __set_name__(self, owner: type, name: str) -> None:
         self.attr_name = name
@@ -285,17 +292,32 @@ class PortInstance:
         return other if isinstance(other, PortInstance) else self
 
 
-def extract_ports(cls: type) -> dict[str, PortDescriptor]:
+def extract_ports(
+    cls: type, taken_for: Mapping[str, str] | None = None
+) -> dict[str, PortDescriptor]:
     """Extract port descriptors from a class's inner ``Ports`` class.
 
     Also handles bare ``PortFactory`` instances (``Port[int]`` without call parens)
     by converting them to ``PortDescriptor`` via ``_as_descriptor()``.
+
+    A port declared without ``direction="in"`` or ``direction="out"`` is
+    warned of. ``taken_for`` is given by a caller that does not read the side
+    of such a port from its name (a workflow class with ``inputs=`` or
+    ``outputs=``): the side, ``in`` or ``out``, of each port it has one for.
     """
     ports_cls = getattr(cls, "Ports", None)
     if ports_cls is None:
         return {}
 
     result: dict[str, PortDescriptor] = {}
+    # The `Ports` class that writes each name, read before a bare `Port[T]` is
+    # replaced below: a `class Ports(Base.Ports)` holds the ports of its base.
+    # `Ports` need not be a class (a namespace of ports is read too).
+    written_in: dict[str, type] = {
+        name: klass
+        for klass in reversed(getattr(ports_cls, "__mro__", ()))
+        for name in vars(klass)
+    }
     source_map: dict[str, tuple[str, int]] = {}
     try:
         import inspect
@@ -341,4 +363,133 @@ def extract_ports(cls: type) -> dict[str, PortDescriptor]:
                 desc.source_file, desc.source_line = source_map[attr_name]
             result[attr_name] = desc
             setattr(ports_cls, attr_name, desc)  # replace factory with descriptor
+    for attr_name, desc in result.items():
+        if desc.direction in ("in", "out") or desc._direction_warned:
+            continue
+        name = desc.name or attr_name
+        _warn_port_without_direction(
+            cls,
+            written_in.get(attr_name, ports_cls),
+            attr_name,
+            desc,
+            port_side_by_name(name) if taken_for is None else taken_for.get(name),
+            "by its name" if taken_for is None else "by the workflow's inputs= and outputs=",
+        )
+        desc._direction_warned = True
     return result
+
+
+# A port of no stated direction is an output by these names and an input by
+# any other (`core._infer_direction`).
+_OUTPUT_PORT_NAMES = ("out", "output", "result", "report", "summary")
+
+
+def port_side_by_name(name: str) -> str:
+    """``out`` or ``in``: the side wfpy takes a port named ``name`` for when
+    its declaration states neither."""
+    return "out" if name.lower() in _OUTPUT_PORT_NAMES else "in"
+
+
+def port_without_direction_notice(
+    where: str, side: str | None, by: str = "by its name"
+) -> str:
+    """What wfpy says of a port declared without ``direction="in"`` or
+    ``direction="out"``. ``where`` names the declaration (``Up.Ports.Out``),
+    ``side`` is what wfpy takes the port for, ``in`` or ``out``, and ``by``
+    how it comes to that; with no side, no direction is advised. The
+    runtime's warning and the sidecar's are this one text."""
+    text = (
+        f'{where}: a port declared without direction="in" or direction="out" '
+        "is deprecated, and wfpy 2.0 will refuse it."
+    )
+    if side in ("in", "out"):
+        taken = "an output" if side == "out" else "an input"
+        text += f' wfpy takes this one for {taken}, {by}: write direction="{side}" to keep that.'
+    return text
+
+
+def _port_line(holder: object, attr_name: str) -> tuple[str, int] | None:
+    """The file and line at which the class ``holder`` assigns ``attr_name``
+    in its own body, read from its source. ``None`` when that cannot be read."""
+    try:
+        import ast
+        import inspect
+        import textwrap
+
+        file = inspect.getsourcefile(holder)  # type: ignore[arg-type]
+        lines, start = inspect.getsourcelines(holder)  # type: ignore[arg-type]
+        tree = ast.parse(textwrap.dedent("".join(lines)))
+    except Exception:
+        return None
+    if not file or not tree.body or not isinstance(tree.body[0], ast.ClassDef):
+        return None
+    for stmt in tree.body[0].body:
+        if isinstance(stmt, ast.Assign):
+            targets = stmt.targets
+        elif isinstance(stmt, ast.AnnAssign):
+            targets = [stmt.target]
+        else:
+            continue
+        if any(isinstance(t, ast.Name) and t.id == attr_name for t in targets):
+            return file, start + stmt.lineno - 1
+    return None
+
+
+_WFPY_DIR = os.path.dirname(os.path.abspath(__file__)) + os.sep
+
+
+def _warn_port_without_direction(
+    cls: type,
+    holder: object,
+    attr_name: str,
+    desc: PortDescriptor,
+    side: str | None,
+    by: str,
+) -> None:
+    """Warn of a port whose direction is not stated, at the line that
+    declares it. ``holder`` is what writes the port: the ``Ports`` of ``cls``,
+    the one that extends, or whatever else ``cls.Ports`` is.
+
+    A ``FutureWarning`` and not a ``DeprecationWarning``: Python shows the
+    second only for code run as ``__main__``, and a workflow file is loaded by
+    ``wfpy run``, so its author would not see it."""
+    qualname = str(getattr(holder, "__qualname__", ""))
+    if qualname.endswith(".Ports"):
+        # `Up.Ports` is `Up`, and `f.<locals>.Up.Ports` too.
+        where = f"{qualname.split('.')[-2]}.Ports.{attr_name}"
+    elif isinstance(holder, type):
+        # A class given as `Ports = Shared`: the port is `Shared.A`.
+        where = f"{holder.__name__}.{attr_name}"
+    else:
+        where = f"{cls.__name__}.Ports.{attr_name}"
+    message = port_without_direction_notice(where, side, by)
+
+    at = _port_line(holder, attr_name)
+    if at is None and desc.source_file and desc.source_line:
+        at = (desc.source_file, desc.source_line)
+    module_name = str(getattr(holder, "__module__", None) or cls.__module__)
+    if at is None:
+        # No source to read (a class written in a string that is executed):
+        # the place the class is being defined at, outside wfpy.
+        frame = sys._getframe(1)
+        while frame is not None and os.path.abspath(frame.f_code.co_filename).startswith(
+            _WFPY_DIR
+        ):
+            frame = frame.f_back  # type: ignore[assignment]
+        at = (frame.f_code.co_filename, frame.f_lineno) if frame is not None else ("<unknown>", 1)
+        module_name = cls.__module__
+    # The registry of the module the line is in, where a warning raised on
+    # that line would be counted. A file that is run and not imported has none.
+    module_globals = getattr(sys.modules.get(module_name), "__dict__", None)
+    warnings.warn_explicit(
+        message,
+        FutureWarning,
+        at[0],
+        at[1],
+        module=module_name,
+        registry=(
+            module_globals.setdefault("__warningregistry__", {})
+            if isinstance(module_globals, dict)
+            else None
+        ),
+    )

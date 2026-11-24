@@ -6,6 +6,50 @@ All notable changes to wfpy are documented here. The format follows
 
 ## [Unreleased]
 
+### Deprecated
+- A port declared without `direction="in"` or `direction="out"`:
+  `Port[T]()`, the bare `Port[T]`, `direction="inout"`, and any other value.
+  Nothing in the runtime treats such a port as two-way. Its side is read from
+  its name (`out`, `output`, `result`, `report` and `summary` are outputs,
+  every other name is an input), so `Verdict = Port[str]()` is an input with
+  nothing to say so. wfpy now warns where such a port is declared, with the
+  class, the port and the direction to write to keep what the workflow does:
+  a `FutureWarning`, since Python hides a `DeprecationWarning` of a file that
+  `wfpy run` loads. Every workflow that ran still runs and gives what it
+  gave; only a run that turns warnings into errors (`python -W error`) now
+  stops at such a port. wfpy 2.0 will refuse it. The sidecar's graph
+  (`wfpy.exportWorkflowGraph`) says the same on each node of a class that
+  declares one: a `metadata.diagnostics` entry of severity `warning` and code
+  `port_without_direction`, with the runtime's text and the place of the
+  declaration. The node is not `isErrored` and the graph is not `partial`.
+  The graph says it for the classes of tasks; a workflow written as a class
+  is warned of by the runtime alone, and with `inputs=` or `outputs=` the
+  direction it is told to write is the one they give. The README's minimal
+  example, which was written with two such ports, now states them.
+
+### Changed
+- The sidecar op `createEntityPort` asked for the direction `inout` writes
+  the side the runtime would take the port for by its name
+  (`direction="out"` for `Summary`, `direction="in"` for `Extra`), and no
+  longer `direction="inout"`, which is now deprecated.
+
+### Fixed
+- The sidecar took a port declared without a direction for an input
+  whatever its name, where the runtime takes one named `out`, `output`,
+  `result`, `report` or `summary` for an output. A connection out of one
+  (`connect(a.Out, b.In)` with `Out = Port[str]()`), which runs, was refused
+  by `checkConnection` and by `connect` with `invalid_source_direction`, and
+  its edge in the graph of `wfpy.exportWorkflowGraph` was flagged as an
+  error, which also made that graph `partial`. For a connection such a port
+  now has the side its name gives: the side the runtime takes it for, the
+  side the graph draws it on, and the direction the new warning says to
+  write. A port's own name counts (`Port[str]("Result")` is an output). A
+  port that is an input by its name is still refused as a source, and an
+  output as a target, as a port that states its direction is.
+- A direction written by a name (`direction=OUT`) was read by the sidecar
+  as no valid direction, and a connection out of such a port was refused.
+  The name is not followed, so no connection is refused for that port.
+
 ## [1.4.0] — 2026-11-24
 
 A workflow file has a diagram while it is broken. The sidecar's static graph
