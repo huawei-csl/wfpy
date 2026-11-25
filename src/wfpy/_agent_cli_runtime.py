@@ -1384,7 +1384,11 @@ def _codex_untrusted_directory_hint(stderr_text: str) -> str:
     wfpy's way to pass it, and the other way out.
     """
 
-    if "--skip-git-repo-check" not in stderr_text:
+    # The refusal's own sentence, not the option's name alone: Codex names
+    # the option in other errors too ("unexpected argument
+    # '--skip-git-repo-check' found", when it is passed where Codex does not
+    # take it), and the hint would then advise what was just done.
+    if "--skip-git-repo-check was not specified" not in stderr_text:
         return ""
     return (
         " Codex runs only in a git repository or a directory it trusts, and wfpy "

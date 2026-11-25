@@ -93,6 +93,10 @@ def test_the_command_line_the_hint_gives_is_one_the_cli_takes():
 
 @pytest.mark.parametrize("stderr", [
     "error: unexpected argument '--nope' found",
+    # Codex 0.172.0 takes the option under `exec` only: passed to `codex`
+    # itself it is refused, by its name. That is not the refusal to advise on.
+    "error: unexpected argument '--skip-git-repo-check' found\n\n"
+    "  tip: to pass '--skip-git-repo-check' as a value, use '-- --skip-git-repo-check'",
     "stream disconnected before completion",
     "",
 ])
