@@ -353,9 +353,9 @@ class TestThePrompt:
     def test_the_prompt_is_one_text_block(self):
         client = ACPClient()
         client.connection = self.Connection()
-        client.client = types.SimpleNamespace(response_text="")
+        client.client = types.SimpleNamespace(response_text="", refused=[])
         result = asyncio.run(client.send_prompt("s", "What is 2+2?"))
-        assert result == {"stop_reason": "end_turn", "text": ""}
+        assert result == {"stop_reason": "end_turn", "text": "", "refused": []}
         [(session_id, blocks)] = client.connection.prompts
         assert session_id == "s"
         # What the protocol puts on the wire for it.

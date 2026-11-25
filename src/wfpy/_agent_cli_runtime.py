@@ -1038,6 +1038,22 @@ def _acp_stuck_policy(options: dict[str, Any], connector: Any) -> tuple[int, int
     return max(1, round((timeout_ms or 0) / 1000)), int(retries or DEFAULT_STUCK_RETRIES)
 
 
+def _acp_cancelled_turn_message(agent_argv: list[str], refused: list[str]) -> str:
+    """The error of a firing whose ACP turn ended `cancelled`: which agent,
+    and the permission request it ended on when there was one."""
+    head = (
+        f"ACP agent '{shlex.join(agent_argv)}' ended its turn without an answer "
+        "(stop reason 'cancelled')"
+    )
+    if not refused:
+        return head + "."
+    return (
+        f"{head} after its permission request was refused: {refused[-1]}. "
+        "This agent stops at a refusal instead of going on without the tool call, "
+        "so the firing has no output."
+    )
+
+
 def _invoke_agent_opencode_acp(
     spec: AgentSpec,
     payload_text: str,
@@ -1211,6 +1227,22 @@ def _invoke_agent_opencode_acp(
             if session is not None:
                 end_event["session"] = session
             on_event(end_event)
+        if response.get("stop_reason") == "cancelled":
+            # The agent ended the turn before answering. wfpy cancels a turn
+            # only when it gives it up as stuck, and that raises: a cancelled
+            # turn that comes back is the agent's own doing (Codex ends its
+            # turn so when a permission request is refused). What it wrote
+            # until then is no answer, and no other transport is tried: the
+            # refusal would not hold there.
+            refused = [str(title) for title in response.get("refused") or []]
+            debug_meta["acpStopReason"] = "cancelled"
+            debug_meta["acpRefusedPermissions"] = refused
+            debug_meta["opencodeSessionID"] = response.get("session_id", "")
+            message = _acp_cancelled_turn_message(agent_argv, refused)
+            debug_meta["acpError"] = message
+            logger.warning(message)
+            firing_messages = [{"role": "user", "content": payload_text}]
+            return "", firing_messages, RuntimeError(message), debug_meta
         debug_meta["acpSuccess"] = True
         debug_meta["acpApplied"] = response.get("applied")
         debug_meta["acpStopReason"] = response.get("stop_reason")

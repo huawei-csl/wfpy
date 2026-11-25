@@ -94,6 +94,14 @@ class SimpleClient:
         # The tool's own name of each call that gave one, by call id: a later
         # update of the call need not repeat it, and is still named by it.
         self._tool_names: dict[str, str] = {}
+        # The titles of the permission requests refused during the turn. An
+        # agent may end its turn at a refusal (Codex does, as `cancelled`):
+        # the caller then says which request the turn ended on.
+        self.refused: list[str] = []
+        # True while `session/load` is answered. The agent replays the
+        # session's history as updates then: an earlier firing's text and
+        # tool calls, which are not this firing's to show.
+        self.replaying = False
 
     def _tool_call(self, update: Any) -> dict[str, Any]:
         """The observer's fields of a tool call or of an update of one."""
@@ -178,6 +186,9 @@ class SimpleClient:
                 self.permission_pending -= 1
         else:
             chosen = allow_once(title, offered)
+        kind = next((o["kind"] for o in offered if o["id"] == chosen), "")
+        if chosen is None or kind.startswith("reject"):
+            self.refused.append(title)
         self._emit({"type": "agent.permission.answered", "title": title, "option": chosen})
         await self.events.put({"session_id": session_id, "update": None,
                                "kwargs": {"permission": title, "option": chosen}})
@@ -551,8 +562,9 @@ class ACPClient:
         if not self.connection:
             raise RuntimeError("Client not started. Call start() first.")
         
-        # Reset accumulated text before sending new prompt
+        # A turn starts from nothing: no text, no refused request
         self.client.response_text = ""
+        self.client.refused = []
             
         logger.info(f"Sending prompt to session {session_id}: {prompt[:100]}...")
         
@@ -567,10 +579,12 @@ class ACPClient:
         
         logger.info(f"Prompt completed with stop reason: {response.stopReason}")
         
-        # Return both the stop reason and the accumulated text
+        # Return the stop reason, the accumulated text, and the permission
+        # requests refused on the way
         return {
             "stop_reason": response.stopReason,
-            "text": self.client.response_text
+            "text": self.client.response_text,
+            "refused": list(self.client.refused),
         }
         
     async def cancel(self, session_id: str):
