@@ -100,7 +100,8 @@ async def test_event_streaming():
 
 @pytest.mark.asyncio
 async def test_stuck_detection_mock():
-    """Test 3: Simulate stuck scenario and verify continue message is sent."""
+    """Test 3: A window short enough to be silent, and a turn that still answers
+    or is cancelled when its budget is spent."""
     logger.info("Test 3: Stuck detection test (mock)")
     
     # This test is a bit tricky because we can't easily simulate a stuck agent

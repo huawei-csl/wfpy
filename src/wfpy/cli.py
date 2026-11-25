@@ -30,6 +30,22 @@ from wfpy.workflow_identity import (
 logger = logging.getLogger("wfpy")
 
 
+def _is_file(path: Path) -> bool:
+    """Whether *path* is a file, for a path wfpy may not be let to look at.
+
+    Before Python 3.14 ``Path.is_file()`` raises ``PermissionError`` for a
+    path under a directory the user cannot search. The loader looks into
+    directories it has only found beside a workflow (the folders of a project
+    root), and one of them closed to the user holds nothing it could import:
+    that is no file, not an error.
+    """
+
+    try:
+        return path.is_file()
+    except OSError:
+        return False
+
+
 def _discover_project_root(start_dir: Path) -> Path | None:
     """Find nearest ancestor that looks like a project root."""
 
@@ -66,7 +82,7 @@ def _module_search_paths(path: Path) -> list[Path]:
     # still resolve them.
     current = module_dir
     while True:
-        if (current / "src" / "__init__.py").is_file() and current not in paths:
+        if _is_file(current / "src" / "__init__.py") and current not in paths:
             paths.append(current)
         if current.parent == current:
             break
@@ -91,7 +107,10 @@ def _search_path_packages(search_paths: list[Path]) -> dict[str, list[Path]]:
         except OSError:
             continue
         for entry in entries:
-            if not entry.is_dir() or not (entry / "__init__.py").is_file():
+            # A folder the user cannot search is read as no package: looking
+            # into it raised PermissionError before Python 3.14, and no
+            # workflow under this search path could be loaded.
+            if not _is_file(entry / "__init__.py"):
                 continue
             roots = packages.setdefault(entry.name, [])
             if search_path not in roots:
@@ -460,7 +479,7 @@ def cmd_connectors(args: argparse.Namespace) -> None:
     print(f"{'name':<10} {'available':<10} {'source':<11} {'model':<10} {'mode':<12} "
           f"{'stuck':<12} command")
     for r in rows:
-        # The silence window and nudge budget as one column: "300s x5", with a
+        # The silence window and how many are allowed as one column: "300s x5", with a
         # default shown as the default so the table never implies it is unset.
         secs = round((r['stuck_timeout_ms'] or DEFAULT_STUCK_TIMEOUT_MS) / 1000)
         stuck = f"{secs}s x{r['stuck_retries'] or DEFAULT_STUCK_RETRIES}"
@@ -798,18 +817,18 @@ def main() -> None:
         "--acp-stuck-timeout-ms",
         type=int,
         default=None,
-        help="How long an ACP agent may stream nothing before it is nudged with a "
-        "'continue' message (default 300000). Raise it above the longest silent tool "
-        "call the agent makes: a compile or a device run that streams nothing looks "
-        "stuck, and the nudge lands in the session as a second turn. Overrides a "
-        "connector's stuck_timeout_ms",
+        help="How long an ACP agent may stream nothing before the window counts as "
+        "silent (default 300000). --acp-stuck-retries silent windows in a row cancel "
+        "the turn, so the two together have to outlast the longest silent tool call "
+        "the agent makes (a compile or a device run that streams nothing looks "
+        "stuck). Overrides a connector's stuck_timeout_ms",
     )
     run_parser.add_argument(
         "--acp-stuck-retries",
         type=int,
         default=None,
-        help="How many nudges an ACP agent gets before the turn is cancelled "
-        "(default 5). Overrides a connector's stuck_retries",
+        help="How many silent windows in a row an ACP turn may have before it is "
+        "cancelled (default 5). Overrides a connector's stuck_retries",
     )
     run_parser.add_argument(
         "--elicit-socket",
@@ -858,7 +877,8 @@ def main() -> None:
     run_parser.add_argument(
         "--agent-cli-codex-subcommand",
         default=None,
-        help="Codex CLI subcommand inserted before prompt",
+        help="Codex CLI subcommand inserted before prompt (default: exec, the "
+        "non-interactive command, unless the command or its args name it; '' for none)",
     )
     run_parser.add_argument(
         "--agent-cli-codex-native-args",

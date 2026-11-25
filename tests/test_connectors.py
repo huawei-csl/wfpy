@@ -93,7 +93,8 @@ class TestResolving:
 
 
 class TestTheStuckWindow:
-    """How long a connector's agent may stream nothing before it is nudged.
+    """How long a connector's agent may stream nothing before the window counts
+    as silent, and how many such windows cancel its turn.
 
     An agent that streams nothing during a long tool call — OpenCode during a
     long `bash` is the measured case — looks stuck to the detector, so a
@@ -195,7 +196,7 @@ class TestTheRunResolvesTheWindow:
                             conn) == (900, 5)
 
     def test_a_sub_second_window_is_floored_at_one_second(self):
-        """Rounding to 0 would nudge the agent continuously."""
+        """Rounding to 0 would leave no window at all."""
         assert self._policy({"acp_stuck_timeout_ms": 1})[0] == 1
 
     def test_a_nonsense_option_is_named_not_ignored(self):
