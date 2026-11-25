@@ -656,6 +656,11 @@ class ACPClient:
         logger.info(f"Event stream ended for session {session_id}")
 
 
+# How long a cancelled caller waits for its `session/cancel` to be written.
+# A live connection takes it at once.
+CANCEL_NOTICE_SECONDS = 0.5
+
+
 async def run_with_stuck_detection(
     client: ACPClient,
     session_id: str,
@@ -727,6 +732,12 @@ async def run_with_stuck_detection(
             
         logger.error(f"Stuck after {max_retries} retries, cancelling")
         await client.cancel(session_id)
+        answer = _answer_of(prompt_task)
+        if answer is not None:
+            # The turn ended by itself while the cancel was on its way. Its
+            # answer is the firing's: an agent that answered is not stuck.
+            logger.info("The turn ended with an answer while it was being cancelled")
+            return answer
         await _stop_tasks(prompt_task)
         # Name the window as well as the count: an agent that is working
         # but silent (OpenCode during a long `bash` streams nothing) is
@@ -740,6 +751,27 @@ async def run_with_stuck_detection(
             f"longest silent tool call."
         )
                 
+    except asyncio.CancelledError:
+        # The caller was cancelled (an interrupt of the run, a timeout of
+        # its own, a loop that is closing). The turn is the caller's: it is
+        # cancelled with it, on the agent's side too, and both tasks have
+        # ended when the cancellation goes on up. They were left running,
+        # for whoever closes the loop to cancel, and the agent was not told.
+        logger.info("The caller was cancelled, cancelling the turn")
+        telling: list["asyncio.Task[Any]"] = []
+        try:
+            if not prompt_task.done():
+                # Telling the agent is given a moment and no more. When the
+                # whole loop is cancelled, the connection's writer is gone
+                # with it, and a `session/cancel` then waits for a write
+                # that nobody makes: awaited as it is, the cancellation
+                # never went up, and `asyncio.run` did not return.
+                telling.append(asyncio.ensure_future(client.cancel(session_id)))
+                await asyncio.wait(telling, timeout=CANCEL_NOTICE_SECONDS)
+        finally:
+            # Also when a second cancellation cut the moment short.
+            await _stop_tasks(prompt_task, event_task, *telling)
+        raise
     except Exception as e:
         logger.error(f"Error during stuck detection: {e}")
         # Shut both tasks down and read what each ended with, so that the
@@ -747,6 +779,18 @@ async def run_with_stuck_detection(
         # left to report as never retrieved.
         await _stop_tasks(prompt_task, event_task)
         raise
+
+
+def _answer_of(turn: "asyncio.Task[Any]") -> Optional[dict[str, Any]]:
+    """The reply of a turn that ended by itself, None otherwise: while it
+    runs, when it failed, and when it was cancelled (the reply of a turn the
+    agent ended at `session/cancel` has the stop reason `cancelled`)."""
+    if not turn.done() or turn.cancelled() or turn.exception() is not None:
+        return None
+    reply = turn.result()
+    if isinstance(reply, dict) and reply.get("stop_reason") == "cancelled":
+        return None
+    return reply
 
 
 async def _stop_tasks(*tasks: "asyncio.Task[Any]") -> None:

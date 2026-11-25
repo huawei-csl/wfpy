@@ -71,6 +71,20 @@ and Claude Code a turn as well.
   end: behind a parent that keeps it open (an IDE, `something | wfpy run`)
   the firing waited for it, up to its timeout, and what was piped to wfpy
   went into the prompt.
+- An answer that lands while the stuck detector cancels the turn is kept. A
+  turn that ended by itself in the instant its budget was spent, with
+  `session/cancel` on its way, had its answer dropped and the firing failed
+  as "Agent stuck". A turn that the agent ends at the cancel (stop reason
+  `cancelled`) is still a stuck turn.
+- The stuck detector ends its turn when its caller is cancelled: the agent is
+  sent `session/cancel`, and the prompt and the monitor have ended when the
+  cancellation goes on. They were left running until the event loop was
+  closed, and the agent was not told. A run reaches this when it is
+  interrupted (Ctrl-C) during the turn of an agent in a `loop()` body or an
+  `if_()` branch, from Python 3.11 on; a top-level agent fires on a worker
+  thread and is not cancelled so. The agent is given half a second to be
+  told: on Python 3.10, where the whole event loop is cancelled at an
+  interrupt, the notice cannot be written and the run ends without it.
 
 ### Documentation
 - A Codex session is opened in its own CLI with `codex resume <id>` (a
