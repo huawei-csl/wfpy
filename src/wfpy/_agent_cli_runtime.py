@@ -1424,7 +1424,11 @@ def _invoke_agent_codex_cli(
     cli_tools_mode = _normalize_cli_tools_mode(spec, options)
     timeout_s = spec.timeout_ms / 1000
     cmd = _expand_command(str(options.get("agent_cli_codex_command", "")).strip(), "codex")
-    subcommand = str(options.get("agent_cli_codex_subcommand", "")).strip()
+    # `codex exec` runs one prompt and prints the answer; `codex <prompt>` is
+    # the interactive CLI, which stops with "stdin is not a terminal" here.
+    # An option given as "" names no subcommand (a wrapper that takes the
+    # prompt directly).
+    subcommand = str(options.get("agent_cli_codex_subcommand", "exec")).strip()
     if subcommand:
         cmd.append(subcommand)
     extra_args_raw = str(options.get("agent_cli_codex_args", "")).strip()

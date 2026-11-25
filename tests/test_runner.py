@@ -2525,6 +2525,47 @@ class TestAgentTransport:
         assert debug.get("transport") == "codex-cli"
         assert debug.get("cliToolsMode") == "wfpy-none"
 
+    @pytest.mark.parametrize(
+        "options, expected",
+        [
+            ({}, ["codex", "exec"]),
+            ({"agent_cli_codex_subcommand": "review"}, ["codex", "review"]),
+            ({"agent_cli_codex_subcommand": ""}, ["codex"]),
+            ({"agent_cli_codex_command": "codex-wrapper --fast"},
+             ["codex-wrapper", "--fast", "exec"]),
+            ({"agent_cli_codex_args": "--skip-git-repo-check"},
+             ["codex", "exec", "--skip-git-repo-check"]),
+        ],
+    )
+    def test_codex_cli_runs_the_non_interactive_command(self, monkeypatch, options, expected):
+        """`codex <prompt>` is the interactive CLI, which stops with "stdin
+        is not a terminal" under a run. `codex exec <prompt>` runs one prompt,
+        so it is the subcommand unless another, or none, is named."""
+        from wfpy.core import AgentSpec
+
+        seen: list[list[str]] = []
+
+        class _Proc:
+            returncode = 0
+            stdout = '{"outputs": {"out": "ok"}}'
+            stderr = ""
+
+        def _fake_run(cmd, **kwargs):
+            seen.append(list(cmd))
+            return _Proc()
+
+        monkeypatch.setattr("wfpy._agent_cli_runtime.subprocess.run", _fake_run)
+        _, _, err, _ = _invoke_agent_codex_cli(
+            AgentSpec(prompt="x", transport="codex-cli"),
+            payload_text='{"inputs": {}}',
+            verbose=False,
+            effective_prompt="do task",
+            plan_options=options,
+        )
+        assert err is None
+        assert seen[0][:-1] == expected            # the prompt is the last word
+        assert "do task" in seen[0][-1]
+
     def test_invoke_agent_dispatches_to_claude_and_codex(self, monkeypatch):
         from wfpy.core import AgentSpec
         from wfpy.runner import _invoke_agent

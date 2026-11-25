@@ -858,7 +858,8 @@ def main() -> None:
     run_parser.add_argument(
         "--agent-cli-codex-subcommand",
         default=None,
-        help="Codex CLI subcommand inserted before prompt",
+        help="Codex CLI subcommand inserted before prompt (default: exec, the "
+        "non-interactive command; '' for none)",
     )
     run_parser.add_argument(
         "--agent-cli-codex-native-args",

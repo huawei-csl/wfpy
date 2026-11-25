@@ -2966,7 +2966,8 @@ def run(
         agent_cli_claude_native_args: Extra native-tool arguments for Claude when cli_tools_mode=native.
         agent_cli_codex_command: Override executable/command for Codex backend.
         agent_cli_codex_args: Extra arguments appended to Codex backend command.
-        agent_cli_codex_subcommand: Optional Codex subcommand inserted before prompt.
+        agent_cli_codex_subcommand: Codex subcommand inserted before prompt (default: exec, the
+            non-interactive command; "" for none).
         agent_cli_codex_native_args: Extra native-tool arguments for Codex when cli_tools_mode=native.
         skill_hook_auth: Skill hook authorization mode (deny-all/allow-all/policy).
         skill_hook_policy: Path to skill hook policy JSON file.
