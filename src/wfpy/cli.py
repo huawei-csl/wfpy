@@ -479,7 +479,7 @@ def cmd_connectors(args: argparse.Namespace) -> None:
     print(f"{'name':<10} {'available':<10} {'source':<11} {'model':<10} {'mode':<12} "
           f"{'stuck':<12} command")
     for r in rows:
-        # The silence window and nudge budget as one column: "300s x5", with a
+        # The silence window and how many are allowed as one column: "300s x5", with a
         # default shown as the default so the table never implies it is unset.
         secs = round((r['stuck_timeout_ms'] or DEFAULT_STUCK_TIMEOUT_MS) / 1000)
         stuck = f"{secs}s x{r['stuck_retries'] or DEFAULT_STUCK_RETRIES}"
@@ -817,18 +817,18 @@ def main() -> None:
         "--acp-stuck-timeout-ms",
         type=int,
         default=None,
-        help="How long an ACP agent may stream nothing before it is nudged with a "
-        "'continue' message (default 300000). Raise it above the longest silent tool "
-        "call the agent makes: a compile or a device run that streams nothing looks "
-        "stuck, and the nudge lands in the session as a second turn. Overrides a "
-        "connector's stuck_timeout_ms",
+        help="How long an ACP agent may stream nothing before the window counts as "
+        "silent (default 300000). --acp-stuck-retries silent windows in a row cancel "
+        "the turn, so the two together have to outlast the longest silent tool call "
+        "the agent makes (a compile or a device run that streams nothing looks "
+        "stuck). Overrides a connector's stuck_timeout_ms",
     )
     run_parser.add_argument(
         "--acp-stuck-retries",
         type=int,
         default=None,
-        help="How many nudges an ACP agent gets before the turn is cancelled "
-        "(default 5). Overrides a connector's stuck_retries",
+        help="How many silent windows in a row an ACP turn may have before it is "
+        "cancelled (default 5). Overrides a connector's stuck_retries",
     )
     run_parser.add_argument(
         "--elicit-socket",
@@ -877,7 +877,8 @@ def main() -> None:
     run_parser.add_argument(
         "--agent-cli-codex-subcommand",
         default=None,
-        help="Codex CLI subcommand inserted before prompt",
+        help="Codex CLI subcommand inserted before prompt (default: exec, the "
+        "non-interactive command, unless the command or its args name it; '' for none)",
     )
     run_parser.add_argument(
         "--agent-cli-codex-native-args",
