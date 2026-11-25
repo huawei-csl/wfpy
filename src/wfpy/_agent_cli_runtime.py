@@ -935,6 +935,59 @@ def _acp_connector_name(options: dict[str, Any], connector: Any) -> str | None:
     return DEFAULT_CONNECTOR
 
 
+# The CLI transports that pass the agent's `model` on (`--model`). `codex-cli`
+# does not: Codex runs with the model of its own configuration.
+_CLI_TRANSPORTS_TOLD_THE_MODEL = frozenset({"opencode-cli", "claude-cli"})
+
+
+def _agent_start_summary(spec: AgentSpec, options: dict[str, Any]) -> str:
+    """What the start line of a firing says the agent runs through.
+
+    The HTTP transport calls a provider's endpoint with a model, and names
+    both (the default of each where the agent names none: that is what is
+    called). Every other transport hands the firing to an agent that has a
+    model of its own: the line names the transport, for ACP the connector
+    (or the command line given in its place), and a model only where the
+    firing tells the agent one. It said ``provider=openai, model=gpt-4o``
+    for all of them, of an agent that names no model.
+
+    This is one line of a log. It reads what the firing will read and does
+    not fail the firing: a connector that cannot be resolved is named as it
+    was written, and the firing reports it.
+    """
+
+    from wfpy._agent_request_runtime import _resolve_provider_model
+
+    transport = _normalize_agent_transport(spec)
+    if transport == "http":
+        provider, model = _resolve_provider_model(spec)
+        return f"provider={provider}, model={model}"
+    model = str(spec.model or "").strip()
+    if transport == "opencode-acp":
+        parts = ["transport=acp"]
+        command = str(options.get("agent_cli_acp_command", "") or "").strip()
+        named = str(getattr(spec, "connector", "") or options.get("acp_connector") or "").strip()
+        # The connector is resolved with a command line given too: the firing
+        # does so, and tells the agent the connector's model either way.
+        try:
+            connector = _acp_connector(spec, options)
+        except Exception:
+            connector = None
+        if connector is not None and not model:
+            model = str(connector.model or "").strip()
+        if command:
+            parts.append(f"command={shlex.split(command)[0]}")
+        else:
+            parts.append(f"connector={named or _acp_connector_name(options, connector)}")
+    else:
+        parts = [f"transport={transport}"]
+        if transport not in _CLI_TRANSPORTS_TOLD_THE_MODEL:
+            model = ""
+    if model:
+        parts.append(f"model={model}")
+    return ", ".join(parts)
+
+
 def _acp_agent_argv(options: dict[str, Any], spec: AgentSpec | None = None) -> list[str]:
     """The ACP agent's command line: the `agent_cli_acp_command` option
     verbatim (any agent speaking ACP over stdio), else the connector the

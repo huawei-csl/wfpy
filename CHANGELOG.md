@@ -44,6 +44,16 @@ and Claude Code a turn as well.
   argument parser does not take a value that starts with `--` after a space).
 
 ### Fixed
+- The start line of an agent's firing says what the agent runs through. It
+  named a provider and a model for every transport, read as the HTTP
+  transport reads them, so an agent that runs over ACP or through a CLI and
+  names no model was announced with `provider=openai, model=gpt-4o` while
+  Codex, Claude Code or OpenCode answered with the model of its own
+  configuration. The line now names the transport, for ACP the connector (or
+  the command given in its place), and a model only where the firing tells
+  the agent one: `start: transport=acp, connector=codex, timeout=...`. The
+  HTTP transport's line is unchanged. A reader that takes the provider or the
+  model from this line (wfpy's IDE does not) finds them only for HTTP now.
 - An update of an ACP tool call is named as its call. A run event of a tool
   call takes its name from the tool's own name where the agent sends one,
   else from the call's title. Only the tool's own name was kept for the
