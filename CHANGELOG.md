@@ -6,6 +6,19 @@ All notable changes to wfpy are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- The `claude-cli` and `opencode-cli` transports give their agent no stdin.
+  `claude --print` and `opencode run` read a stdin that is not a terminal to
+  its end before they answer, and `claude` adds what it read to the prompt.
+  wfpy passed its own stdin on, so a run started by a parent that keeps the
+  pipe open (an IDE, a supervisor, `something | wfpy run`) waited for that
+  pipe on every firing, up to the agent's timeout, and what was piped to wfpy
+  became part of the question. Measured with a line and a pipe held open for
+  25 s: `claude-cli` answered after 32.2 s, and with the word the line asked
+  for; `opencode-cli` after 35.1 s. Both now answer as with stdin closed
+  (2.5 s and 6.7 s). The `run --help` that wfpy reads from OpenCode is given
+  no stdin either.
+
 ## [1.4.1] — 2026-11-24
 
 One deprecation and the fix that led to it (#94). A port declared without

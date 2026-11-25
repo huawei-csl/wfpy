@@ -95,6 +95,7 @@ def _opencode_run_takes_variant(opencode_argv: tuple[str, ...], env: dict[str, s
         return _VARIANT_FLAG_CACHE[key]
     try:
         result = subprocess.run([*opencode_argv, "run", "--help"], capture_output=True,
+                                stdin=subprocess.DEVNULL,
                                 text=True, timeout=30, check=False, env=env)
     except (OSError, subprocess.SubprocessError):
         return True
@@ -378,8 +379,12 @@ def _run_opencode_process(
     stderr_chunks: list[str] = []
 
     try:
+        # The run's own stdin is not the agent's. `opencode run` waits for a
+        # stdin that is not a terminal to end before it starts: behind a
+        # parent that keeps the pipe open (an IDE) the firing waited with it.
         proc = subprocess.Popen(
             cmd,
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -1295,8 +1300,13 @@ def _invoke_agent_claude_cli(
 
     env = os.environ.copy()
     try:
+        # The run's own stdin is not the agent's. `claude --print` reads a
+        # stdin that is not a terminal to its end and adds it to the prompt:
+        # behind a parent that keeps the pipe open (an IDE) the firing waited
+        # with it, and what was piped to wfpy became part of the question.
         proc = subprocess.run(
             cmd,
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             timeout=timeout_s,
