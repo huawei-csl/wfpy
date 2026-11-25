@@ -8,9 +8,16 @@
    left running, for whoever closes the loop to cancel, and the agent was
    not told: its turn went on with nobody waiting for it.
 
-A wfpy run does not reach the second: a firing has an event loop of its own
-on a worker thread, and nothing cancels it. It is the contract of
-`run_with_stuck_detection` for a caller that has a timeout of its own.
+A wfpy run reaches the second when it is interrupted (SIGINT) during the
+turn of an agent in a `loop()` body or an `if_()` branch: those fire on the
+scheduler's own thread, the main one, where `asyncio.run` turns the
+interrupt into a cancellation from Python 3.11 on. A top-level agent fires
+on a worker thread, with a loop that nothing cancels.
+
+Telling the agent must not hold the cancellation up. When the whole loop is
+cancelled (Python 3.10's `asyncio.run` on its way out, or any loop that is
+closing), the connection's writer is cancelled with the caller, and a
+`session/cancel` awaited as it is waits for a write that nobody makes.
 """
 
 import asyncio
@@ -115,3 +122,52 @@ class TestACallerThatIsCancelled:
         agent = Unreachable()
         left = asyncio.run(self.cancel_the_caller(agent, stuck_timeout=5.0))
         assert left == [] and agent.cancels == 1 and agent.turn_was_cancelled
+
+    def test_a_cancel_that_is_never_written_does_not_hold_the_cancellation_up(
+            self, monkeypatch):
+        """The connection's writer is gone: `cancel` waits for good. The
+        cancellation went up only when the process was killed."""
+        import time
+
+        import wfpy.acp_client as acp_client
+
+        class NobodyWrites(SilentAgent):
+            async def cancel(self, session_id):
+                self.cancels += 1
+                await asyncio.get_running_loop().create_future()
+
+        monkeypatch.setattr(acp_client, "CANCEL_NOTICE_SECONDS", 0.05)
+        agent = NobodyWrites()
+
+        async def bounded():
+            started = time.monotonic()
+            me = asyncio.current_task()         # `wait_for` runs the rest in a task
+            left = await asyncio.wait_for(
+                self.cancel_the_caller(agent, stuck_timeout=5.0), timeout=10)
+            return [t for t in left if t is not me], time.monotonic() - started
+
+        left, took = asyncio.run(bounded())
+        assert left == [] and agent.cancels == 1 and agent.turn_was_cancelled
+        assert took < 5                       # the moment it is given, not a hang
+
+    def test_a_second_cancellation_still_stops_the_turn_and_the_monitor(self):
+        """The caller is cancelled again while the agent is being told."""
+        class SlowToTell(SilentAgent):
+            async def cancel(self, session_id):
+                self.cancels += 1
+                await asyncio.sleep(0.2)
+
+        agent = SlowToTell()
+
+        async def twice():
+            caller = asyncio.create_task(detect(agent, stuck_timeout=5.0))
+            await asyncio.sleep(0.02)
+            caller.cancel()
+            await asyncio.sleep(0.05)
+            caller.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await caller
+            return [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+
+        assert asyncio.run(twice()) == []
+        assert agent.turn_was_cancelled
