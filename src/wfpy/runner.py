@@ -2950,12 +2950,12 @@ def run(
         acp_connector: The ACP connector an agent on the acp transport spawns when it
             names none (default opencode).
         acp_stuck_timeout_ms: How long an ACP agent may stream nothing before the
-            stuck detector nudges it (default 300000). Overrides the connector's
-            own ``stuck_timeout_ms``. Raise it above the longest silent tool call
-            the agent makes — a compile or a device run that streams nothing looks
-            stuck, and the nudge lands in the session as a second turn.
-        acp_stuck_retries: How many nudges before the turn is cancelled with a
-            TimeoutError (default 5). Overrides the connector's ``stuck_retries``.
+            stuck detector counts the window as silent (default 300000). Overrides
+            the connector's own ``stuck_timeout_ms``. Raise it above the longest
+            silent tool call the agent makes — a compile or a device run that
+            streams nothing looks stuck.
+        acp_stuck_retries: How many silent windows before the turn is cancelled with
+            a TimeoutError (default 5). Overrides the connector's ``stuck_retries``.
         elicit_socket: A Unix socket on which the agents' questions are answered.
         agent_cli_opencode_args: Extra arguments appended to OpenCode backend command.
         agent_cli_opencode_agent: OpenCode agent profile passed via ``--agent``.

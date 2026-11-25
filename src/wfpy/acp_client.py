@@ -3,7 +3,7 @@ ACP (Agent Client Protocol) client for opencode integration.
 
 This module provides an async client that communicates with opencode via ACP
 over JSON-RPC on stdio. It includes stuck detection that monitors all events
-and sends "continue" messages if the agent appears stuck.
+and cancels a turn that stays silent for the whole of its budget.
 """
 
 import asyncio
@@ -11,7 +11,7 @@ import json
 import logging
 import os
 import time
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager
 from typing import Any, AsyncGenerator, Callable, Optional
 
 import acp
@@ -28,7 +28,6 @@ logger = logging.getLogger(__name__)
 # / `--acp-stuck-retries`, or a connector's `stuck_timeout_ms` / `stuck_retries`.
 STUCK_TIMEOUT_SECONDS = DEFAULT_STUCK_TIMEOUT_MS // 1000
 MAX_RETRIES = DEFAULT_STUCK_RETRIES
-CONTINUE_MESSAGE = "You appear stuck. Please continue with the task."
 
 
 PermissionHandler = Callable[[str, list[dict[str, str]]], Optional[str]]
@@ -667,25 +666,33 @@ async def run_with_stuck_detection(
     """
     Run opencode with stuck detection.
     
-    Monitors all session/update events. If no event for stuck_timeout seconds,
-    sends a "continue" message. Retries up to max_retries times.
+    Monitors all session/update events. A window of stuck_timeout seconds
+    with no event is a silent window; max_retries of them in a row, with no
+    event between, and the turn is cancelled. An event starts the count
+    again: an agent that goes on after a silence was busy, not stuck.
+
+    Nothing is sent to the agent at a silent window. A "continue" message
+    used to be, as a prompt of its own, and none of the agents measured takes
+    a prompt during a turn as a nudge of that turn: OpenCode 2.4 refuses it
+    ("Session already has an active ACP prompt"), which failed the turn;
+    Codex keeps it and runs it as a turn after the running one; Claude Code
+    ends the running turn at its next tool call and gives the answer under
+    the message, so the turn's own prompt came back with no answer.
     
     Args:
         client: ACPClient instance
         session_id: Session ID
         prompt: Initial prompt
-        stuck_timeout: Seconds without events before considering stuck
-        max_retries: Maximum number of continue attempts
+        stuck_timeout: Seconds without events that make one silent window
+        max_retries: Silent windows in a row before the turn is cancelled
         
     Returns:
         Final response from the agent
         
     Raises:
-        TimeoutError: If stuck after max_retries attempts
+        TimeoutError: If silent for max_retries windows in a row
     """
     logger.info(f"Starting prompt with stuck detection (timeout={stuck_timeout}s, max_retries={max_retries})")
-    
-    retries = 0
     
     # Start the prompt task
     prompt_task = asyncio.create_task(
@@ -694,115 +701,117 @@ async def run_with_stuck_detection(
     
     # Monitor events in parallel
     event_task = asyncio.create_task(
-        _monitor_events(client, session_id, stuck_timeout)
+        _monitor_events(client, session_id, stuck_timeout, max_retries)
     )
     
     try:
-        while True:
-            # Wait for either prompt completion or stuck detection
-            done, pending = await asyncio.wait(
-                [prompt_task, event_task],
-                return_when=asyncio.FIRST_COMPLETED,
-            )
+        # Wait for either prompt completion or stuck detection
+        await asyncio.wait(
+            [prompt_task, event_task],
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        
+        if prompt_task.done():
+            # The turn ended. The monitor is stopped whatever it ended with:
+            # a budget that ran out in the same instant is not a stuck turn.
+            logger.info("Prompt completed successfully")
+            await _stop_tasks(event_task)
+            return prompt_task.result()
             
-            if prompt_task in done:
-                # Prompt completed successfully
-                logger.info("Prompt completed successfully")
-                event_task.cancel()
-                try:
-                    await event_task
-                except asyncio.CancelledError:
-                    pass
-                return prompt_task.result()
-                
-            if event_task in done:
-                # Stuck detected
-                retries += 1
-                logger.warning(f"Stuck detected, retry {retries}/{max_retries}")
-                
-                if retries >= max_retries:
-                    logger.error(f"Stuck after {max_retries} retries, cancelling")
-                    await client.cancel(session_id)
-                    prompt_task.cancel()
-                    try:
-                        await prompt_task
-                    except asyncio.CancelledError:
-                        pass
-                    # Name the window as well as the budget: an agent that is
-                    # working but silent (OpenCode during a long `bash` streams
-                    # nothing) is cancelled by exactly this path, and the fix is
-                    # to widen the window, not to retry more.
-                    raise TimeoutError(
-                        f"Agent stuck after {max_retries} retries "
-                        f"({stuck_timeout}s of silence each). If it was working, "
-                        f"not hung, raise --acp-stuck-timeout-ms above its longest "
-                        f"silent tool call."
-                    )
-                    
-                # Send continue message
-                logger.info(f"Sending continue message: {CONTINUE_MESSAGE}")
-                await client.send_prompt(session_id, CONTINUE_MESSAGE)
-                
-                # Restart event monitoring
-                event_task = asyncio.create_task(
-                    _monitor_events(client, session_id, stuck_timeout)
-                )
+        # The monitor ended. Its exception is read here, or asyncio reports
+        # it as never retrieved; one that is not the spent budget is a fault
+        # of the monitor, and the firing's error.
+        monitor_error = event_task.exception()
+        if monitor_error is not None and not isinstance(monitor_error, asyncio.TimeoutError):
+            raise monitor_error
+            
+        logger.error(f"Stuck after {max_retries} retries, cancelling")
+        await client.cancel(session_id)
+        await _stop_tasks(prompt_task)
+        # Name the window as well as the budget: an agent that is working
+        # but silent (OpenCode during a long `bash` streams nothing) is
+        # cancelled by exactly this path, and the fix is to widen the
+        # window, not to retry more.
+        raise TimeoutError(
+            f"Agent stuck after {max_retries} retries "
+            f"({stuck_timeout}s of silence each). If it was working, "
+            f"not hung, raise --acp-stuck-timeout-ms above its longest "
+            f"silent tool call."
+        )
                 
     except Exception as e:
         logger.error(f"Error during stuck detection: {e}")
-        # Shut both tasks down, then retrieve whatever they ended with and drop
-        # it. Awaiting them bare would be wrong twice over: `event_task` has
-        # usually *already* finished with the bare `asyncio.TimeoutError` that
-        # signalled the stuck turn, and since 3.11 that is `TimeoutError`, so
-        # awaiting it replaced the error above — the caller got an empty
-        # TimeoutError instead of the one naming the budget. Not retrieving it
-        # at all makes asyncio warn about an exception that was never retrieved.
-        prompt_task.cancel()
-        event_task.cancel()
-        for task in (prompt_task, event_task):
-            with suppress(BaseException):
-                await task
+        # Shut both tasks down and read what each ended with, so that the
+        # error above is the one the caller gets and asyncio has no exception
+        # left to report as never retrieved.
+        await _stop_tasks(prompt_task, event_task)
         raise
+
+
+async def _stop_tasks(*tasks: "asyncio.Task[Any]") -> None:
+    """Cancel the tasks and wait until each has ended, whatever it ended with.
+
+    `gather` reads every task's result or exception, a cancellation included,
+    and still passes on a cancellation of the caller itself."""
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
 
 
 async def _monitor_events(
     client: ACPClient,
     session_id: str,
     stuck_timeout: float,
+    max_windows: int = 1,
 ) -> None:
     """
     Monitor events and raise asyncio.TimeoutError if stuck.
     
     This is a helper task that runs in parallel with the prompt.
-    It raises an exception when stuck_timeout is exceeded without any events.
+    It raises when max_windows windows of stuck_timeout seconds have passed
+    in a row with no event. Any event starts the count again.
+
+    The wait is `asyncio.wait`, not `asyncio.wait_for`: before Python 3.12
+    `wait_for` drops a cancellation that arrives while an event is ready. A
+    monitor cancelled at the end of a turn, with the turn's last event just
+    in, then went on, ran a whole window out, and the turn that had ended
+    was reported as stuck.
     """
+    events = client.client.events
+    silent = 0
     while True:
+        getter = asyncio.ensure_future(events.get())
         try:
-            # Wait for next event with timeout
-            event = await asyncio.wait_for(
-                client.client.events.get(),
-                timeout=stuck_timeout
-            )
-            
-            # Filter events for this session
+            ready, _ = await asyncio.wait({getter}, timeout=stuck_timeout)
+        except asyncio.CancelledError:
+            # Task was cancelled (prompt completed)
+            getter.cancel()
+            logger.debug("Event monitor cancelled")
+            raise
+
+        if ready:
+            # Event received: the agent is at work, and an earlier silence
+            # is not held against it
+            silent = 0
+            event = getter.result()
             if event.get("session_id") == session_id:
                 update = event.get("update")
                 event_type = type(update).__name__
                 logger.debug(f"Monitor received event: {event_type}")
-                # Event received, timer reset automatically by wait_for
-                
-        except asyncio.TimeoutError:
-            if getattr(client.client, "permission_pending", 0):
-                # The agent is waiting for a permission answer, and so are we.
-                logger.info("Permission request pending, not stuck")
-                continue
-            # No event within timeout period - we're stuck!
-            logger.warning(f"No events for {stuck_timeout}s - stuck detected")
-            raise
-        except asyncio.CancelledError:
-            # Task was cancelled (prompt completed)
-            logger.debug("Event monitor cancelled")
-            return
+            continue
+
+        getter.cancel()
+        if getattr(client.client, "permission_pending", 0):
+            # The agent is waiting for a permission answer, and so are we.
+            logger.info("Permission request pending, not stuck")
+            continue
+        # No event within timeout period - we're stuck!
+        silent += 1
+        logger.warning(
+            f"No events for {stuck_timeout}s - stuck detected, retry {silent}/{max_windows}"
+        )
+        if silent >= max_windows:
+            raise asyncio.TimeoutError()
 
 
 def _session_cwd(cwd: str) -> str:

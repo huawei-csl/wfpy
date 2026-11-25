@@ -247,18 +247,25 @@ env = { ANTHROPIC_API_KEY = "..." }
 
 ### When the agent goes quiet: the stuck window
 
-An ACP turn is watched by a stuck detector. If no session event arrives for
-`stuck_timeout_ms` (default 300000, five minutes), wfpy sends the agent a
-"You appear stuck. Please continue with the task." message; after
-`stuck_retries` of those (default 5) the turn is cancelled with a
-`TimeoutError`.
+An ACP turn is watched by a stuck detector. A window of `stuck_timeout_ms`
+(default 300000, five minutes) with no session event is a silent window: wfpy
+logs it and goes on waiting. After `stuck_retries` silent windows in a row
+(default 5) the turn is cancelled with a `TimeoutError`. An event starts the
+count again, so an agent that goes on after a silence is not held to it.
+
+Nothing is sent to the agent at a silent window. Up to 1.4.1 wfpy sent it a
+"You appear stuck. Please continue with the task." prompt, and no agent
+measured takes a prompt during a turn as a nudge of that turn. OpenCode 2.4
+refuses it: the turn was given up at its first silent window and the firing
+run again through `opencode run`. Codex runs it as a turn after the running
+one. Claude Code ends the running turn at its next tool call and answers under
+the message, so the turn's own prompt came back with no answer.
 
 The defaults suit an agent that streams as it works. They do **not** suit an
 agent that makes a long tool call which streams nothing. A measured case:
 OpenCode running `sleep 360` in `bash` emits no session event at all for the
-whole command, so the nudge fires at exactly 300s and lands in the session as
-a second, concurrent turn while the first is still working. A compile or a
-device run that is silent for over 25 minutes (5 × 300s) is cancelled outright.
+whole command. A compile or a device run that is silent for over 25 minutes
+(5 × 300s) is cancelled outright.
 
 Note that `@agent(timeout_ms=...)` does not apply to ACP — this is the knob.
 

@@ -1003,7 +1003,8 @@ def _acp_permission_handler(spec: AgentSpec, options: dict[str, Any]) -> Any:
 
 
 def _acp_stuck_policy(options: dict[str, Any], connector: Any) -> tuple[int, int]:
-    """How long the agent may go silent, and how many nudges it gets.
+    """How long the agent may go silent in one window, and how many silent
+    windows its turn may have.
 
     The same precedence as everything else about an ACP agent: the run's
     explicit option wins, then the connector's own setting, then wfpy's
@@ -1011,8 +1012,8 @@ def _acp_stuck_policy(options: dict[str, Any], connector: Any) -> tuple[int, int
 
     An agent that streams nothing while a tool call runs — OpenCode during a
     long ``bash`` is the measured case — looks stuck to the detector. The
-    window has to be longer than the longest silent tool call, or the agent is
-    nudged mid-work and the nudge lands in the session as a second turn.
+    budget (the window times the count) has to be longer than the longest
+    silent tool call, or the turn is cancelled mid-work.
     """
     from wfpy.connectors import DEFAULT_STUCK_RETRIES, DEFAULT_STUCK_TIMEOUT_MS
 
@@ -1034,7 +1035,7 @@ def _acp_stuck_policy(options: dict[str, Any], connector: Any) -> tuple[int, int
 
     timeout_ms = pick("acp_stuck_timeout_ms", "stuck_timeout_ms", DEFAULT_STUCK_TIMEOUT_MS)
     retries = pick("acp_stuck_retries", "stuck_retries", DEFAULT_STUCK_RETRIES)
-    # A sub-second window would nudge continuously; floor it at one second.
+    # A sub-second window would round to none at all; floor it at one second.
     return max(1, round((timeout_ms or 0) / 1000)), int(retries or DEFAULT_STUCK_RETRIES)
 
 
