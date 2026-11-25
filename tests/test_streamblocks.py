@@ -92,9 +92,11 @@ class TestDecorator:
 
 
 class FakeQueue:
-    def __init__(self, items=()):
+    def __init__(self, items=(), id="q"):
         self.items = list(items)
         self.enqueued = []
+        self.id = id
+        self.overlay_ast_path = None
 
     def size(self):
         return len(self.items)
@@ -111,14 +113,17 @@ class FakeActor:
         self.meta = cls._wfpy_meta
         self.name = cls.__name__
         self.fire_count = 0
-        self.in_queues = {name: [FakeQueue([value])] for name, value in inputs.items()}
-        self.out_queues = {name: [FakeQueue()] for name in self.meta.output_ports}
+        self.in_queues = {name: [FakeQueue([value], f"in.{name}")] for name, value in inputs.items()}
+        self.out_queues = {name: [FakeQueue(id=f"{self.name}.{name}")] for name in self.meta.output_ports}
 
 
 class FakePlan:
     def __init__(self, source_dir):
         self.source_dir = source_dir
         self.wf_input_resource_paths = set()
+        self.work_dir = None
+        self.edge_last_token_by_queue_id = {}
+        self.edge_last_token_by_ast_path = {}
 
 
 @pytest.fixture
@@ -241,7 +246,8 @@ class TestInstanceFiring:
                 build = Port[Resource(kind="folder")](direction="out")
 
         actor = FakeActor(Node, {"stimulus": "a.bin"})
-        _step_streamblocks_instance(actor, tmp_path, FakePlan(tmp_path), False)
+        plan = FakePlan(tmp_path)
+        _step_streamblocks_instance(actor, tmp_path, plan, False)
 
         collected = Path(actor.out_queues["build"][0].enqueued[-1])
         # The earlier version looked beside the network for a `calpy-out` folder
@@ -249,6 +255,8 @@ class TestInstanceFiring:
         # directory — which looks exactly like success.
         assert (collected / "llvm.ll").read_text() == "; ir"
         assert (collected / "decoder_native").exists()
+        # The run's overlay draws the edge as having carried the build.
+        assert plan.edge_last_token_by_queue_id == {"Node.build": str(collected)}
 
     def test_it_refuses_to_hand_on_an_empty_build_folder(self, tmp_path, monkeypatch):
         """A silent no-op producing an empty folder is the bug this replaced."""
@@ -509,10 +517,15 @@ class TestNetworkParameter:
 
         actor = FakeActor(Net, {})  # `In` not connected
         actor.instance = Net(network="designs/core.py")
+        # an edge drawn from source: the overlay reads its token by that path
+        actor.out_queues["Out"][0].overlay_ast_path = "flow/net-out"
         plan = FakePlan(tmp_path)
 
         assert _step_streamblocks_instance(actor, tmp_path, plan, verbose=False)
         assert actor.out_queues["Out"][0].enqueued == ["designs/core.py"]
+        # the run's overlay draws the edge as having carried it
+        assert plan.edge_last_token_by_queue_id == {"Net.Out": "designs/core.py"}
+        assert plan.edge_last_token_by_ast_path == {"flow/net-out": "designs/core.py"}
         # with nothing connected, once
         assert not _step_streamblocks_instance(actor, tmp_path, plan, verbose=False)
 

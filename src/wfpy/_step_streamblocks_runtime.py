@@ -25,6 +25,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from ._run_artifacts import _record_edge_token
 from .core import TaskMeta
 from .types import Resource, infer_resource_kind
 
@@ -84,6 +85,9 @@ def _hand_on_network(actor: Any, network: str, plan: Any) -> bool:
     for port_name in meta.output_ports:
         for q in actor.out_queues.get(port_name, []):
             q.enqueue(network)
+            # The overlay's last token, as every other step records it: an
+            # edge it is missing from is drawn as never having carried one.
+            _record_edge_token(plan, q, network)
     actor.fire_count += 1
     return True
 
@@ -177,6 +181,7 @@ def _step_streamblocks_instance(
     for port_name, value in output_values.items():
         for q in actor.out_queues.get(port_name, []):
             q.enqueue(value)
+            _record_edge_token(plan, q, value)
 
     actor.fire_count += 1
     return True
