@@ -1659,10 +1659,13 @@ def _step_agent(
 
     # ── Print agent start info (always, matching TS runtime) ─────────
     output_names = ", ".join(meta.output_ports)
-    provider, model = _resolve_provider_model(agent_spec)
+    # The provider is the HTTP transport's; the usage summary at the end of
+    # the firing reads it for a cost that an OpenRouter reply did not carry.
+    provider, _ = _resolve_provider_model(agent_spec)
+    runs_through = _agent_cli_runtime._agent_start_summary(agent_spec, plan.options)
     print(
         f"[wfpy][agent] {actor.name} ({meta.name}) start: "
-        f"provider={provider}, model={model}, "
+        f"{runs_through}, "
         f"timeout={agent_spec.timeout_ms}ms, outputs=[{output_names}]"
     )
     for port_name_fi, fi_meta in file_inputs.items():

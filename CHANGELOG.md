@@ -6,6 +6,18 @@ All notable changes to wfpy are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- The start line of an agent's firing says what the agent runs through. It
+  named a provider and a model for every transport, read as the HTTP
+  transport reads them, so an agent that runs over ACP or through a CLI and
+  names no model was announced with `provider=openai, model=gpt-4o` while
+  Codex, Claude Code or OpenCode answered with the model of its own
+  configuration. The line now names the transport, for ACP the connector (or
+  the command given in its place), and a model only where the firing tells
+  the agent one: `start: transport=acp, connector=codex, timeout=...`. The
+  HTTP transport's line is unchanged. A reader that takes the provider or the
+  model from this line (wfpy's IDE does not) finds them only for HTTP now.
+
 ## [1.4.1] — 2026-11-24
 
 One deprecation and the fix that led to it (#94). A port declared without
