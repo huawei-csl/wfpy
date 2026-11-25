@@ -204,11 +204,17 @@ start VS Code from a shell, or give the full path in a connectors file (below).
 
 ### Open an agent's session in its own CLI
 
-The `claude` and `opencode` adapters use the agent's own session id as the ACP
-session id. So a session can be continued in the agent's CLI, for example
-`claude --resume <id>` (started from the session's directory) or
-`opencode -s <id>`. Each firing records the session it used, as
-`{"id", "connector", "cwd"}`:
+The `claude`, `opencode` and `codex` adapters use the agent's own session id as
+the ACP session id. So a session can be continued in the agent's CLI:
+
+| Connector | Command |
+|---|---|
+| `claude` | `claude --resume <id>`, started from the session's directory |
+| `opencode` | `opencode -s <id>` |
+| `codex` | `codex resume <id>` |
+
+Codex takes the id as an argument of its `resume` subcommand, not as an option.
+Each firing records the session it used, as `{"id", "connector", "cwd"}`:
 
 - in the `session` field of its `agent.message.end` run event;
 - as `agentSession` on the agent's reply in its chat history.
@@ -217,7 +223,13 @@ The session's directory is where `wfpy` ran. In the wfpy IDE, the chat header
 and each finished turn of a run's agent have a button that opens the session in
 a terminal, and another that copies its id. A connector can give its own
 command as `resume = "... {sessionId}"` in a connectors file. `resume = ""`
-removes it, and then the id is only copied.
+removes it, and then the id is only copied. An IDE that does not know a
+connector's command yet only copies the id too; the connectors file gives it:
+
+```toml
+[connectors.codex]
+resume = "codex resume {sessionId}"
+```
 
 ### Configure connectors
 
@@ -247,39 +259,50 @@ env = { ANTHROPIC_API_KEY = "..." }
 
 ### When the agent goes quiet: the stuck window
 
-An ACP turn is watched by a stuck detector. If no session event arrives for
-`stuck_timeout_ms` (default 300000, five minutes), wfpy sends the agent a
-"You appear stuck. Please continue with the task." message; after
-`stuck_retries` of those (default 5) the turn is cancelled with a
-`TimeoutError`.
+An ACP turn is watched by a stuck detector. A window of `stuck_timeout_ms`
+(default 300000, five minutes) with no session event is a silent window: wfpy
+logs it and goes on waiting. After `stuck_retries` silent windows in a row
+(default 5) the turn is cancelled with a `TimeoutError`. An event starts the
+count again, so an agent that goes on after a silence is not held to it.
 
-The defaults suit an agent that streams as it works. They do **not** suit an
-agent that makes a long tool call which streams nothing. A measured case:
-OpenCode running `sleep 360` in `bash` emits no session event at all for the
-whole command, so the nudge fires at exactly 300s and lands in the session as
-a second, concurrent turn while the first is still working. A compile or a
-device run that is silent for over 25 minutes (5 × 300s) is cancelled outright.
+Nothing is sent to the agent at a silent window. Up to 1.4.1 wfpy sent it a
+"You appear stuck. Please continue with the task." prompt, and no agent
+measured takes a prompt during a turn as a nudge of that turn. OpenCode 2.4
+refuses it: the turn was given up at its first silent window and the firing
+run again through `opencode run`. Codex runs it as a turn after the running
+one. Claude Code ends the running turn at its next tool call and answers under
+the message, so the turn's own prompt came back with no answer.
+
+With the defaults a turn may stay silent for 25 minutes in one stretch
+(5 × 300s). That suits an agent that streams as it works. It does **not** suit
+an agent whose tool call streams nothing for longer. A measured case: OpenCode
+running a command in `bash` emits no session event at all until the command
+ends, so `sleep 360` is one silent window (logged, and the turn goes on), and
+a compile or a device run that is silent for over 25 minutes is cancelled
+outright.
 
 Note that `@agent(timeout_ms=...)` does not apply to ACP — this is the knob.
 
-Widen the window for the agents that need it:
+Widen the budget for the agents that need it. What counts is the two settings
+together, the window times the count:
 
 ```toml
 [connectors.claude]
 command = "claude-agent-acp"
-stuck_timeout_ms = 1800000            # 30 min of silence is fine
-stuck_retries = 3
+stuck_timeout_ms = 600000             # ten minutes a window
+stuck_retries = 6                     # an hour of silence in one stretch
 ```
 
 or per run, which wins over the connector:
 
 ```bash
-wfpy run flow.py --acp-stuck-timeout-ms 1800000 --acp-stuck-retries 3
+wfpy run flow.py --acp-stuck-timeout-ms 600000 --acp-stuck-retries 6
 ```
 
-`wfpy connectors` prints the effective window in its `stuck` column. Set it
-longer than the longest silent tool call the agent makes; the cost of a
-generous window is only that a genuinely hung agent takes longer to notice.
+`wfpy connectors` prints the effective window and count in its `stuck` column.
+Set their product longer than the longest silent tool call the agent makes;
+the cost of a generous budget is only that a genuinely hung agent takes longer
+to notice.
 
 An alternative worth preferring where it fits: keep the long-running work out
 of the agent entirely. A compile or a test run in a plain `@task` with
