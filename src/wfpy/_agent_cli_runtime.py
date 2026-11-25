@@ -1408,6 +1408,31 @@ def _invoke_agent_claude_cli(
     return response_text, firing_messages, None, debug_meta
 
 
+def _codex_untrusted_directory_hint(stderr_text: str) -> str:
+    """What to do about Codex's refusal to run where it is started.
+
+    ``codex exec`` runs only in a git repository or a directory Codex trusts,
+    and says so by the name of its own option. A person who runs Codex
+    through wfpy has no Codex command line to add it to: the hint names
+    wfpy's way to pass it, and the other way out.
+    """
+
+    # The refusal's own sentence, not the option's name alone: Codex names
+    # the option in other errors too ("unexpected argument
+    # '--skip-git-repo-check' found", when it is passed where Codex does not
+    # take it), and the hint would then advise what was just done.
+    if "--skip-git-repo-check was not specified" not in stderr_text:
+        return ""
+    return (
+        " Codex runs only in a git repository or a directory it trusts, and wfpy "
+        "starts it in the directory the run was started from. Start the run "
+        "inside the project's repository, or let Codex run where it is with "
+        "--agent-cli-codex-args=--skip-git-repo-check "
+        '(agent_cli_codex_args="--skip-git-repo-check"). The `=` is needed: '
+        "a value that starts with `--` is not taken after a space."
+    )
+
+
 def _invoke_agent_codex_cli(
     spec: AgentSpec,
     payload_text: str,
@@ -1530,7 +1555,8 @@ def _invoke_agent_codex_cli(
 
     if proc.returncode != 0:
         err_msg = proc.stderr.strip() if proc.stderr.strip() else f"exit code {proc.returncode}"
-        err = RuntimeError(f"Codex CLI invocation failed: {err_msg}")
+        hint = _codex_untrusted_directory_hint(err_msg)
+        err = RuntimeError(f"Codex CLI invocation failed: {err_msg}{hint}")
         return response_text, firing_messages, err, debug_meta
 
     if not response_text.strip():

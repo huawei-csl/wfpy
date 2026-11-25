@@ -44,6 +44,17 @@ and Claude Code a turn as well.
   argument parser does not take a value that starts with `--` after a space).
 
 ### Fixed
+- The `codex-cli` transport says what to do when Codex refuses to run where
+  it is started. `codex exec` runs only in a git repository or a directory
+  Codex trusts; elsewhere it ends at once with "Not inside a trusted
+  directory and --skip-git-repo-check was not specified", which names an
+  option of a command line that a person who runs Codex through wfpy does
+  not write. The firing's error now adds the two ways out: start the run
+  inside the project's repository, or pass the option with
+  `--agent-cli-codex-args=--skip-git-repo-check`
+  (`agent_cli_codex_args="--skip-git-repo-check"`). The `=` is needed there:
+  the argument parser does not take a value that starts with `--` after a
+  space. wfpy does not add the option by itself; the guard is Codex's.
 - An ACP turn that the agent ends with the stop reason `cancelled` is a
   failed firing. Codex ends its turn so when a permission request is refused
   (`--agent-cli-acp-permissions reject`, or a "no" in the IDE), instead of
