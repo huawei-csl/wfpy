@@ -12,11 +12,13 @@ All notable changes to wfpy are documented here. The format follows
   loader looks for `__init__.py` in every folder of the workflow's search
   paths, the project root among them. Before Python 3.14 `Path.is_file()`
   raises `PermissionError` under a folder the user cannot search, so one such
-  folder in the project root stopped `wfpy run`, `wfpy plan` and the sidecar
-  for every workflow below it. The measured case: an empty `/tmp/.git` (left
-  by a tool) makes `/tmp` a project root, and `/tmp` holds systemd's
+  folder in the project root stopped `wfpy run` and `wfpy plan` for every
+  workflow below it. The measured case: an empty `/tmp/.git` (left by a
+  tool) makes `/tmp` a project root, and `/tmp` holds systemd's
   `systemd-private-*` folders. A folder wfpy cannot look into is now read as
-  no package, there and in the search for an ancestor's `src` package.
+  no package, there and in the search for an ancestor's `src` package. A
+  closed `src` folder of an ancestor stopped the same two commands and the
+  sidecar's answer about the Python environment.
 
 ## [1.4.1] — 2026-11-24
 
