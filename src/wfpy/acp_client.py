@@ -11,7 +11,7 @@ import json
 import logging
 import os
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from typing import Any, AsyncGenerator, Callable, Optional
 
 import acp
@@ -727,6 +727,12 @@ async def run_with_stuck_detection(
             
         logger.error(f"Stuck after {max_retries} retries, cancelling")
         await client.cancel(session_id)
+        answer = _answer_of(prompt_task)
+        if answer is not None:
+            # The turn ended by itself while the cancel was on its way. Its
+            # answer is the firing's: an agent that answered is not stuck.
+            logger.info("The turn ended with an answer while it was being cancelled")
+            return answer
         await _stop_tasks(prompt_task)
         # Name the window as well as the count: an agent that is working
         # but silent (OpenCode during a long `bash` streams nothing) is
@@ -740,6 +746,18 @@ async def run_with_stuck_detection(
             f"longest silent tool call."
         )
                 
+    except asyncio.CancelledError:
+        # The caller was cancelled (a timeout of its own, a shutdown). The
+        # turn is the caller's: it is cancelled with it, on the agent's side
+        # too, and both tasks have ended when the cancellation goes on up.
+        # They were left running, for whoever closes the loop to cancel, and
+        # the agent kept a turn nobody waited for.
+        logger.info("The caller was cancelled, cancelling the turn")
+        if not prompt_task.done():
+            with suppress(Exception):
+                await client.cancel(session_id)
+        await _stop_tasks(prompt_task, event_task)
+        raise
     except Exception as e:
         logger.error(f"Error during stuck detection: {e}")
         # Shut both tasks down and read what each ended with, so that the
@@ -747,6 +765,18 @@ async def run_with_stuck_detection(
         # left to report as never retrieved.
         await _stop_tasks(prompt_task, event_task)
         raise
+
+
+def _answer_of(turn: "asyncio.Task[Any]") -> Optional[dict[str, Any]]:
+    """The reply of a turn that ended by itself, None otherwise: while it
+    runs, when it failed, and when it was cancelled (the reply of a turn the
+    agent ended at `session/cancel` has the stop reason `cancelled`)."""
+    if not turn.done() or turn.cancelled() or turn.exception() is not None:
+        return None
+    reply = turn.result()
+    if isinstance(reply, dict) and reply.get("stop_reason") == "cancelled":
+        return None
+    return reply
 
 
 async def _stop_tasks(*tasks: "asyncio.Task[Any]") -> None:

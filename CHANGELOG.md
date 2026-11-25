@@ -71,6 +71,16 @@ and Claude Code a turn as well.
   end: behind a parent that keeps it open (an IDE, `something | wfpy run`)
   the firing waited for it, up to its timeout, and what was piped to wfpy
   went into the prompt.
+- An answer that lands while the stuck detector cancels the turn is kept. A
+  turn that ended by itself in the instant its budget was spent, with
+  `session/cancel` on its way, had its answer dropped and the firing failed
+  as "Agent stuck". A turn that the agent ends at the cancel (stop reason
+  `cancelled`) is still a stuck turn.
+- `run_with_stuck_detection` ends its turn when its caller is cancelled: the
+  agent is sent `session/cancel`, and the prompt and the monitor have ended
+  when the cancellation goes on. They were left running until the event loop
+  was closed. A wfpy run does not cancel a firing so; this is for a caller
+  of the function that has a timeout of its own.
 
 ### Documentation
 - A Codex session is opened in its own CLI with `codex resume <id>` (a
