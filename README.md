@@ -204,11 +204,17 @@ start VS Code from a shell, or give the full path in a connectors file (below).
 
 ### Open an agent's session in its own CLI
 
-The `claude` and `opencode` adapters use the agent's own session id as the ACP
-session id. So a session can be continued in the agent's CLI, for example
-`claude --resume <id>` (started from the session's directory) or
-`opencode -s <id>`. Each firing records the session it used, as
-`{"id", "connector", "cwd"}`:
+The `claude`, `opencode` and `codex` adapters use the agent's own session id as
+the ACP session id. So a session can be continued in the agent's CLI:
+
+| Connector | Command |
+|---|---|
+| `claude` | `claude --resume <id>`, started from the session's directory |
+| `opencode` | `opencode -s <id>` |
+| `codex` | `codex resume <id>` |
+
+Codex takes the id as an argument of its `resume` subcommand, not as an option.
+Each firing records the session it used, as `{"id", "connector", "cwd"}`:
 
 - in the `session` field of its `agent.message.end` run event;
 - as `agentSession` on the agent's reply in its chat history.
@@ -217,7 +223,13 @@ The session's directory is where `wfpy` ran. In the wfpy IDE, the chat header
 and each finished turn of a run's agent have a button that opens the session in
 a terminal, and another that copies its id. A connector can give its own
 command as `resume = "... {sessionId}"` in a connectors file. `resume = ""`
-removes it, and then the id is only copied.
+removes it, and then the id is only copied. An IDE that does not know a
+connector's command yet only copies the id too; the connectors file gives it:
+
+```toml
+[connectors.codex]
+resume = "codex resume {sessionId}"
+```
 
 ### Configure connectors
 
