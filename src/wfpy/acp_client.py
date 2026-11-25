@@ -56,15 +56,19 @@ def allow_once(title: str, options: list[dict[str, str]]) -> Optional[str]:
     return chosen
 
 
-def _tool_call_fields(update: Any, known_name: Optional[str] = None) -> dict[str, Any]:
+def _tool_call_fields(update: Any, known_name: Optional[str] = None,
+                      known_title: Optional[str] = None,
+                      known_kind: Optional[str] = None) -> dict[str, Any]:
     """What a run's observer sees of an ACP tool call: a name, the title,
     the kind, the status, the id. The name is the tool's own where the agent
     sends one (`name`, since schema 1.23), else the title, else the kind.
-    `known_name` is the name the same call was reported under before, for an
-    update that carries no name of the tool's own."""
+    The `known_*` are what earlier events of the same call said, for an
+    update that does not repeat it: the tool's own name, the last title, the
+    last kind. What the update itself says comes first at each step."""
     title = getattr(update, "title", None)
     kind = getattr(update, "kind", None)
-    name = getattr(update, "name", None) or known_name or title or kind or "tool"
+    name = (getattr(update, "name", None) or known_name
+            or title or known_title or kind or known_kind or "tool")
     call_id = getattr(update, "tool_call_id", None) or getattr(update, "toolCallId", None)
     return {"name": str(name), "title": title, "kind": kind,
             "status": getattr(update, "status", None), "id": call_id}
@@ -91,28 +95,33 @@ class SimpleClient:
         # Optional sink for structured, observer-facing events (live streaming to the
         # IDE). Called synchronously and best-effort; must never raise into the run.
         self.on_event = on_event
-        # The tool's own name of each call that gave one, by call id: a later
-        # update of the call need not repeat it, and is still named by it.
+        # What each call has said of itself so far, by call id: the tool's own
+        # name, its last title, its last kind. A later update of the call
+        # need repeat none of them, and is still named as its call.
         self._tool_names: dict[str, str] = {}
+        self._tool_titles: dict[str, str] = {}
+        self._tool_kinds: dict[str, str] = {}
 
     def _tool_call(self, update: Any) -> dict[str, Any]:
         """The observer's fields of a tool call or of an update of one.
 
-        A call keeps the name it was first reported under, the tool's own or
-        the title it came with: an update need repeat neither (Codex's say
-        only how the call ended), and is named as its call. The tool's own
-        name is the call's name from the update that brings it."""
+        An event that brings the tool's own name or a title is named by
+        it, as it always was. One that brings neither, an update that says
+        only how the call ended (Codex's do), is named by what the call said
+        last and no longer as "tool"; the kind is the last resort, after
+        the call's last title."""
         call_id = getattr(update, "tool_call_id", None) or getattr(update, "toolCallId", None)
-        key = str(call_id) if call_id else None
-        known = self._tool_names.get(key) if key else None
-        fields = _tool_call_fields(update, known)
-        own_name = getattr(update, "name", None)
-        first_name = known is None and (
-            getattr(update, "title", None) or getattr(update, "kind", None)
-        )
-        if key and (own_name or first_name):
-            self._tool_names[key] = fields["name"]
-        return fields
+        if not call_id:
+            return _tool_call_fields(update)
+        key = str(call_id)
+        said = (("name", self._tool_names), ("title", self._tool_titles),
+                ("kind", self._tool_kinds))
+        for field, known in said:
+            value = getattr(update, field, None)
+            if value:
+                known[key] = str(value)
+        return _tool_call_fields(update, self._tool_names.get(key),
+                                 self._tool_titles.get(key), self._tool_kinds.get(key))
 
     def _emit(self, event: dict[str, Any]) -> None:
         if self.on_event is None:

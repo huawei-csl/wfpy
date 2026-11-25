@@ -12,11 +12,11 @@ All notable changes to wfpy are documented here. The format follows
   else from the call's title. Only the tool's own name was kept for the
   call's updates, so a call announced by its title alone had an update that
   says only how the call ended reported as `"name": "tool"`. Codex sends such
-  calls (a command that needed a permission, a tool of an MCP server). A call
-  now keeps the name it was first reported under. The tool's own name, when
-  an update brings it, is the call's name from then on, as before. An update
-  that brings another title no longer renames a call that was named by its
-  title; the event's `title` is still what the agent sent.
+  calls (a command that needed a permission, a tool of an MCP server). Such
+  an update is now named by what its call said last: the tool's own name,
+  else the last title, else the last kind. An event that brings the tool's
+  name or a title is named as before. One that brings a kind alone is named
+  by its call's title where there is one, the kind being the last resort.
 
 ## [1.4.1] — 2026-11-24
 

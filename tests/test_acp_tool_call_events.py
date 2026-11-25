@@ -11,7 +11,8 @@ the updates of that call, which need not repeat it.
 
 An update need not repeat the title either. Codex's say only how the call
 ended, and a call that came with a title alone had its update named "tool".
-A call keeps the name it was first reported under.
+Such an update is named by what its call said last. An event that brings
+the tool's name or a title is named as it was before.
 """
 
 import asyncio
@@ -127,23 +128,52 @@ def test_the_tools_own_name_is_the_call_s_from_the_update_that_brings_it():
     ) == [command, "exec_command", "exec_command"]
 
 
-def test_a_call_named_by_its_title_is_not_renamed_by_an_update_s_title():
+def test_an_update_that_brings_a_title_is_named_by_it_as_before():
     """An agent that sends no tool names and retitles a call as it goes
-    ("Terminal", then the command): the title of each event is what it sent,
-    the name is the call's."""
-    seen = []
-    client = SimpleClient(on_event=seen.append)
+    ("Terminal", then the command): each event is named by the title it
+    brings, as on main, and the update that brings none by the last one."""
+    assert _names(
+        SimpleNamespace(sessionUpdate="tool_call", title="Terminal", kind="execute",
+                        status="pending", tool_call_id="t1"),
+        SimpleNamespace(sessionUpdate="tool_call_update", title="sleep 9; echo done",
+                        tool_call_id="t1"),
+        SimpleNamespace(sessionUpdate="tool_call_update", status="completed", tool_call_id="t1"),
+    ) == ["Terminal", "sleep 9; echo done", "sleep 9; echo done"]
 
-    async def drive():
-        await client.session_update("s1", SimpleNamespace(
-            sessionUpdate="tool_call", title="Terminal", kind="execute",
-            status="pending", tool_call_id="t1"))
-        await client.session_update("s1", SimpleNamespace(
-            sessionUpdate="tool_call_update", title="sleep 9; echo done", tool_call_id="t1"))
 
-    asyncio.run(drive())
-    assert [e["name"] for e in seen] == ["Terminal", "Terminal"]
-    assert [e["title"] for e in seen] == ["Terminal", "sleep 9; echo done"]
+def test_a_call_announced_by_its_kind_takes_the_title_that_comes_later():
+    assert _names(
+        SimpleNamespace(sessionUpdate="tool_call", title="", kind="execute",
+                        status="pending", tool_call_id="k1"),
+        SimpleNamespace(sessionUpdate="tool_call_update", title="ls -la",
+                        status="in_progress", tool_call_id="k1"),
+        SimpleNamespace(sessionUpdate="tool_call_update", status="completed", tool_call_id="k1"),
+    ) == ["execute", "ls -la", "ls -la"]
+
+
+def test_a_call_announced_by_its_kind_alone_keeps_it():
+    assert _names(
+        SimpleNamespace(sessionUpdate="tool_call", kind="execute", tool_call_id="k2"),
+        SimpleNamespace(sessionUpdate="tool_call_update", status="completed", tool_call_id="k2"),
+    ) == ["execute", "execute"]
+
+
+def test_an_id_announced_again_is_named_by_the_new_announcement():
+    assert _names(
+        SimpleNamespace(sessionUpdate="tool_call", title="ls", kind="execute", tool_call_id="same"),
+        SimpleNamespace(sessionUpdate="tool_call_update", status="completed",
+                        tool_call_id="same"),
+        SimpleNamespace(sessionUpdate="tool_call", title="pwd", kind="execute",
+                        tool_call_id="same"),
+    ) == ["ls", "ls", "pwd"]
+
+
+def test_an_update_with_a_kind_alone_is_named_by_its_call_s_title():
+    assert _names(
+        SimpleNamespace(sessionUpdate="tool_call", title="ls", tool_call_id="k3"),
+        SimpleNamespace(sessionUpdate="tool_call_update", kind="execute", status="completed",
+                        tool_call_id="k3"),
+    ) == ["ls", "ls"]
 
 
 def test_calls_are_told_apart_by_their_ids():
