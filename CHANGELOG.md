@@ -40,7 +40,8 @@ and Claude Code a turn as well.
   and `--agent-cli-codex-subcommand ""` (`agent_cli_codex_subcommand=""`)
   gives the command without a subcommand. Outside a git repository Codex
   refuses to run ("Not inside a trusted directory") unless
-  `--agent-cli-codex-args "--skip-git-repo-check"` is given.
+  `--agent-cli-codex-args=--skip-git-repo-check` is given (with the `=`: the
+  argument parser does not take a value that starts with `--` after a space).
 
 ### Fixed
 - An ACP turn that the agent ends with the stop reason `cancelled` is a
