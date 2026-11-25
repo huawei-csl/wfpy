@@ -6,6 +6,43 @@ All notable changes to wfpy are documented here. The format follows
 
 ## [Unreleased]
 
+Four faults of an ACP turn, found by running wfpy against the Codex
+connector (`codex-acp` 2.12.0, Codex 0.171), and the `codex-cli` transport,
+which did not run unless `exec` was named as its subcommand. Two of the four
+are not Codex's alone: the stuck detector's "continue" message cost OpenCode
+and Claude Code a turn as well.
+
+### Changed
+- The stuck detector sends the agent nothing. At a silent window it sent a
+  "You appear stuck. Please continue with the task." prompt, and none of the
+  three agents measured takes a prompt during a turn as a nudge of that
+  turn. OpenCode 2.4 refuses it ("Session already has an active ACP
+  prompt"): the turn was given up at its first silent window, and the firing
+  run again from the start through `opencode run`. Codex keeps it and runs it
+  as a turn after the running one, so wfpy waited for a second answer, and
+  for ever when the first turn was hung. Claude Code ends the running turn at
+  its next tool call and answers under the message, so the turn's own prompt
+  came back with no answer. A silent window is now logged and counted, and
+  the turn goes on.
+- `stuck_retries` counts silent windows in a row. It counted them over the
+  whole turn, so a turn of five tool calls, each silent for a little more
+  than one window, was cancelled at the fifth though the agent had worked
+  between them. An event now starts the count again. A turn that stays silent
+  is given up after `stuck_retries` windows of `stuck_timeout_ms`: what has
+  to outlast an agent's longest silent tool call is the two together, not the
+  window alone. The README's example and the two options' help say so.
+- The `codex-cli` transport runs `codex exec <prompt>`. It ran
+  `codex <prompt>`, which is Codex's interactive command and ends with
+  "stdin is not a terminal" under wfpy, unless
+  `--agent-cli-codex-subcommand exec` was given. `exec` is now the default.
+  It is not added to a command line that names it already
+  (`--agent-cli-codex-command "codex exec"`, or args that start with `exec`),
+  and `--agent-cli-codex-subcommand ""` (`agent_cli_codex_subcommand=""`)
+  gives the command without a subcommand. Outside a git repository Codex
+  refuses to run ("Not inside a trusted directory") unless
+  `--agent-cli-codex-args=--skip-git-repo-check` is given (with the `=`: the
+  argument parser does not take a value that starts with `--` after a space).
+
 ### Fixed
 - The `claude-cli` and `opencode-cli` transports give their agent no stdin.
   `claude --print` and `opencode run` read a stdin that is not a terminal to
@@ -18,6 +55,76 @@ All notable changes to wfpy are documented here. The format follows
   for; `opencode-cli` after 35.1 s. Both now answer as with stdin closed
   (2.5 s and 6.7 s). The `run --help` that wfpy reads from OpenCode is given
   no stdin either.
+- A workflow file loads though a folder beside it is closed to the user.
+  To keep a workflow's own packages ahead of ones already imported, the
+  loader looks for `__init__.py` in every folder of the workflow's search
+  paths, the project root among them. Before Python 3.14 `Path.is_file()`
+  raises `PermissionError` under a folder the user cannot search, so one such
+  folder in the project root stopped `wfpy run` and `wfpy plan` for every
+  workflow below it. The measured case: an empty `/tmp/.git` (left by a
+  tool) makes `/tmp` a project root, and `/tmp` holds systemd's
+  `systemd-private-*` folders. A folder wfpy cannot look into is now read as
+  no package, there and in the search for an ancestor's `src` package. A
+  closed `src` folder of an ancestor stopped the same two commands and the
+  sidecar's answer about the Python environment.
+- The `codex-cli` transport says what to do when Codex refuses to run where
+  it is started. `codex exec` runs only in a git repository or a directory
+  Codex trusts; elsewhere it ends at once with "Not inside a trusted
+  directory and --skip-git-repo-check was not specified", which names an
+  option of a command line that a person who runs Codex through wfpy does
+  not write. The firing's error now adds the two ways out: start the run
+  inside the project's repository, or pass the option with
+  `--agent-cli-codex-args=--skip-git-repo-check`
+  (`agent_cli_codex_args="--skip-git-repo-check"`). The `=` is needed there:
+  the argument parser does not take a value that starts with `--` after a
+  space. wfpy does not add the option by itself; the guard is Codex's.
+- An ACP turn that the agent ends with the stop reason `cancelled` is a
+  failed firing. Codex ends its turn so when a permission request is refused
+  (`--agent-cli-acp-permissions reject`, or a "no" in the IDE), instead of
+  going on without the tool call. wfpy took the sentence Codex had written
+  before the request for the firing's reply, and the run ended with exit
+  code 0 and that sentence on the output port. The error now names the agent
+  and the refused request, and the firing is not run again through
+  `opencode run`.
+- A turn's answer is not lost to the stuck detector before Python 3.12.
+  `asyncio.wait_for` drops a cancellation that reaches it while its result is
+  ready: the detector's monitor, cancelled at the end of a turn with the
+  turn's last event just in, went on, waited a whole window, and its
+  `TimeoutError` became the firing's error, with an empty message. The
+  monitor waits with `asyncio.wait`.
+- A stateful agent's later firing does not publish the session's history as
+  its own. An adapter that replays the conversation on `session/load` (Codex
+  does) had every earlier message and tool call published again as
+  `agent.message.delta`, `agent.tool_call` and `agent.tool_call_update`
+  events of the new firing.
+- A monitor of the stuck detector whose window ran out is no longer left with
+  an exception nobody read ("Task exception was never retrieved" in the log
+  of a run that succeeded).
+- A `codex-cli` firing does not pass the run's own stdin on to Codex.
+  `codex exec` appends a piped stdin to its prompt and waits for the pipe to
+  end: behind a parent that keeps it open (an IDE, `something | wfpy run`)
+  the firing waited for it, up to its timeout, and what was piped to wfpy
+  went into the prompt.
+- An answer that lands while the stuck detector cancels the turn is kept. A
+  turn that ended by itself in the instant its budget was spent, with
+  `session/cancel` on its way, had its answer dropped and the firing failed
+  as "Agent stuck". A turn that the agent ends at the cancel (stop reason
+  `cancelled`) is still a stuck turn.
+- The stuck detector ends its turn when its caller is cancelled: the agent is
+  sent `session/cancel`, and the prompt and the monitor have ended when the
+  cancellation goes on. They were left running until the event loop was
+  closed, and the agent was not told. A run reaches this when it is
+  interrupted (Ctrl-C) during the turn of an agent in a `loop()` body or an
+  `if_()` branch, from Python 3.11 on; a top-level agent fires on a worker
+  thread and is not cancelled so. The agent is given half a second to be
+  told: on Python 3.10, where the whole event loop is cancelled at an
+  interrupt, the notice cannot be written and the run ends without it.
+
+### Documentation
+- A Codex session is opened in its own CLI with `codex resume <id>` (a
+  subcommand, not an option). The README names it with the `claude` and
+  `opencode` commands, and the `resume` line of a connectors file that gives
+  it to an IDE which does not know it yet.
 
 ## [1.4.1] — 2026-11-24
 

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import os
+import sys
 import types
 
 import pytest
@@ -158,6 +160,56 @@ inner_workflow = make_workflow()
         nested.mkdir(parents=True)
 
         assert _discover_project_root(nested) == inner
+
+    @pytest.mark.skipif(
+        hasattr(os, "geteuid") and os.geteuid() == 0, reason="root may look into any folder"
+    )
+    def test_a_folder_the_user_cannot_search_stops_no_workflow_from_loading(
+        self, tmp_path, monkeypatch
+    ):
+        """The measured case: a project root with a folder closed to the user
+        beside the workflow. `/tmp` was that root (an empty `/tmp/.git` left
+        by a tool), the folder one of systemd's `/tmp/systemd-private-*`, and
+        every workflow file under `/tmp` failed to load with PermissionError.
+
+        Before Python 3.14 `Path.is_file()` raises under such a folder; from
+        3.14 on it answers False, so it is the older runs this test guards."""
+        (tmp_path / ".git").mkdir()
+        closed = tmp_path / "closed_to_me"
+        closed.mkdir()
+        flows = tmp_path / "flows"
+        flows.mkdir()
+        module_file = flows / "flow_beside_a_closed_folder.py"
+        module_file.write_text("VALUE = 42\n")
+        monkeypatch.setattr(sys, "path", list(sys.path))
+        closed.chmod(0o000)
+        try:
+            assert _discover_project_root(flows) == tmp_path
+            module = _load_module(str(module_file))
+        finally:
+            closed.chmod(0o755)
+            sys.modules.pop("flow_beside_a_closed_folder", None)
+        assert module.VALUE == 42
+
+    @pytest.mark.skipif(
+        hasattr(os, "geteuid") and os.geteuid() == 0, reason="root may look into any folder"
+    )
+    def test_a_closed_src_folder_of_an_ancestor_is_no_package(self, tmp_path):
+        """The search for an ancestor's `src` package looks into every
+        ancestor's `src`, whoever it belongs to."""
+        closed = tmp_path / "src"
+        closed.mkdir()
+        nested = tmp_path / "examples" / "flows"
+        nested.mkdir(parents=True)
+        module_file = nested / "flow.py"
+        module_file.write_text("VALUE = 1\n")
+        closed.chmod(0o000)
+        try:
+            paths = _module_search_paths(module_file)
+        finally:
+            closed.chmod(0o755)
+        assert nested.resolve() in paths
+        assert tmp_path.resolve() not in paths
 
     def test_module_search_paths_include_ancestor_example_root_with_src(self, tmp_path):
         repo = tmp_path / "repo"

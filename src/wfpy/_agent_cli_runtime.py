@@ -1008,7 +1008,8 @@ def _acp_permission_handler(spec: AgentSpec, options: dict[str, Any]) -> Any:
 
 
 def _acp_stuck_policy(options: dict[str, Any], connector: Any) -> tuple[int, int]:
-    """How long the agent may go silent, and how many nudges it gets.
+    """How long the agent may go silent in one window, and how many silent
+    windows in a row its turn may have.
 
     The same precedence as everything else about an ACP agent: the run's
     explicit option wins, then the connector's own setting, then wfpy's
@@ -1016,8 +1017,8 @@ def _acp_stuck_policy(options: dict[str, Any], connector: Any) -> tuple[int, int
 
     An agent that streams nothing while a tool call runs — OpenCode during a
     long ``bash`` is the measured case — looks stuck to the detector. The
-    window has to be longer than the longest silent tool call, or the agent is
-    nudged mid-work and the nudge lands in the session as a second turn.
+    budget (the window times the count) has to be longer than the longest
+    silent tool call, or the turn is cancelled mid-work.
     """
     from wfpy.connectors import DEFAULT_STUCK_RETRIES, DEFAULT_STUCK_TIMEOUT_MS
 
@@ -1039,8 +1040,24 @@ def _acp_stuck_policy(options: dict[str, Any], connector: Any) -> tuple[int, int
 
     timeout_ms = pick("acp_stuck_timeout_ms", "stuck_timeout_ms", DEFAULT_STUCK_TIMEOUT_MS)
     retries = pick("acp_stuck_retries", "stuck_retries", DEFAULT_STUCK_RETRIES)
-    # A sub-second window would nudge continuously; floor it at one second.
+    # A sub-second window would round to none at all; floor it at one second.
     return max(1, round((timeout_ms or 0) / 1000)), int(retries or DEFAULT_STUCK_RETRIES)
+
+
+def _acp_cancelled_turn_message(agent_argv: list[str], refused: list[str]) -> str:
+    """The error of a firing whose ACP turn ended `cancelled`: which agent,
+    and the permission request it ended on when there was one."""
+    head = (
+        f"ACP agent '{shlex.join(agent_argv)}' ended its turn without an answer "
+        "(stop reason 'cancelled')"
+    )
+    if not refused:
+        return head + "."
+    return (
+        f"{head} after a permission request was refused (the last: {refused[-1]}). "
+        "An agent that stops at a refusal instead of going on without the tool "
+        "call ends its turn so (Codex does), and the firing has no output."
+    )
 
 
 def _invoke_agent_opencode_acp(
@@ -1216,6 +1233,22 @@ def _invoke_agent_opencode_acp(
             if session is not None:
                 end_event["session"] = session
             on_event(end_event)
+        if response.get("stop_reason") == "cancelled":
+            # The agent ended the turn before answering. wfpy cancels a turn
+            # only when it gives it up as stuck, and that raises: a cancelled
+            # turn that comes back is the agent's own doing (Codex ends its
+            # turn so when a permission request is refused). What it wrote
+            # until then is no answer, and no other transport is tried: the
+            # refusal would not hold there.
+            refused = [str(title) for title in response.get("refused") or []]
+            debug_meta["acpStopReason"] = "cancelled"
+            debug_meta["acpRefusedPermissions"] = refused
+            debug_meta["opencodeSessionID"] = response.get("session_id", "")
+            message = _acp_cancelled_turn_message(agent_argv, refused)
+            debug_meta["acpError"] = message
+            logger.warning(message)
+            firing_messages = [{"role": "user", "content": payload_text}]
+            return "", firing_messages, RuntimeError(message), debug_meta
         debug_meta["acpSuccess"] = True
         debug_meta["acpApplied"] = response.get("applied")
         debug_meta["acpStopReason"] = response.get("stop_reason")
@@ -1385,6 +1418,31 @@ def _invoke_agent_claude_cli(
     return response_text, firing_messages, None, debug_meta
 
 
+def _codex_untrusted_directory_hint(stderr_text: str) -> str:
+    """What to do about Codex's refusal to run where it is started.
+
+    ``codex exec`` runs only in a git repository or a directory Codex trusts,
+    and says so by the name of its own option. A person who runs Codex
+    through wfpy has no Codex command line to add it to: the hint names
+    wfpy's way to pass it, and the other way out.
+    """
+
+    # The refusal's own sentence, not the option's name alone: Codex names
+    # the option in other errors too ("unexpected argument
+    # '--skip-git-repo-check' found", when it is passed where Codex does not
+    # take it), and the hint would then advise what was just done.
+    if "--skip-git-repo-check was not specified" not in stderr_text:
+        return ""
+    return (
+        " Codex runs only in a git repository or a directory it trusts, and wfpy "
+        "starts it in the directory the run was started from. Start the run "
+        "inside the project's repository, or let Codex run where it is with "
+        "--agent-cli-codex-args=--skip-git-repo-check "
+        '(agent_cli_codex_args="--skip-git-repo-check"). The `=` is needed: '
+        "a value that starts with `--` is not taken after a space."
+    )
+
+
 def _invoke_agent_codex_cli(
     spec: AgentSpec,
     payload_text: str,
@@ -1401,12 +1459,23 @@ def _invoke_agent_codex_cli(
     cli_tools_mode = _normalize_cli_tools_mode(spec, options)
     timeout_s = spec.timeout_ms / 1000
     cmd = _expand_command(str(options.get("agent_cli_codex_command", "")).strip(), "codex")
-    subcommand = str(options.get("agent_cli_codex_subcommand", "")).strip()
+    extra_args_raw = str(options.get("agent_cli_codex_args", "")).strip()
+    extra_args = shlex.split(extra_args_raw) if extra_args_raw else []
+    # `codex exec` runs one prompt and prints the answer; `codex <prompt>` is
+    # the interactive CLI, which stops with "stdin is not a terminal" here.
+    # An option given as "" names no subcommand (a wrapper that takes the
+    # prompt directly). The default is not added to a command line that
+    # names it already: a command of `codex exec`, or args that start with it.
+    subcommand_raw = options.get("agent_cli_codex_subcommand")
+    if subcommand_raw is not None:
+        subcommand = str(subcommand_raw).strip()
+    elif "exec" in cmd[1:] or extra_args[:1] == ["exec"]:
+        subcommand = ""
+    else:
+        subcommand = "exec"
     if subcommand:
         cmd.append(subcommand)
-    extra_args_raw = str(options.get("agent_cli_codex_args", "")).strip()
-    if extra_args_raw:
-        cmd.extend(shlex.split(extra_args_raw))
+    cmd.extend(extra_args)
 
     if cli_tools_mode == "native":
         native_args_raw = str(options.get("agent_cli_codex_native_args", "")).strip()
@@ -1422,8 +1491,12 @@ def _invoke_agent_codex_cli(
 
     env = os.environ.copy()
     try:
+        # The run's own stdin is not Codex's: `codex exec` appends a piped
+        # stdin to the prompt, and waits for it to end. Behind a parent that
+        # keeps the pipe open (an IDE) the firing waited until its timeout.
         proc = subprocess.run(
             cmd,
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             timeout=timeout_s,
@@ -1492,7 +1565,8 @@ def _invoke_agent_codex_cli(
 
     if proc.returncode != 0:
         err_msg = proc.stderr.strip() if proc.stderr.strip() else f"exit code {proc.returncode}"
-        err = RuntimeError(f"Codex CLI invocation failed: {err_msg}")
+        hint = _codex_untrusted_directory_hint(err_msg)
+        err = RuntimeError(f"Codex CLI invocation failed: {err_msg}{hint}")
         return response_text, firing_messages, err, debug_meta
 
     if not response_text.strip():
