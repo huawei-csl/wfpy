@@ -133,9 +133,9 @@ class SimpleClient:
         
         update_type = getattr(update, 'sessionUpdate', 'unknown')
         if self.replaying:
-            # History of a loaded session: a sign of life, and nothing more.
+            # History of a loaded session is none of this firing's: it is not
+            # shown, not kept, and not left for the turn's monitor to count.
             logger.debug(f"Replayed session update: {update_type}")
-            await self.events.put(event)
             return
         logger.info(f"Session update type: {update_type}")
         
@@ -728,15 +728,16 @@ async def run_with_stuck_detection(
         logger.error(f"Stuck after {max_retries} retries, cancelling")
         await client.cancel(session_id)
         await _stop_tasks(prompt_task)
-        # Name the window as well as the budget: an agent that is working
+        # Name the window as well as the count: an agent that is working
         # but silent (OpenCode during a long `bash` streams nothing) is
-        # cancelled by exactly this path, and the fix is to widen the
-        # window, not to retry more.
+        # cancelled by exactly this path, and the fix is a budget (the
+        # window times the count) longer than that tool call.
         raise TimeoutError(
             f"Agent stuck after {max_retries} retries "
-            f"({stuck_timeout}s of silence each). If it was working, "
-            f"not hung, raise --acp-stuck-timeout-ms above its longest "
-            f"silent tool call."
+            f"({stuck_timeout}s of silence each, in a row). If it was "
+            f"working, not hung, raise --acp-stuck-timeout-ms or "
+            f"--acp-stuck-retries: together they have to outlast its "
+            f"longest silent tool call."
         )
                 
     except Exception as e:
@@ -854,8 +855,8 @@ async def invoke_opencode_acp(
     Args:
         prompt: User prompt
         cwd: Working directory for the session
-        stuck_timeout: Seconds without events before considering stuck
-        max_retries: Maximum number of continue attempts
+        stuck_timeout: Seconds without events that make one silent window
+        max_retries: Silent windows in a row before the turn is cancelled
         opencode_command: Path to opencode executable
         env: Optional environment variables to pass to the subprocess
         session_id: Optional existing session ID to continue (if None, creates new session)
@@ -871,7 +872,7 @@ async def invoke_opencode_acp(
         Response from the agent
         
     Raises:
-        TimeoutError: If stuck after max_retries attempts
+        TimeoutError: If silent for max_retries windows in a row
         RuntimeError: If ACP communication fails
     """
     logger.info("Invoking opencode via ACP")

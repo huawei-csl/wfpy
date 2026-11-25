@@ -128,7 +128,8 @@ class TestTheFiring:
         said = str(error)
         assert "ACP agent 'codex-acp' ended its turn without an answer" in said
         assert "(stop reason 'cancelled')" in said
-        assert "after its permission request was refused: printf '%s' heron > made.txt" in said
+        assert "after a permission request was refused" in said
+        assert "(the last: printf '%s' heron > made.txt)" in said
         assert meta["acpStopReason"] == "cancelled"
         assert meta["acpRefusedPermissions"] == ["printf '%s' heron > made.txt"]
         assert "acpSuccess" not in meta
@@ -137,7 +138,7 @@ class TestTheFiring:
         (_, _, error, _), _ = fire(
             monkeypatch,
             {"stop_reason": "cancelled", "text": "", "refused": ["rm a", "rm b"]}, **CODEX)
-        assert "was refused: rm b." in str(error)
+        assert "was refused (the last: rm b)." in str(error)
 
     def test_a_cancelled_turn_with_no_refusal_is_an_error_too(self, monkeypatch):
         (text, _, error, meta), _ = fire(

@@ -2951,11 +2951,12 @@ def run(
             names none (default opencode).
         acp_stuck_timeout_ms: How long an ACP agent may stream nothing before the
             stuck detector counts the window as silent (default 300000). Overrides
-            the connector's own ``stuck_timeout_ms``. Raise it above the longest
-            silent tool call the agent makes — a compile or a device run that
-            streams nothing looks stuck.
-        acp_stuck_retries: How many silent windows before the turn is cancelled with
-            a TimeoutError (default 5). Overrides the connector's ``stuck_retries``.
+            the connector's own ``stuck_timeout_ms``. With ``acp_stuck_retries`` it
+            has to outlast the longest silent tool call the agent makes — a
+            compile or a device run that streams nothing looks stuck.
+        acp_stuck_retries: How many silent windows in a row before the turn is
+            cancelled with a TimeoutError (default 5). Overrides the connector's
+            ``stuck_retries``.
         elicit_socket: A Unix socket on which the agents' questions are answered.
         agent_cli_opencode_args: Extra arguments appended to OpenCode backend command.
         agent_cli_opencode_agent: OpenCode agent profile passed via ``--agent``.
@@ -2967,7 +2968,7 @@ def run(
         agent_cli_codex_command: Override executable/command for Codex backend.
         agent_cli_codex_args: Extra arguments appended to Codex backend command.
         agent_cli_codex_subcommand: Codex subcommand inserted before prompt (default: exec, the
-            non-interactive command; "" for none).
+            non-interactive command, unless the command or its args name it; "" for none).
         agent_cli_codex_native_args: Extra native-tool arguments for Codex when cli_tools_mode=native.
         skill_hook_auth: Skill hook authorization mode (deny-all/allow-all/policy).
         skill_hook_policy: Path to skill hook policy JSON file.

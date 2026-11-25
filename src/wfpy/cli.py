@@ -799,17 +799,17 @@ def main() -> None:
         type=int,
         default=None,
         help="How long an ACP agent may stream nothing before the window counts as "
-        "silent (default 300000). Raise it above the longest silent tool call the "
-        "agent makes: a compile or a device run that streams nothing looks stuck, "
-        "and --acp-stuck-retries such windows cancel the turn. Overrides a "
-        "connector's stuck_timeout_ms",
+        "silent (default 300000). --acp-stuck-retries silent windows in a row cancel "
+        "the turn, so the two together have to outlast the longest silent tool call "
+        "the agent makes (a compile or a device run that streams nothing looks "
+        "stuck). Overrides a connector's stuck_timeout_ms",
     )
     run_parser.add_argument(
         "--acp-stuck-retries",
         type=int,
         default=None,
-        help="How many silent windows an ACP turn may have before it is cancelled "
-        "(default 5). Overrides a connector's stuck_retries",
+        help="How many silent windows in a row an ACP turn may have before it is "
+        "cancelled (default 5). Overrides a connector's stuck_retries",
     )
     run_parser.add_argument(
         "--elicit-socket",
@@ -859,7 +859,7 @@ def main() -> None:
         "--agent-cli-codex-subcommand",
         default=None,
         help="Codex CLI subcommand inserted before prompt (default: exec, the "
-        "non-interactive command; '' for none)",
+        "non-interactive command, unless the command or its args name it; '' for none)",
     )
     run_parser.add_argument(
         "--agent-cli-codex-native-args",

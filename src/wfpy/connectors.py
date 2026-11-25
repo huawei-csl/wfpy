@@ -21,8 +21,8 @@ The file, one table per connector::
     model = "sonnet"                  # a session config option the agent offers
     mode = "acceptEdits"              # a session mode the agent offers
     http_api = false                  # OpenCode's HTTP API beside ACP
-    stuck_timeout_ms = 1800000        # silence that counts as one silent window (default 300000)
-    stuck_retries = 3                 # silent windows before the turn is cancelled (default 5)
+    stuck_timeout_ms = 600000         # silence that makes one silent window (default 300000)
+    stuck_retries = 6                 # such windows in a row that cancel the turn (default 5)
 
     [connectors.opencode]
     command = "/opt/opencode/bin/opencode acp"
@@ -60,7 +60,7 @@ KNOWN: dict[str, dict[str, Any]] = {
 DEFAULT_CONNECTOR = "opencode"
 
 #: How long an ACP agent may stream nothing before the stuck detector counts a
-#: silent window, and how many such windows cancel the turn. They live here, not
+#: silent window, and how many such windows in a row cancel the turn. They live here, not
 #: in ``acp_client``, so ``wfpy connectors`` and the option resolution can name
 #: the defaults without importing the optional ``acp`` package.
 DEFAULT_STUCK_TIMEOUT_MS = 300_000
@@ -80,8 +80,8 @@ class Connector:
     mode: str | None = None           # a session mode, if the agent offers one
     env: dict[str, str] = dataclasses.field(default_factory=dict)
     # How long this agent may go silent before the stuck detector counts a
-    # silent window, and how many such windows cancel the turn. None means
-    # wfpy's default. An agent that streams nothing during a long tool call (a
+    # silent window, and how many such windows in a row cancel the turn. None
+    # means wfpy's default. An agent that streams nothing during a long tool call (a
     # compile, a device run) needs a budget longer than that call, or it is
     # cancelled mid-work.
     stuck_timeout_ms: int | None = None

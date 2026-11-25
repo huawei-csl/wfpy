@@ -155,11 +155,12 @@ class TestTheReplayedHistory:
         assert events == []
         assert client.client.response_text == ""
 
-    def test_it_still_counts_as_a_sign_of_life(self):
-        """A long history takes a while to replay: the stuck detector, which
-        reads this queue, must not take the agent for silent meanwhile."""
+    def test_it_is_not_left_for_the_turn_s_stuck_detector(self):
+        """The detector does not watch a load. What the load replayed would
+        only wait in its queue, and be counted as the new turn's first signs
+        of life."""
         client = self._loaded([])
-        assert client.client.events.qsize() == 2
+        assert client.client.events.qsize() == 0
 
     def test_what_comes_after_the_load_is_this_firing(self):
         events: list[dict] = []

@@ -8,8 +8,9 @@ All notable changes to wfpy are documented here. The format follows
 
 Four faults of an ACP turn, found by running wfpy against the Codex
 connector (`codex-acp` 2.12.0, Codex 0.171), and the `codex-cli` transport,
-which could not run at all. Two of the four are not Codex's alone: the stuck
-detector's "continue" message cost OpenCode and Claude Code a turn as well.
+which did not run unless `exec` was named as its subcommand. Two of the four
+are not Codex's alone: the stuck detector's "continue" message cost OpenCode
+and Claude Code a turn as well.
 
 ### Changed
 - The stuck detector sends the agent nothing. At a silent window it sent a
@@ -26,13 +27,20 @@ detector's "continue" message cost OpenCode and Claude Code a turn as well.
 - `stuck_retries` counts silent windows in a row. It counted them over the
   whole turn, so a turn of five tool calls, each silent for a little more
   than one window, was cancelled at the fifth though the agent had worked
-  between them. An event now starts the count again. A hung turn is given up
-  after the same time as before: `stuck_retries` windows of
-  `stuck_timeout_ms`.
+  between them. An event now starts the count again. A turn that stays silent
+  is given up after `stuck_retries` windows of `stuck_timeout_ms`: what has
+  to outlast an agent's longest silent tool call is the two together, not the
+  window alone. The README's example and the two options' help say so.
 - The `codex-cli` transport runs `codex exec <prompt>`. It ran
   `codex <prompt>`, which is Codex's interactive command and ends with
-  "stdin is not a terminal" under wfpy. `--agent-cli-codex-subcommand ""`
-  (`agent_cli_codex_subcommand=""`) gives the command without a subcommand.
+  "stdin is not a terminal" under wfpy, unless
+  `--agent-cli-codex-subcommand exec` was given. `exec` is now the default.
+  It is not added to a command line that names it already
+  (`--agent-cli-codex-command "codex exec"`, or args that start with `exec`),
+  and `--agent-cli-codex-subcommand ""` (`agent_cli_codex_subcommand=""`)
+  gives the command without a subcommand. Outside a git repository Codex
+  refuses to run ("Not inside a trusted directory") unless
+  `--agent-cli-codex-args "--skip-git-repo-check"` is given.
 
 ### Fixed
 - An ACP turn that the agent ends with the stop reason `cancelled` is a
@@ -52,10 +60,16 @@ detector's "continue" message cost OpenCode and Claude Code a turn as well.
 - A stateful agent's later firing does not publish the session's history as
   its own. An adapter that replays the conversation on `session/load` (Codex
   does) had every earlier message and tool call published again as
-  `agent.message.delta` and `agent.tool.*` events of the new firing.
+  `agent.message.delta`, `agent.tool_call` and `agent.tool_call_update`
+  events of the new firing.
 - A monitor of the stuck detector whose window ran out is no longer left with
   an exception nobody read ("Task exception was never retrieved" in the log
   of a run that succeeded).
+- A `codex-cli` firing does not pass the run's own stdin on to Codex.
+  `codex exec` appends a piped stdin to its prompt and waits for the pipe to
+  end: behind a parent that keeps it open (an IDE, `something | wfpy run`)
+  the firing waited for it, up to its timeout, and what was piped to wfpy
+  went into the prompt.
 
 ### Documentation
 - A Codex session is opened in its own CLI with `codex resume <id>` (a

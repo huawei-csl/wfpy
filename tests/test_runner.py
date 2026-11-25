@@ -2535,6 +2535,12 @@ class TestAgentTransport:
              ["codex-wrapper", "--fast", "exec"]),
             ({"agent_cli_codex_args": "--skip-git-repo-check"},
              ["codex", "exec", "--skip-git-repo-check"]),
+            # A command line that names `exec` already is not given it twice.
+            ({"agent_cli_codex_command": "codex exec"}, ["codex", "exec"]),
+            ({"agent_cli_codex_args": "exec --skip-git-repo-check"},
+             ["codex", "exec", "--skip-git-repo-check"]),
+            ({"agent_cli_codex_command": "codex exec", "agent_cli_codex_subcommand": "resume"},
+             ["codex", "exec", "resume"]),
         ],
     )
     def test_codex_cli_runs_the_non_interactive_command(self, monkeypatch, options, expected):
@@ -2565,6 +2571,45 @@ class TestAgentTransport:
         assert err is None
         assert seen[0][:-1] == expected            # the prompt is the last word
         assert "do task" in seen[0][-1]
+
+    def test_codex_cli_does_not_pass_the_run_s_stdin_on(self, tmp_path):
+        """`codex exec` appends a piped stdin to its prompt, and waits for
+        the pipe to end. With wfpy behind a parent that keeps its stdin open
+        the firing waited for it: measured, 46 s for a turn of 6 s behind
+        `sleep 40 | wfpy run`. The stand-in below reads its stdin to the end
+        as `codex exec` does; the run's stdin is an open pipe with a line in
+        it."""
+        import sys
+
+        from wfpy.core import AgentSpec
+
+        stand_in = tmp_path / "codex_stand_in.py"
+        stand_in.write_text(
+            "import json, sys\n"
+            "piped = sys.stdin.read()\n"
+            "print(json.dumps({'outputs': {'out': 'stdin was: ' + repr(piped)}}))\n"
+        )
+        read_end, write_end = os.pipe()
+        saved = os.dup(0)
+        os.dup2(read_end, 0)
+        try:
+            os.write(write_end, b"not the prompt\n")       # and the pipe stays open
+            response, _, err, _ = _invoke_agent_codex_cli(
+                AgentSpec(prompt="x", transport="codex-cli", timeout_ms=20_000),
+                payload_text='{"inputs": {}}',
+                verbose=False,
+                effective_prompt="do task",
+                plan_options={
+                    "agent_cli_codex_command": f"{sys.executable} {stand_in}",
+                    "agent_cli_codex_subcommand": "",
+                },
+            )
+        finally:
+            os.dup2(saved, 0)
+            for fd in (saved, read_end, write_end):
+                os.close(fd)
+        assert err is None                         # not "Codex CLI timed out"
+        assert "stdin was: ''" in response
 
     def test_invoke_agent_dispatches_to_claude_and_codex(self, monkeypatch):
         from wfpy.core import AgentSpec

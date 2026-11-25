@@ -273,32 +273,36 @@ run again through `opencode run`. Codex runs it as a turn after the running
 one. Claude Code ends the running turn at its next tool call and answers under
 the message, so the turn's own prompt came back with no answer.
 
-The defaults suit an agent that streams as it works. They do **not** suit an
-agent that makes a long tool call which streams nothing. A measured case:
-OpenCode running `sleep 360` in `bash` emits no session event at all for the
-whole command. A compile or a device run that is silent for over 25 minutes
-(5 × 300s) is cancelled outright.
+With the defaults a turn may stay silent for 25 minutes in one stretch
+(5 × 300s). That suits an agent that streams as it works. It does **not** suit
+an agent whose tool call streams nothing for longer. A measured case: OpenCode
+running a command in `bash` emits no session event at all until the command
+ends, so `sleep 360` is one silent window (logged, and the turn goes on), and
+a compile or a device run that is silent for over 25 minutes is cancelled
+outright.
 
 Note that `@agent(timeout_ms=...)` does not apply to ACP — this is the knob.
 
-Widen the window for the agents that need it:
+Widen the budget for the agents that need it. What counts is the two settings
+together, the window times the count:
 
 ```toml
 [connectors.claude]
 command = "claude-agent-acp"
-stuck_timeout_ms = 1800000            # 30 min of silence is fine
-stuck_retries = 3
+stuck_timeout_ms = 600000             # ten minutes a window
+stuck_retries = 6                     # an hour of silence in one stretch
 ```
 
 or per run, which wins over the connector:
 
 ```bash
-wfpy run flow.py --acp-stuck-timeout-ms 1800000 --acp-stuck-retries 3
+wfpy run flow.py --acp-stuck-timeout-ms 600000 --acp-stuck-retries 6
 ```
 
-`wfpy connectors` prints the effective window in its `stuck` column. Set it
-longer than the longest silent tool call the agent makes; the cost of a
-generous window is only that a genuinely hung agent takes longer to notice.
+`wfpy connectors` prints the effective window and count in its `stuck` column.
+Set their product longer than the longest silent tool call the agent makes;
+the cost of a generous budget is only that a genuinely hung agent takes longer
+to notice.
 
 An alternative worth preferring where it fits: keep the long-running work out
 of the agent entirely. A compile or a test run in a plain `@task` with

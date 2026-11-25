@@ -1004,7 +1004,7 @@ def _acp_permission_handler(spec: AgentSpec, options: dict[str, Any]) -> Any:
 
 def _acp_stuck_policy(options: dict[str, Any], connector: Any) -> tuple[int, int]:
     """How long the agent may go silent in one window, and how many silent
-    windows its turn may have.
+    windows in a row its turn may have.
 
     The same precedence as everything else about an ACP agent: the run's
     explicit option wins, then the connector's own setting, then wfpy's
@@ -1049,9 +1049,9 @@ def _acp_cancelled_turn_message(agent_argv: list[str], refused: list[str]) -> st
     if not refused:
         return head + "."
     return (
-        f"{head} after its permission request was refused: {refused[-1]}. "
-        "This agent stops at a refusal instead of going on without the tool call, "
-        "so the firing has no output."
+        f"{head} after a permission request was refused (the last: {refused[-1]}). "
+        "An agent that stops at a refusal instead of going on without the tool "
+        "call ends its turn so (Codex does), and the firing has no output."
     )
 
 
@@ -1424,16 +1424,23 @@ def _invoke_agent_codex_cli(
     cli_tools_mode = _normalize_cli_tools_mode(spec, options)
     timeout_s = spec.timeout_ms / 1000
     cmd = _expand_command(str(options.get("agent_cli_codex_command", "")).strip(), "codex")
+    extra_args_raw = str(options.get("agent_cli_codex_args", "")).strip()
+    extra_args = shlex.split(extra_args_raw) if extra_args_raw else []
     # `codex exec` runs one prompt and prints the answer; `codex <prompt>` is
     # the interactive CLI, which stops with "stdin is not a terminal" here.
     # An option given as "" names no subcommand (a wrapper that takes the
-    # prompt directly).
-    subcommand = str(options.get("agent_cli_codex_subcommand", "exec")).strip()
+    # prompt directly). The default is not added to a command line that
+    # names it already: a command of `codex exec`, or args that start with it.
+    subcommand_raw = options.get("agent_cli_codex_subcommand")
+    if subcommand_raw is not None:
+        subcommand = str(subcommand_raw).strip()
+    elif "exec" in cmd[1:] or extra_args[:1] == ["exec"]:
+        subcommand = ""
+    else:
+        subcommand = "exec"
     if subcommand:
         cmd.append(subcommand)
-    extra_args_raw = str(options.get("agent_cli_codex_args", "")).strip()
-    if extra_args_raw:
-        cmd.extend(shlex.split(extra_args_raw))
+    cmd.extend(extra_args)
 
     if cli_tools_mode == "native":
         native_args_raw = str(options.get("agent_cli_codex_native_args", "")).strip()
@@ -1449,8 +1456,12 @@ def _invoke_agent_codex_cli(
 
     env = os.environ.copy()
     try:
+        # The run's own stdin is not Codex's: `codex exec` appends a piped
+        # stdin to the prompt, and waits for it to end. Behind a parent that
+        # keeps the pipe open (an IDE) the firing waited until its timeout.
         proc = subprocess.run(
             cmd,
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             timeout=timeout_s,

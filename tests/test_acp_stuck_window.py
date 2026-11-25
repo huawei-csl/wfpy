@@ -84,7 +84,7 @@ class Codex(FakeClient):
 
     async def during_the_turn(self, session_id: str):
         await self.turn_over.wait()
-        await asyncio.sleep(0.4)
+        await asyncio.sleep(3.0)
         for _ in range(5):
             await self.client.events.put({"session_id": session_id, "update": None})
         return {"text": "done again", "session_id": session_id}
@@ -112,7 +112,7 @@ class ClaudeCode(FakeClient):
 
     async def during_the_turn(self, session_id: str):
         self.handed_over.set()
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(3.0)
         return {"text": "done", "session_id": session_id}
 
 
@@ -165,7 +165,7 @@ def test_the_turn_of_a_busy_and_silent_agent_comes_back_whole(agent):
     assert result["text"] == "done"
     assert client.prompts == ["go"]
     assert not client.cancelled
-    assert elapsed < 0.9                    # the turn's own time, and no more
+    assert elapsed < 2.0                    # the turn's 0.6 s, not a second turn's 3 s more
     assert unread == []
 
 
@@ -191,7 +191,9 @@ def test_the_budget_is_spent_then_the_turn_is_cancelled():
             client, "s1", "go", stuck_timeout=0.1, max_retries=3))
     assert client.cancelled
     assert client.prompts == ["go"]
-    assert time.monotonic() - started == pytest.approx(0.3, abs=0.25)   # three windows
+    elapsed = time.monotonic() - started
+    assert elapsed >= 0.29                  # three windows, not fewer
+    assert elapsed < 5.0                    # and not the turn's 30 s
 
 
 @pytest.mark.parametrize("agent", [OpenCode2, Codex, ClaudeCode])
@@ -233,17 +235,21 @@ def test_an_event_resets_the_window():
 def test_silences_with_work_between_them_are_not_added_up():
     """Five compiles of six minutes in one turn are five silences, and a
     working agent. The count was kept for the whole turn, so the fifth
-    cancelled it; an event now starts the count again."""
-    client = FakeClient(busy_for=1.5)
+    cancelled it; an event now starts the count again.
+
+    Five silences of one window each, and a budget of three in a row: counted
+    over the turn the third silence cancels it, at 0.8 s. In a row, a cancel
+    needs 0.6 s with no event, and one comes every 0.3 s."""
+    client = FakeClient(busy_for=1.8)
 
     async def drive():
         async def a_sign_of_life_between_silences():
-            for _ in range(4):
+            for _ in range(5):
                 await asyncio.sleep(0.3)        # one silent window of 0.2 s, each time
                 await client.client.events.put({"session_id": "s1", "update": None})
         task = asyncio.create_task(a_sign_of_life_between_silences())
         out = await run_with_stuck_detection(client, "s1", "go",
-                                             stuck_timeout=0.2, max_retries=2)
+                                             stuck_timeout=0.2, max_retries=3)
         task.cancel()
         return out
 
@@ -280,7 +286,9 @@ def test_an_event_that_arrives_with_the_end_of_the_turn_does_not_fail_it():
     turn with that last event just in, was not stopped: it took the event,
     waited a whole window more, and its TimeoutError became the firing's.
     With the default window that is five minutes of nothing after the
-    answer, and then a failed firing with an empty message."""
+    answer, and then a failed firing with an empty message. From Python 3.12
+    on `wait_for` passes the cancellation on, and this test holds on the old
+    monitor too: it is the 3.10 and 3.11 runs that it guards."""
 
     class LastEventWithTheAnswer(FakeClient):
         async def the_turn(self, session_id: str):
@@ -289,9 +297,9 @@ def test_an_event_that_arrives_with_the_end_of_the_turn_does_not_fail_it():
             return {"text": "done", "session_id": session_id}
 
     client = LastEventWithTheAnswer(busy_for=0)
-    result, elapsed, unread = run(client, stuck_timeout=0.5, max_retries=5)
+    result, elapsed, unread = run(client, stuck_timeout=3.0, max_retries=5)
     assert result["text"] == "done"
-    assert elapsed < 0.4                    # not the window after the answer
+    assert elapsed < 1.5                    # not the 3 s window after the answer
     assert not client.cancelled
     assert unread == []
 
