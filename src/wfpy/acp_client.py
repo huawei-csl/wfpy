@@ -60,8 +60,8 @@ def _tool_call_fields(update: Any, known_name: Optional[str] = None) -> dict[str
     """What a run's observer sees of an ACP tool call: a name, the title,
     the kind, the status, the id. The name is the tool's own where the agent
     sends one (`name`, since schema 1.23), else the title, else the kind.
-    `known_name` is the tool's own name from an earlier update of the same
-    call, for an update that carries none."""
+    `known_name` is the name the same call was reported under before, for an
+    update that carries no name of the tool's own."""
     title = getattr(update, "title", None)
     kind = getattr(update, "kind", None)
     name = getattr(update, "name", None) or known_name or title or kind or "tool"
@@ -96,12 +96,23 @@ class SimpleClient:
         self._tool_names: dict[str, str] = {}
 
     def _tool_call(self, update: Any) -> dict[str, Any]:
-        """The observer's fields of a tool call or of an update of one."""
+        """The observer's fields of a tool call or of an update of one.
+
+        A call keeps the name it was first reported under, the tool's own or
+        the title it came with: an update need repeat neither (Codex's say
+        only how the call ended), and is named as its call. The tool's own
+        name is the call's name from the update that brings it."""
         call_id = getattr(update, "tool_call_id", None) or getattr(update, "toolCallId", None)
+        key = str(call_id) if call_id else None
+        known = self._tool_names.get(key) if key else None
+        fields = _tool_call_fields(update, known)
         own_name = getattr(update, "name", None)
-        if call_id and own_name:
-            self._tool_names[str(call_id)] = str(own_name)
-        return _tool_call_fields(update, self._tool_names.get(str(call_id)) if call_id else None)
+        first_name = known is None and (
+            getattr(update, "title", None) or getattr(update, "kind", None)
+        )
+        if key and (own_name or first_name):
+            self._tool_names[key] = fields["name"]
+        return fields
 
     def _emit(self, event: dict[str, Any]) -> None:
         if self.on_event is None:
