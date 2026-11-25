@@ -962,15 +962,17 @@ def _agent_start_summary(spec: AgentSpec, options: dict[str, Any]) -> str:
         parts = ["transport=acp"]
         command = str(options.get("agent_cli_acp_command", "") or "").strip()
         named = str(getattr(spec, "connector", "") or options.get("acp_connector") or "").strip()
+        # The connector is resolved with a command line given too: the firing
+        # does so, and tells the agent the connector's model either way.
+        try:
+            connector = _acp_connector(spec, options)
+        except Exception:
+            connector = None
+        if connector is not None and not model:
+            model = str(connector.model or "").strip()
         if command:
             parts.append(f"command={shlex.split(command)[0]}")
         else:
-            try:
-                connector = _acp_connector(spec, options)
-            except Exception:
-                connector = None
-            if connector is not None and not model:
-                model = str(connector.model or "").strip()
             parts.append(f"connector={named or _acp_connector_name(options, connector)}")
     else:
         parts = [f"transport={transport}"]

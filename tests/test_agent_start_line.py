@@ -80,6 +80,20 @@ class TestAcp:
         assert summary(options, transport="acp", connector="codex") == (
             "transport=acp, command=/opt/agents/my-agent")
 
+    def test_a_command_line_with_the_model_of_the_connector_named(self, monkeypatch, tmp_path):
+        """The command line replaces the connector's command, not its model:
+        the firing tells the agent `sonnet`, and the line says so."""
+        user = tmp_path / "u.toml"
+        user.write_text('[connectors.claude]\nmodel = "sonnet"\n')
+        monkeypatch.setattr(C, "user_file", lambda: user)
+        options = {"agent_cli_acp_command": "/opt/agents/my-agent --acp"}
+        assert summary(options, transport="acp", connector="claude") == (
+            "transport=acp, command=/opt/agents/my-agent, model=sonnet")
+        assert summary(options, transport="acp", connector="claude", model="opus") == (
+            "transport=acp, command=/opt/agents/my-agent, model=opus")
+        assert summary(options, transport="acp", connector="no-such") == (
+            "transport=acp, command=/opt/agents/my-agent")
+
     def test_a_connector_nobody_declared_is_named_as_written(self):
         """The firing fails on it, with the connectors there are. The line
         before it does not."""
