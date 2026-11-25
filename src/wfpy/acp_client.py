@@ -133,6 +133,11 @@ class SimpleClient:
         }
         
         update_type = getattr(update, 'sessionUpdate', 'unknown')
+        if self.replaying:
+            # History of a loaded session: a sign of life, and nothing more.
+            logger.debug(f"Replayed session update: {update_type}")
+            await self.events.put(event)
+            return
         logger.info(f"Session update type: {update_type}")
         
         # Extract text from AgentMessageChunk
@@ -461,9 +466,14 @@ class ACPClient:
             raise RuntimeError("Client not started. Call start() first.")
         cwd = _session_cwd(cwd)
         logger.info(f"Loading session {session_id} (cwd={cwd})")
-        self.last_session_response = await self.connection.load_session(
-            session_id=session_id, cwd=cwd, mcp_servers=_mcp_servers(mcp_servers))
-        # The replayed history is not this firing's answer.
+        # The replayed history is not this firing's: neither its answer nor
+        # what its observers are shown.
+        self.client.replaying = True
+        try:
+            self.last_session_response = await self.connection.load_session(
+                session_id=session_id, cwd=cwd, mcp_servers=_mcp_servers(mcp_servers))
+        finally:
+            self.client.replaying = False
         self.client.response_text = ""
         logger.info(f"Session loaded: {session_id}")
 

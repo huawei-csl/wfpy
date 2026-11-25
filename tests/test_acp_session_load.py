@@ -117,3 +117,72 @@ class TestTheRecordedIdIsHandedOn:
                                       plan_options={}, session_id="s-42", continue_session=False,
                                       output_ports={"Out": types.SimpleNamespace(port_type=str, ext="")})
         assert seen["session_id"] == "s-42"
+
+
+class TestTheReplayedHistory:
+    """`session/load` is answered by the agent replaying the session's
+    history as updates. Measured with Codex: the second firing of a stateful
+    agent published the first firing's sentence, answer and tool call again,
+    ahead of its own, as if it had written them."""
+
+    def _loaded(self, events: list[dict]) -> ACPClient:
+        from wfpy.acp_client import SimpleClient
+
+        inner = SimpleClient(on_event=events.append)
+
+        def chunk(text: str):
+            return types.SimpleNamespace(sessionUpdate="agent_message_chunk",
+                                         content=types.SimpleNamespace(type="text", text=text))
+
+        class Connection:
+            async def load_session(self, session_id, cwd, mcp_servers):
+                await inner.session_update(session_id, chunk('{"outputs": {"Out": "OK"}}'))
+                await inner.session_update(session_id, types.SimpleNamespace(
+                    sessionUpdate="tool_call", title="sleep 8; echo token", kind="execute",
+                    status="completed", tool_call_id="exec-1"))
+                return types.SimpleNamespace(config_options=[], modes=None)
+
+        client = ACPClient(agent_argv=["codex-acp"])
+        client.client = inner
+        client.connection = Connection()
+        asyncio.run(client.load_session("s-1", cwd="/w"))
+        self.chunk = chunk
+        return client
+
+    def test_it_is_not_published_as_this_firing(self):
+        events: list[dict] = []
+        client = self._loaded(events)
+        assert events == []
+        assert client.client.response_text == ""
+
+    def test_it_still_counts_as_a_sign_of_life(self):
+        """A long history takes a while to replay: the stuck detector, which
+        reads this queue, must not take the agent for silent meanwhile."""
+        client = self._loaded([])
+        assert client.client.events.qsize() == 2
+
+    def test_what_comes_after_the_load_is_this_firing(self):
+        events: list[dict] = []
+        client = self._loaded(events)
+        asyncio.run(client.client.session_update("s-1", self.chunk("fresh")))
+        assert events == [{"type": "agent.message.delta", "field": "text", "delta": "fresh"}]
+        assert client.client.response_text == "fresh"
+
+    def test_a_load_that_fails_does_not_leave_the_client_deaf(self):
+        from wfpy.acp_client import SimpleClient
+
+        events: list[dict] = []
+
+        class Connection:
+            async def load_session(self, session_id, cwd, mcp_servers):
+                raise RuntimeError("no such session")
+
+        client = ACPClient(agent_argv=["codex-acp"])
+        client.client = SimpleClient(on_event=events.append)
+        client.connection = Connection()
+        with pytest.raises(RuntimeError):
+            asyncio.run(client.load_session("s-1", cwd="/w"))
+        asyncio.run(client.client.session_update("s-2", types.SimpleNamespace(
+            sessionUpdate="agent_message_chunk",
+            content=types.SimpleNamespace(type="text", text="new"))))
+        assert [e["delta"] for e in events] == ["new"]
