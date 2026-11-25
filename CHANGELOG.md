@@ -6,6 +6,19 @@ All notable changes to wfpy are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- The `codex-cli` transport says what to do when Codex refuses to run where
+  it is started. `codex exec` runs only in a git repository or a directory
+  Codex trusts; elsewhere it ends at once with "Not inside a trusted
+  directory and --skip-git-repo-check was not specified", which names an
+  option of a command line that a person who runs Codex through wfpy does
+  not write. The firing's error now adds the two ways out: start the run
+  inside the project's repository, or pass the option with
+  `--agent-cli-codex-args=--skip-git-repo-check`
+  (`agent_cli_codex_args="--skip-git-repo-check"`). The `=` is needed there:
+  the argument parser does not take a value that starts with `--` after a
+  space. wfpy does not add the option by itself; the guard is Codex's.
+
 ## [1.4.1] — 2026-11-24
 
 One deprecation and the fix that led to it (#94). A port declared without
