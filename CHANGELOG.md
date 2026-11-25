@@ -44,6 +44,16 @@ and Claude Code a turn as well.
   argument parser does not take a value that starts with `--` after a space).
 
 ### Fixed
+- An update of an ACP tool call is named as its call. A run event of a tool
+  call takes its name from the tool's own name where the agent sends one,
+  else from the call's title. Only the tool's own name was kept for the
+  call's updates, so a call announced by its title alone had an update that
+  says only how the call ended reported as `"name": "tool"`. Codex sends such
+  calls (a command that needed a permission, a tool of an MCP server). Such
+  an update is now named by what its call said last: the tool's own name,
+  else the last title, else the last kind. An event that brings the tool's
+  name or a title is named as before. One that brings a kind alone is named
+  by its call's title where there is one, the kind being the last resort.
 - The `claude-cli` and `opencode-cli` transports give their agent no stdin.
   `claude --print` and `opencode run` read a stdin that is not a terminal to
   its end before they answer, and `claude` adds what it read to the prompt.
