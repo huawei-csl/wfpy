@@ -30,6 +30,22 @@ from wfpy.workflow_identity import (
 logger = logging.getLogger("wfpy")
 
 
+def _is_file(path: Path) -> bool:
+    """Whether *path* is a file, for a path wfpy may not be let to look at.
+
+    Before Python 3.14 ``Path.is_file()`` raises ``PermissionError`` for a
+    path under a directory the user cannot search. The loader looks into
+    directories it has only found beside a workflow (the folders of a project
+    root), and one of them closed to the user holds nothing it could import:
+    that is no file, not an error.
+    """
+
+    try:
+        return path.is_file()
+    except OSError:
+        return False
+
+
 def _discover_project_root(start_dir: Path) -> Path | None:
     """Find nearest ancestor that looks like a project root."""
 
@@ -66,7 +82,7 @@ def _module_search_paths(path: Path) -> list[Path]:
     # still resolve them.
     current = module_dir
     while True:
-        if (current / "src" / "__init__.py").is_file() and current not in paths:
+        if _is_file(current / "src" / "__init__.py") and current not in paths:
             paths.append(current)
         if current.parent == current:
             break
@@ -91,7 +107,10 @@ def _search_path_packages(search_paths: list[Path]) -> dict[str, list[Path]]:
         except OSError:
             continue
         for entry in entries:
-            if not entry.is_dir() or not (entry / "__init__.py").is_file():
+            # A folder the user cannot search is read as no package: looking
+            # into it raised PermissionError before Python 3.14, and no
+            # workflow under this search path could be loaded.
+            if not _is_file(entry / "__init__.py"):
                 continue
             roots = packages.setdefault(entry.name, [])
             if search_path not in roots:

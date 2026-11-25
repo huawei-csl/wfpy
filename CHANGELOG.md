@@ -6,6 +6,18 @@ All notable changes to wfpy are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- A workflow file loads though a folder beside it is closed to the user.
+  To keep a workflow's own packages ahead of ones already imported, the
+  loader looks for `__init__.py` in every folder of the workflow's search
+  paths, the project root among them. Before Python 3.14 `Path.is_file()`
+  raises `PermissionError` under a folder the user cannot search, so one such
+  folder in the project root stopped `wfpy run`, `wfpy plan` and the sidecar
+  for every workflow below it. The measured case: an empty `/tmp/.git` (left
+  by a tool) makes `/tmp` a project root, and `/tmp` holds systemd's
+  `systemd-private-*` folders. A folder wfpy cannot look into is now read as
+  no package, there and in the search for an ancestor's `src` package.
+
 ## [1.4.1] — 2026-11-24
 
 One deprecation and the fix that led to it (#94). A port declared without
